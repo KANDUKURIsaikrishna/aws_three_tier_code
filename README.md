@@ -28,9 +28,9 @@ Internet
     │
     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  VPC  170.20.0.0/16  (us-east-1)                            │
+│  VPC  170.20.0.0/16  (us-west-1)                            │
 │                                                             │
-│  Public Subnets (us-east-1a / us-east-1b)                   │
+│  Public Subnets (us-west-1a / us-west-1b)                   │
 │  ┌────────────────────┐  ┌──────────────────┐               │
 │  │  Internet Gateway  │  │  NAT Gateway     │               │
 │  │  ALB (Frontend)    │  │                  │               │
@@ -69,7 +69,7 @@ Internet
 | Backend | Node.js 18, Express, mysql2 |
 | Database | MySQL 8.0 |
 | Container Registry | Amazon ECR |
-| Orchestration | Kubernetes 1.29 on Amazon EKS |
+| Orchestration | Kubernetes 1.31 on Amazon EKS |
 | Infrastructure as Code | Terraform ≥ 1.7, AWS provider ~5.0 |
 | CI/CD | GitHub Actions |
 | Secret Management | AWS Secrets Manager + External Secrets Operator |
@@ -153,7 +153,7 @@ Internet
 | Docker | 24 | Building images |
 | Terraform | 1.7 | Provisioning AWS infrastructure |
 | AWS CLI | 2.x | ECR login, EKS kubeconfig |
-| kubectl | 1.29 | Deploying k8s manifests |
+| kubectl | 1.31 | Deploying k8s manifests |
 | helm | 3.x | Installing cluster add-ons (ESO, cert-manager) |
 
 ---
@@ -211,7 +211,7 @@ The helper script wraps the ECR login, Docker build, and push steps into one com
 ./scripts/build-and-push.sh <AWS_ACCOUNT_ID> <AWS_REGION> <IMAGE_TAG> [REACT_APP_API_URL]
 
 # Example
-./scripts/build-and-push.sh 123456789012 us-east-1 v1.2.0 https://api.bookstore.b17facebook.xyz
+./scripts/build-and-push.sh 123456789012 us-west-1 v1.2.0 https://api.bookstore.b17facebook.xyz
 ```
 
 The script will:
@@ -250,7 +250,7 @@ terraform apply -var="allowed_ssh_cidr=<YOUR_IP>/32"
 | `acm` | ACM TLS certificate for `b17facebook.xyz` and `*.b17facebook.xyz` |
 | `rds` | MySQL 8.0, Multi-AZ, automated backups, deletion protection |
 | `ecr` | Two ECR repositories — `bookstore-frontend` and `bookstore-backend` |
-| `eks` | EKS 1.29 cluster, OIDC provider, managed node group (t3.medium × 2–4) |
+| `eks` | EKS 1.31 cluster, OIDC provider, managed node group (t3.medium × 2–4) |
 | `alb` | Frontend public ALB + backend internal ALB, target groups, HTTPS listeners |
 | `launch_templates` | EC2 launch templates for the classic EC2 ASG path |
 | `asg` | Auto Scaling Groups for EC2-based frontend/backend (legacy path) |
@@ -263,8 +263,8 @@ terraform apply -var="allowed_ssh_cidr=<YOUR_IP>/32"
 terraform output eks_cluster_name       # bookstore-eks
 terraform output eks_cluster_endpoint   # https://...
 terraform output rds_endpoint           # bookstore-db.xxx.rds.amazonaws.com
-terraform output frontend_repo_url      # <account>.dkr.ecr.us-east-1.amazonaws.com/bookstore-frontend
-terraform output backend_repo_url       # <account>.dkr.ecr.us-east-1.amazonaws.com/bookstore-backend
+terraform output frontend_repo_url      # <account>.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
+terraform output backend_repo_url       # <account>.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
 terraform output bastion_ip             # x.x.x.x
 ```
 
@@ -276,7 +276,7 @@ terraform output bastion_ip             # x.x.x.x
 
 ```bash
 # Configure kubectl
-aws eks update-kubeconfig --name bookstore-eks --region us-east-1
+aws eks update-kubeconfig --name bookstore-eks --region us-west-1
 
 # EBS CSI driver (required for gp3 PVCs used by MySQL StatefulSet)
 aws eks create-addon --cluster-name bookstore-eks --addon-name aws-ebs-csi-driver
@@ -303,7 +303,7 @@ helm install ingress-nginx ingress-nginx/ingress-nginx \
 ```bash
 aws secretsmanager create-secret \
   --name /bookstore/db-credentials \
-  --region us-east-1 \
+  --region us-west-1 \
   --secret-string '{"DB_USERNAME":"admin","DB_PASSWORD":"<strong-password>"}'
 ```
 
@@ -326,7 +326,7 @@ kubectl apply -f k8s/ingress/
 The deployment manifests reference `ACCOUNT_ID` as a placeholder:
 ```bash
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-REGION=us-east-1
+REGION=us-west-1
 
 find k8s/backend k8s/frontend -name "*.yaml" \
   -exec sed -i "s/ACCOUNT_ID/${ACCOUNT_ID}/g" {} +

@@ -14,8 +14,8 @@ on:
 #   SEMGREP_APP_TOKEN (optional) — needed only if Semgrep Cloud is used
 
 env:
-  AWS_REGION:    us-east-1
-  ECR_REGISTRY:  ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+  AWS_REGION:    us-west-1
+  ECR_REGISTRY:  ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-west-1.amazonaws.com
   BACKEND_REPO:  bookstore-backend
   FRONTEND_REPO: bookstore-frontend
   EKS_CLUSTER:   bookstore-eks

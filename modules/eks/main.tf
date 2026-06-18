@@ -98,6 +98,7 @@ resource "aws_eks_node_group" "this" {
   subnet_ids      = var.subnet_ids
 
   instance_types = [var.node_instance_type]
+  ami_type       = "AL2_x86_64"
 
   scaling_config {
     min_size     = var.node_min_size
