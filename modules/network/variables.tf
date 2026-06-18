@@ -1,7 +1,7 @@
 variable "region" {
   description = "AWS region"
   type        = string
-  default     = "us-east-1"
+  default     = "us-west-1"
 }
 
 variable "vpc_cidr" {
@@ -18,8 +18,8 @@ variable "public_subnets" {
   }))
 
   # default = [
-  #   { cidr = "170.20.1.0/24", az = "us-east-1a" },
-  #   { cidr = "170.20.2.0/24", az = "us-east-1b" }
+  #   { cidr = "170.20.1.0/24", az = "us-west-1a" },
+  #   { cidr = "170.20.2.0/24", az = "us-west-1c" }
   # ]
 }
 
@@ -30,12 +30,12 @@ variable "private_subnets" {
     az   = string
   }))
   # default = [
-  #   { cidr = "170.20.3.0/24", az = "us-east-1a" },
-  #   { cidr = "170.20.4.0/24", az = "us-east-1b" },
-  #   { cidr = "170.20.5.0/24", az = "us-east-1a" },
-  #   { cidr = "170.20.6.0/24", az = "us-east-1b" },
-  #   { cidr = "170.20.7.0/24", az = "us-east-1a" },
-  #   { cidr = "170.20.8.0/24", az = "us-east-1b" }
+  #   { cidr = "170.20.3.0/24", az = "us-west-1a" },
+  #   { cidr = "170.20.4.0/24", az = "us-west-1c" },
+  #   { cidr = "170.20.5.0/24", az = "us-west-1a" },
+  #   { cidr = "170.20.6.0/24", az = "us-west-1c" },
+  #   { cidr = "170.20.7.0/24", az = "us-west-1a" },
+  #   { cidr = "170.20.8.0/24", az = "us-west-1c" }
   # ]
 }
 # variable "private_subnet_cidrs" {

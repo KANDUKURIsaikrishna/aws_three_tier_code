@@ -32,7 +32,7 @@ Follow every part in order on a first deployment. After initial setup, only Part
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                           AWS — us-east-1                                        │
+│                           AWS — us-west-1                                        │
 │                                                                                 │
 │   ┌─────────────────────────────────────────────────────────────────────────┐   │
 │   │  VPC  170.20.0.0/16                                                     │   │
@@ -40,11 +40,10 @@ Follow every part in order on a first deployment. After initial setup, only Part
 │   │  ┌──────────────────────────────────────────────────────────────────┐   │   │
 │   │  │  Public Subnets                                                  │   │   │
 │   │  │                                                                  │   │   │
-│   │  │   us-east-1a (170.20.1.0/24)    us-east-1b (170.20.2.0/24)      │   │   │
+│   │  │   us-west-1a (170.20.1.0/24)    us-west-1b (170.20.2.0/24)      │   │   │
 │   │  │   ┌──────────────────────┐      ┌──────────────────────┐        │   │   │
 │   │  │   │  Internet Gateway    │      │   NAT Gateway         │        │   │   │
-│   │  │   │  ALB (Frontend)      │      │   (outbound traffic)  │        │   │   │
-│   │  │   │  Bastion Host        │      │                       │        │   │   │
+│   │  │   │  Nginx Ingress NLB   │      │   (outbound traffic)  │        │   │   │
 │   │  │   └──────────────────────┘      └──────────────────────┘        │   │   │
 │   │  └──────────────────────────────────────────────────────────────────┘   │   │
 │   │                        │                        │                        │   │
@@ -52,9 +51,9 @@ Follow every part in order on a first deployment. After initial setup, only Part
 │   │  ┌──────────────────────────────────────────────────────────────────┐   │   │
 │   │  │  Private Subnets — App Tier (EKS)                                │   │   │
 │   │  │                                                                  │   │   │
-│   │  │   us-east-1a (170.20.3.0/24)    us-east-1b (170.20.4.0/24)      │   │   │
+│   │  │   us-west-1a (170.20.3.0/24)    us-west-1b (170.20.4.0/24)      │   │   │
 │   │  │   ┌──────────────────────────────────────────────────────────┐   │   │   │
-│   │  │   │  EKS Managed Node Group  (t3.medium × 2–4 nodes)         │   │   │   │
+│   │  │   │  EKS Managed Node Group  (t3.medium × 1–4 nodes)         │   │   │   │
 │   │  │   │                                                          │   │   │   │
 │   │  │   │  bookstore namespace                                     │   │   │   │
 │   │  │   │  ┌────────────────┐  ┌─────────────────┐                │   │   │   │
@@ -68,13 +67,13 @@ Follow every part in order on a first deployment. After initial setup, only Part
 │   │  │   │                              │ in prod → RDS             │   │   │   │
 │   │  │   └──────────────────────────────────────────────────────────┘   │   │   │
 │   │  │                                  │                                │   │   │
-│   │  │   us-east-1a (170.20.5–6.0/24)  (170.20.6.0/24)                  │   │   │
+│   │  │   us-west-1a (170.20.5–6.0/24)  (170.20.6.0/24)                  │   │   │
 │   │  └──────────────────────────────────────────────────────────────────┘   │   │
 │   │                                                                         │   │
 │   │  ┌──────────────────────────────────────────────────────────────────┐   │   │
 │   │  │  Private Subnets — Data Tier                                     │   │   │
 │   │  │                                                                  │   │   │
-│   │  │   us-east-1a (170.20.7.0/24)    us-east-1b (170.20.8.0/24)      │   │   │
+│   │  │   us-west-1a (170.20.7.0/24)    us-west-1b (170.20.8.0/24)      │   │   │
 │   │  │   ┌──────────────────────────────────────────────────────────┐   │   │   │
 │   │  │   │  RDS MySQL 8.0  (db.t3.micro, Multi-AZ, deletion-protect)│   │   │   │
 │   │  │   └──────────────────────────────────────────────────────────┘   │   │   │
@@ -174,7 +173,7 @@ Install these tools before starting. Minimum versions are required.
 |---|---|---|
 | AWS CLI | 2.x | https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html |
 | Terraform | 1.7 | https://developer.hashicorp.com/terraform/install |
-| kubectl | 1.29 | https://kubernetes.io/docs/tasks/tools/ |
+| kubectl | 1.31 | https://kubernetes.io/docs/tasks/tools/ |
 | helm | 3.x | https://helm.sh/docs/intro/install/ |
 | Docker | 24 | https://docs.docker.com/get-docker/ |
 | git | 2.x | https://git-scm.com/downloads |
@@ -208,7 +207,7 @@ You also need:
 aws configure
 # AWS Access Key ID:     <your-access-key>
 # AWS Secret Access Key: <your-secret-key>
-# Default region name:   us-east-1
+# Default region name:   us-west-1
 # Default output format: json
 ```
 
@@ -228,7 +227,7 @@ Save your account ID — you will need it in several steps:
 
 ```bash
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-export AWS_REGION=us-east-1
+export AWS_REGION=us-west-1
 echo "Account ID: $ACCOUNT_ID"
 ```
 
@@ -351,14 +350,14 @@ Terraform stores its state file in S3 and uses DynamoDB for state locking. These
 
 ```bash
 chmod +x scripts/bootstrap-tf-state.sh
-./scripts/bootstrap-tf-state.sh us-east-1
+./scripts/bootstrap-tf-state.sh us-west-1
 ```
 
 Expected output:
 
 ```
 Account : 123456789012
-Region  : us-east-1
+Region  : us-west-1
 Bucket  : bookstore-terraform-state-123456789012
 Table   : terraform-state-lock
 
@@ -373,7 +372,7 @@ backend block with the values below, then run: terraform init -migrate-state
   backend "s3" {
     bucket         = "bookstore-terraform-state-123456789012"
     key            = "prod/terraform.tfstate"
-    region         = "us-east-1"
+    region         = "us-west-1"
     dynamodb_table = "terraform-state-lock"
     encrypt        = true
   }
@@ -387,7 +386,7 @@ Open `main.tf` and replace the `ACCOUNT_ID` placeholder in the backend block wit
 backend "s3" {
   bucket         = "bookstore-terraform-state-123456789012"   # ← your actual account ID
   key            = "prod/terraform.tfstate"
-  region         = "us-east-1"
+  region         = "us-west-1"
   dynamodb_table = "terraform-state-lock"
   encrypt        = true
 }
@@ -399,7 +398,7 @@ backend "s3" {
 
 ## Part 3 — Provision Infrastructure with Terraform
 
-Terraform provisions the entire AWS foundation: VPC, subnets, security groups, ACM certificate, RDS, ECR repositories, EKS cluster, load balancers, ASGs, bastion, and DNS records.
+Terraform provisions the entire AWS foundation: VPC, subnets, security groups, ACM certificate, RDS, ECR repositories, EKS cluster, and private DNS for RDS.
 
 ### Step 3.1 — Initialise Terraform
 
@@ -419,17 +418,15 @@ Terraform has been successfully initialized!
 ### Step 3.2 — Preview the plan
 
 ```bash
-terraform plan -var="allowed_ssh_cidr=$(curl -s https://checkip.amazonaws.com)/32"
+terraform plan
 ```
 
-`allowed_ssh_cidr` restricts SSH access to the bastion host to your current IP address. Never use `0.0.0.0/0`.
-
-Review the plan output. Terraform will create approximately 60–70 resources. Look for any unexpected `destroy` actions — there should be none on a fresh account.
+Review the plan output. Terraform will create approximately 40–50 resources. Look for any unexpected `destroy` actions — there should be none on a fresh account.
 
 ### Step 3.3 — Apply
 
 ```bash
-terraform apply -var="allowed_ssh_cidr=$(curl -s https://checkip.amazonaws.com)/32"
+terraform apply
 ```
 
 Type `yes` when prompted. This takes **15–25 minutes** because:
@@ -445,22 +442,19 @@ terraform output eks_cluster_name
 # bookstore-eks
 
 terraform output eks_cluster_endpoint
-# https://XXXXXXXX.gr7.us-east-1.eks.amazonaws.com
+# https://XXXXXXXX.gr7.us-west-1.eks.amazonaws.com
 
 terraform output rds_endpoint
-# bookstore-db.xxxxxxxxxxxx.us-east-1.rds.amazonaws.com
+# bookstore-db.xxxxxxxxxxxx.us-west-1.rds.amazonaws.com
 
 terraform output frontend_repo_url
-# 123456789012.dkr.ecr.us-east-1.amazonaws.com/bookstore-frontend
+# 123456789012.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
 
 terraform output backend_repo_url
-# 123456789012.dkr.ecr.us-east-1.amazonaws.com/bookstore-backend
-
-terraform output bastion_ip
-# x.x.x.x
+# 123456789012.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
 
 terraform output eks_oidc_provider_arn
-# arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/XXXX
+# arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-west-1.amazonaws.com/id/XXXX
 ```
 
 ---
@@ -474,13 +468,12 @@ EKS needs four cluster add-ons that are not managed by Terraform: the EBS CSI dr
 ```bash
 aws eks update-kubeconfig \
   --name bookstore-eks \
-  --region us-east-1
+  --region us-west-1
 
 # Verify the cluster is reachable
 kubectl get nodes
 # NAME                          STATUS   ROLES    AGE
 # ip-170-20-3-xx.ec2.internal   Ready    <none>   5m
-# ip-170-20-4-xx.ec2.internal   Ready    <none>   5m
 ```
 
 All nodes should be in `Ready` status before continuing.
@@ -495,13 +488,13 @@ The EBS CSI driver allows Kubernetes to dynamically provision EBS volumes for th
 aws eks create-addon \
   --cluster-name bookstore-eks \
   --addon-name aws-ebs-csi-driver \
-  --region us-east-1
+  --region us-west-1
 
 # Wait for the add-on to be Active
 aws eks wait addon-active \
   --cluster-name bookstore-eks \
   --addon-name aws-ebs-csi-driver \
-  --region us-east-1
+  --region us-west-1
 
 echo "EBS CSI driver is active."
 ```
@@ -637,7 +630,7 @@ aws iam put-role-policy \
         "secretsmanager:GetSecretValue",
         "secretsmanager:DescribeSecret"
       ],
-      "Resource": "arn:aws:secretsmanager:us-east-1:'${ACCOUNT_ID}':secret:/bookstore/db-credentials*"
+      "Resource": "arn:aws:secretsmanager:us-west-1:'${ACCOUNT_ID}':secret:/bookstore/db-credentials*"
     }]
   }'
 
@@ -759,7 +752,7 @@ Choose a strong password. Replace `<strong-password>` below:
 ```bash
 aws secretsmanager create-secret \
   --name /bookstore/db-credentials \
-  --region us-east-1 \
+  --region us-west-1 \
   --description "Bookstore application database credentials" \
   --secret-string '{"DB_USERNAME":"admin","DB_PASSWORD":"<strong-password>"}'
 ```
@@ -813,10 +806,10 @@ Open `k8s/kustomization.yaml` and replace both `ACCOUNT_ID` occurrences in the `
 ```yaml
 images:
   - name: bookstore-backend
-    newName: 123456789012.dkr.ecr.us-east-1.amazonaws.com/bookstore-backend
+    newName: 123456789012.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
     newTag: latest
   - name: bookstore-frontend
-    newName: 123456789012.dkr.ecr.us-east-1.amazonaws.com/bookstore-frontend
+    newName: 123456789012.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
     newTag: latest
 ```
 
@@ -919,7 +912,7 @@ All pods should reach `Running` status within 3–5 minutes.
 ```bash
 kubectl get svc ingress-nginx-controller -n ingress-nginx \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
-# abc123.us-east-1.elb.amazonaws.com
+# abc123.us-west-1.elb.amazonaws.com
 ```
 
 ### Step 10.2 — Create DNS records
@@ -928,8 +921,8 @@ In Route 53 (or your DNS provider), create two **CNAME** records:
 
 | Name | Type | Value |
 |---|---|---|
-| `bookstore.b17facebook.xyz` | CNAME | `abc123.us-east-1.elb.amazonaws.com` |
-| `api.bookstore.b17facebook.xyz` | CNAME | `abc123.us-east-1.elb.amazonaws.com` |
+| `bookstore.b17facebook.xyz` | CNAME | `abc123.us-west-1.elb.amazonaws.com` |
+| `api.bookstore.b17facebook.xyz` | CNAME | `abc123.us-west-1.elb.amazonaws.com` |
 
 With Route 53 you can also use **Alias** records, which are free for AWS resources:
 
@@ -939,8 +932,8 @@ ZONE_ID=$(aws route53 list-hosted-zones-by-name \
   --dns-name b17facebook.xyz \
   --query "HostedZones[0].Id" --output text | sed 's|/hostedzone/||')
 
-# Get the ELB hosted zone ID (us-east-1 ALB zone)
-ELB_HOSTNAME="abc123.us-east-1.elb.amazonaws.com"   # replace with actual value
+# Get the ELB hosted zone ID (us-west-1 ALB zone)
+ELB_HOSTNAME="abc123.us-west-1.elb.amazonaws.com"   # replace with actual value
 
 aws route53 change-resource-record-sets \
   --hosted-zone-id "$ZONE_ID" \
@@ -1096,7 +1089,7 @@ Use this only for hotfixes or pre-release testing. The pipeline does this automa
 chmod +x scripts/build-and-push.sh
 ./scripts/build-and-push.sh \
   123456789012 \
-  us-east-1 \
+  us-west-1 \
   v1.0.0-hotfix \
   https://api.bookstore.b17facebook.xyz
 ```
@@ -1185,14 +1178,12 @@ terraform force-unlock <LOCK_ID>
 | Component | Managed by | Config location |
 |---|---|---|
 | VPC, subnets, NAT, IGW | Terraform | `modules/network/` |
-| Security groups | Terraform | `modules/security/` |
+| Security groups (ALB ingress + RDS) | Terraform | `modules/security/` |
 | ACM certificate | Terraform | `modules/acm/` |
 | RDS MySQL | Terraform | `modules/rds/` |
 | ECR repositories | Terraform | `modules/ecr/` |
 | EKS cluster + nodes | Terraform | `modules/eks/` |
-| ALBs, target groups | Terraform | `modules/load_balancers/` |
-| Route 53 DNS | Terraform | `modules/route53/` |
-| Bastion host | Terraform | `modules/bastion/` |
+| Route 53 (private RDS zone) | Terraform | `modules/route53/` |
 | EBS CSI driver | `aws eks create-addon` | Part 4.2 (one-time) |
 | gp3 StorageClass | `kubectl apply` | Part 4.2 (one-time) |
 | cert-manager | Helm | Part 4.3 (one-time) |

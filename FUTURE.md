@@ -10,8 +10,8 @@ The project is a learning/production-reference implementation of a three-tier ap
 
 | Path | Status | Notes |
 |---|---|---|
-| EC2 / ASG (classic) | Complete | Launch templates, ALBs, Route 53, ACM wired via Terraform |
-| EKS / Kubernetes | Partially complete | Cluster + ECR provisioned; k8s manifests written; add-on installation is manual |
+| EC2 / ASG (classic) | **Removed** | Deprecated in favour of EKS path. Modules still exist in git history. |
+| EKS / Kubernetes | **Active** | Cluster + ECR provisioned; k8s manifests written; node min/desired = 1; add-on installation is manual |
 
 The CI/CD pipeline is DevSecOps-ready: Gitleaks, Semgrep, npm audit, Trivy, tfsec, OIDC auth, and a manual production approval gate are all in place.
 
@@ -22,8 +22,6 @@ The CI/CD pipeline is DevSecOps-ready: Gitleaks, Semgrep, npm audit, Trivy, tfse
 ### Infrastructure
 
 - **Terraform remote state not enabled.** The `backend "s3"` block in `main.tf` is commented out. Before the project is used by more than one person, the S3 bucket and DynamoDB lock table must be created and the block uncommented.
-
-- **Two deployment paths create confusion.** The EC2/ASG path and the EKS path share the same VPC and subnets. Running both simultaneously is not recommended; the project should eventually commit to one path (EKS recommended) and deprecate the other.
 
 - **EKS add-ons are manual.** EBS CSI driver, cert-manager, External Secrets Operator, and Nginx Ingress are not managed by Terraform. They should be brought under IaC (either Terraform Helm provider or a dedicated `modules/eks-addons/` module).
 
@@ -116,13 +114,13 @@ The CI/CD pipeline is DevSecOps-ready: Gitleaks, Semgrep, npm audit, Trivy, tfse
 
 ## Architecture Decision Records (ADRs)
 
-### ADR-001: Two deployment paths (EC2/ASG vs EKS)
+### ADR-001: Committed to EKS path; EC2/ASG path removed
 
-**Context:** The original project targeted EC2 with Launch Templates and ASGs. EKS was added later.
+**Context:** The original project targeted EC2 with Launch Templates and ASGs. EKS was added later and both paths coexisted, causing confusion and extra cost.
 
-**Decision:** Both paths are kept to support learning different deployment models, but the active development focus is the EKS path. The EC2/ASG path will not receive new features.
+**Decision:** EC2/ASG path (launch templates, ASGs, bastion, EC2 IAM role, EC2 ALBs) removed from Terraform. EKS is the sole deployment path. Node group runs min/desired = 1 to stay within vCPU account limits. The Route 53 public zone for ALB DNS records is also removed; public DNS is now managed manually or via ExternalDNS after Nginx Ingress is deployed.
 
-**Consequences:** The shared VPC design means both paths can coexist without IP conflicts, but running them simultaneously doubles compute costs and creates ambiguity about which path serves production traffic.
+**Consequences:** Simpler, cheaper infrastructure. History of EC2 modules preserved in git. Anyone needing the EC2 path must restore those modules from git history.
 
 ---
 
