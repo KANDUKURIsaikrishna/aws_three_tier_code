@@ -8,10 +8,9 @@
 #          -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 #        kubectl wait -n argocd deployment/argocd-server --for=condition=Available --timeout=120s
 #
-#   2. Replace YOUR_ORG/YOUR_REPO with your actual GitHub repository URL.
-#      If the repo is private, register credentials first:
-#        argocd repo add https://github.com/YOUR_ORG/YOUR_REPO \
-#          --username <github-user> --password <pat-or-app-token>
+#   2. If the repo is private, register credentials first:
+#        argocd repo add https://github.com/KANDUKURIsaikrishna/aws_three_tier_code.git \
+#          --username KANDUKURIsaikrishna --password <github-pat>
 #
 #   3. Apply this manifest once:
 #        kubectl apply -f k8s/argocd/application.yaml
@@ -33,7 +32,7 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/YOUR_ORG/YOUR_REPO   # replace with your repo URL
+    repoURL: https://github.com/KANDUKURIsaikrishna/aws_three_tier_code.git
     targetRevision: main
     path: k8s
     kustomize: {}   # ArgoCD runs `kustomize build k8s/` to render manifests
