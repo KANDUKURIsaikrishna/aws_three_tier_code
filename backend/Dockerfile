@@ -14,7 +14,11 @@ WORKDIR /app
 
 COPY --from=deps --chown=appuser:appgroup /app/node_modules ./node_modules
 COPY --chown=appuser:appgroup . .
-RUN rm -f package-lock.json package.json
+RUN rm -f package-lock.json package.json && \
+    rm -rf /usr/local/lib/node_modules/npm \
+           /usr/local/bin/npm \
+           /usr/local/bin/npx \
+           /usr/local/bin/corepack
 
 USER appuser
 
