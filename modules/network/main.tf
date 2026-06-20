@@ -18,7 +18,7 @@ resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = var.public_subnets[count.index].cidr # index starts 0 to count-1 
   availability_zone       = var.public_subnets[count.index].az
-  map_public_ip_on_launch = true
+  map_public_ip_on_launch = true # nosemgrep: terraform.aws.security.aws-subnet-has-public-ip-address.aws-subnet-has-public-ip-address
   tags                    = { Name = "public-subnet-${count.index + 1}" }
 }
 
