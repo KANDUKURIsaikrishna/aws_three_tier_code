@@ -339,6 +339,50 @@ Both replacements applied to all occurrences (backend and frontend scan steps).
 
 ---
 
+## 15. CI — Trivy exits 1 on backend image (Alpine OS package CVEs)
+
+**Error**
+```
+[alpine] Detecting vulnerabilities...  os_version="3.24" pkg_num=18
+[node-pkg] Detecting vulnerabilities...
+Error: Process completed with exit code 1.
+```
+(CVE details are in the SARIF file, not in the log — check GitHub Security → Code scanning)
+
+**Root cause**  
+`node:22-alpine` (and `nginx:1.27-alpine`) may ship OS packages with CRITICAL/HIGH CVEs that have fixes available in the Alpine repository. The Trivy action fails because `exit-code: "1"` and `ignore-unfixed: true` mean any fixable CVE triggers a hard fail. The base image is regularly rebuilt by Docker Hub but can lag slightly behind Alpine's security patch cadence.
+
+**Fix** — add `RUN apk upgrade --no-cache` as the first RUN in each Dockerfile stage to apply all pending Alpine package patches at build time:
+
+`backend/Dockerfile`:
+```dockerfile
+FROM node:22-alpine AS base
+RUN apk upgrade --no-cache
+```
+
+`client/Dockerfile` (both stages):
+```dockerfile
+FROM node:22-alpine AS builder
+RUN apk upgrade --no-cache
+...
+FROM nginx:1.27-alpine AS runner
+RUN apk upgrade --no-cache
+```
+
+**Diagnostic step added** — when Trivy fails, a follow-up step (`if: failure()`) now prints CVE IDs to the CI log via `jq` so you don't need to download the SARIF file:
+```yaml
+- name: Show backend CVEs in CI log (diagnostic on failure)
+  if: failure()
+  run: |
+    [ -f trivy-backend.sarif ] && \
+      jq -r '.runs[].results[] |
+        "[" + (.level | ascii_upcase) + "] " + .ruleId +
+        ": " + (.message.text | split("\n")[0])' \
+      trivy-backend.sarif
+```
+
+---
+
 ## Pending / Not Yet Done
 
 | Item | What's needed |
@@ -349,3 +393,4 @@ Both replacements applied to all occurrences (backend and frontend scan steps).
 | GitHub Secrets | Set `AWS_ACCOUNT_ID`, `AWS_ROLE_ARN`, `API_URL` in repo Settings → Secrets |
 | `deletion_protection` in `main.tf` | Re-enable (`true`) after infrastructure is rebuilt and stable |
 | Manual approval gate for terraform apply | Add `environment: production` to the terraform job so apply requires a reviewer |
+| IDE error "Value 'production' is not valid" in ci-cd.yml | Create the `production` environment in GitHub Settings → Environments — the VS Code extension validates against live repo environments; the YAML is correct |
