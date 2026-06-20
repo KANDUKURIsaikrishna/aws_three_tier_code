@@ -161,3 +161,67 @@ module "eks" {
 output "eks_cluster_name"      { value = module.eks.cluster_name }
 output "eks_cluster_endpoint"  { value = module.eks.cluster_endpoint }
 output "eks_oidc_provider_arn" { value = module.eks.oidc_provider_arn }
+
+# ── GitHub Actions OIDC Role ───────────────────────────────────────────────
+# Lets GitHub Actions assume an AWS role via OIDC — no static AWS keys.
+# Prerequisites (one-time, outside Terraform):
+#   aws iam create-open-id-connect-provider \
+#     --url https://token.actions.githubusercontent.com \
+#     --client-id-list sts.amazonaws.com \
+#     --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+
+data "aws_caller_identity" "current" {}
+
+resource "aws_iam_role" "github_oidc" {
+  name = "bookstore-github-oidc-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = {
+        Federated = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"
+      }
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = "repo:KANDUKURIsaikrishna/aws_three_tier_code:*"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "github_oidc_ecr" {
+  name = "ecr-push"
+  role = aws_iam_role.github_oidc.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload",
+          "ecr:PutImage",
+        ]
+        Resource = "arn:aws:ecr:us-west-1:${data.aws_caller_identity.current.account_id}:repository/bookstore-*"
+      },
+    ]
+  })
+}
+
+output "github_oidc_role_arn" { value = aws_iam_role.github_oidc.arn }
