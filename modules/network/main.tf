@@ -13,12 +13,13 @@ resource "aws_vpc" "main" {
 }
 
 # Subnets
+# nosemgrep: terraform.aws.security.aws-subnet-has-public-ip-address.aws-subnet-has-public-ip-address
 resource "aws_subnet" "public" {
-  count                   = length(var.public_subnets)  # count value = 2 
+  count                   = length(var.public_subnets)  # count value = 2
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.public_subnets[count.index].cidr # index starts 0 to count-1 
+  cidr_block              = var.public_subnets[count.index].cidr # index starts 0 to count-1
   availability_zone       = var.public_subnets[count.index].az
-  map_public_ip_on_launch = true # nosemgrep: terraform.aws.security.aws-subnet-has-public-ip-address.aws-subnet-has-public-ip-address
+  map_public_ip_on_launch = true
   tags                    = { Name = "public-subnet-${count.index + 1}" }
 }
 
