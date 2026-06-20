@@ -239,7 +239,7 @@ jobs:
 
       - name: Upload frontend Trivy SARIF to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
-        if: always()
+        if: always() && hashFiles('trivy-frontend.sarif') != ''
         with:
           sarif_file: trivy-frontend.sarif
           category:   trivy-frontend
