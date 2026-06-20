@@ -4,21 +4,21 @@ kind: Kustomization
 namespace: bookstore
 
 resources:
-  - namespace.yaml
-  - configmaps/backend-config.yaml
-  - secrets/external-secret.yaml
-  - database/mysql-init-configmap.yaml
-  - database/mysql-service.yaml
-  - database/mysql-statefulset.yaml
-  - backend/deployment.yaml
-  - backend/service.yaml
-  - backend/hpa.yaml
-  - frontend/deployment.yaml
-  - frontend/service.yaml
-  - frontend/hpa.yaml
-  - ingress/ingress.yaml
-  - network-policy/network-policy.yaml
-  - pdb/pdb.yaml
+- namespace.yaml
+- configmaps/backend-config.yaml
+- secrets/external-secret.yaml
+- database/mysql-init-configmap.yaml
+- database/mysql-service.yaml
+- database/mysql-statefulset.yaml
+- backend/deployment.yaml
+- backend/service.yaml
+- backend/hpa.yaml
+- frontend/deployment.yaml
+- frontend/service.yaml
+- frontend/hpa.yaml
+- ingress/ingress.yaml
+- network-policy/network-policy.yaml
+- pdb/pdb.yaml
 
 # The CI pipeline updates these entries via:
 #   kustomize edit set image bookstore-backend=<registry>/bookstore-backend:<tag>
@@ -26,9 +26,9 @@ resources:
 # ArgoCD detects the resulting commit and syncs the cluster automatically.
 # Replace ACCOUNT_ID below after running scripts/bootstrap-tf-state.sh (same account).
 images:
-  - name: bookstore-backend
-    newName: ACCOUNT_ID.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
-    newTag: latest
-  - name: bookstore-frontend
-    newName: ACCOUNT_ID.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
-    newTag: latest
+- name: bookstore-backend
+  newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
+  newTag: d0a09a32
+- name: bookstore-frontend
+  newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
+  newTag: d0a09a32
