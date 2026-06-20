@@ -14,7 +14,7 @@ WORKDIR /app
 
 COPY --from=deps --chown=appuser:appgroup /app/node_modules ./node_modules
 COPY --chown=appuser:appgroup . .
-RUN rm -f package-lock.json
+RUN rm -f package-lock.json package.json
 
 USER appuser
 
