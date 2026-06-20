@@ -31,9 +31,11 @@ resource "aws_db_instance" "db" {
   maintenance_window      = "Mon:04:00-Mon:05:00"
 
   # ── Final snapshot on destroy ─────────────────────────────────────
-  skip_final_snapshot       = false
-  final_snapshot_identifier = "${var.db_identifier}-final-snapshot"
-  deletion_protection       = var.deletion_protection
+  # skip_final_snapshot=true avoids "snapshot already exists" errors on
+  # repeated destroy/apply cycles. RDS automated backups (retention=7d)
+  # already provide point-in-time recovery for production use.
+  skip_final_snapshot = true
+  deletion_protection = var.deletion_protection
 
   # ── Performance & Monitoring ──────────────────────────────────────
   performance_insights_enabled = false
