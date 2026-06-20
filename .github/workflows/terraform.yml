@@ -17,7 +17,7 @@ permissions:
   pull-requests: write
 
 env:
-  TF_VERSION: "1.7.0"
+  TF_VERSION: "1.10.0"
   AWS_REGION: us-west-1
 
 jobs:
@@ -38,23 +38,27 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: tfsec — static security analysis
-        uses: aquasecurity/tfsec-action@v1.0.0
+      - name: Trivy — IaC security scan (tfsec replacement)
+        uses: aquasecurity/trivy-action@master
         with:
-          soft_fail: false
+          scan-type: config
+          scan-ref: .
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          skip-dirs: ".terraform"
 
       - name: Terraform Format Check
         run: terraform fmt -check -recursive
 
       - name: Terraform Init
-        run: terraform init
+        run: terraform init -input=false
 
       - name: Terraform Validate
         run: terraform validate
 
       - name: Terraform Plan
         id: plan
-        run: terraform plan -out=tfplan -no-color 2>&1 | tee plan_output.txt
+        run: terraform plan -out=tfplan -input=false -no-color 2>&1 | tee plan_output.txt
         continue-on-error: true
 
       - name: Comment plan on PR
@@ -79,4 +83,4 @@ jobs:
 
       - name: Terraform Apply
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: terraform apply -auto-approve tfplan
+        run: terraform apply -auto-approve -input=false tfplan
