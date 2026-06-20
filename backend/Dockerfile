@@ -1,4 +1,10 @@
-FROM node:22-alpine AS base
+FROM node:22-alpine AS deps
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+FROM node:22-alpine AS runtime
 
 RUN apk upgrade --no-cache
 
@@ -6,14 +12,8 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
-
+COPY --from=deps --chown=appuser:appgroup /app/node_modules ./node_modules
 COPY --chown=appuser:appgroup . .
-
-# Remove lock file after all COPYs — it is not needed at runtime and Trivy reads
-# it to flag dev-only packages (picomatch, brace-expansion via nodemon) as if
-# they were installed in the production image.
 RUN rm -f package-lock.json
 
 USER appuser
