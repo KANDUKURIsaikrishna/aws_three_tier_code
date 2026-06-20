@@ -77,14 +77,15 @@ jobs:
         run: cd client && npm audit --audit-level=critical
 
       - name: Semgrep SAST (Node.js + OWASP Top-10 rules)
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: >-
-            p/nodejs
-            p/owasp-top-ten
-            p/secrets
+        run: |
+          python -m pip install semgrep --quiet
+          semgrep scan \
+            --config p/nodejs \
+            --config p/owasp-top-ten \
+            --config p/secrets \
+            --error \
+            .
         env:
-          # Remove this line if running without Semgrep Cloud
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
 
   # ─────────────────────────────────────────────────────────────────────────
