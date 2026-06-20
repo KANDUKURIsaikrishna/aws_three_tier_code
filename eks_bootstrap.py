@@ -1,153 +1,399 @@
+"""
+eks_bootstrap.py — Full EKS cluster post-provisioning bootstrap.
+
+Run this ONCE after every `terraform apply` that creates/recreates the cluster.
+It is safe to re-run (all steps are idempotent).
+
+Prerequisites:
+  - terraform apply completed successfully
+  - aws CLI configured with admin credentials
+  - kubectl, helm installed and on PATH
+  - Python 3.8+
+
+Usage:
+  python eks_bootstrap.py
+"""
+
+import datetime
+import getpass
+import json
 import os
-import sys
-import time
-import secrets
 import shutil
 import subprocess
+import sys
+import time
+import secrets as secrets_mod
 
-def write_header(msg):
-    """Prints a bold, clean visual separator to stream to the console."""
-    print(f"\n" + "="*70)
-    print(f">>> {msg}")
-    print("="*70 + "\n")
-    sys.stdout.flush()
+# ── Config ────────────────────────────────────────────────────────────────────
 
-def run_command(command, shell=False):
-    """Executes a command and streams its stdout/stderr live to the screen."""
-    try:
-        # Popen allows us to attach to stdout and read it line-by-line while it runs
-        process = subprocess.Popen(
-            command,
-            shell=shell,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT
-        )
-        
-        # Read the buffer stream continuously as chunks arrive
-        while True:
-            output = process.stdout.readline()
-            if not output and process.poll() is not None:
-                break
-            if output:
-                sys.stdout.buffer.write(output)
-                sys.stdout.flush()
-                
-        rc = process.poll()
-        if rc != 0:
-            print(f"\n❌ Command failed with exit code {rc}", file=sys.stderr)
-            sys.exit(rc)
-    except Exception as e:
-        print(f"\n❌ Execution Error occurred: {str(e)}", file=sys.stderr)
-        sys.exit(1)
+CLUSTER_NAME  = "bookstore-eks"
+REGION        = "us-west-1"
+APP_NAMESPACE = "bookstore"
+DOMAIN        = "b17facebook.xyz"
 
-# --- Phase 1: Authentication and Context Mapping ---
-write_header("Phase 1: Syncing EKS Cluster Kubeconfig Context...")
-run_command(["aws", "eks", "update-kubeconfig", "--name", "bookstore-eks", "--region", "us-west-1"])
+# IAM resource names (created by this script via CLI, not Terraform)
+IRSA_ROLE_NAME   = "bookstore-external-secrets-irsa"
+IRSA_POLICY_NAME = "bookstore-secretsmanager-read"
 
-write_header("Verifying Master Cluster Node Connectivity...")
-run_command(["kubectl", "get", "nodes"])
+# AWS Secrets Manager path — must match k8s/secrets/external-secret.yaml
+DB_SECRET_ID = "/bookstore/db-credentials"
 
-# --- Phase 2: Dynamic Storage Setup ---
-write_header("Phase 2: Provisioning Dynamic AWS EBS CSI Add-on Engine...")
-# run_command(["aws", "eks", "create-addon", "--cluster-name", "bookstore-eks", "--addon-name", "aws-ebs-csi-driver", "--region", "us-west-1", "--resolve-conflicts", "OVERWRITE"])
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-write_header("Awaiting Storage Plugin Activation...")
+def header(msg: str):
+    print(f"\n{'='*70}\n>>> {msg}\n{'='*70}\n", flush=True)
+
+
+def run(command: list, check: bool = True, capture: bool = False) -> str:
+    """Run a command, streaming output live. Returns stdout if capture=True."""
+    if capture:
+        result = subprocess.run(command, capture_output=True, text=True)
+        return result.stdout.strip()
+
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    while True:
+        line = process.stdout.readline()
+        if not line and process.poll() is not None:
+            break
+        if line:
+            sys.stdout.buffer.write(line)
+            sys.stdout.flush()
+    rc = process.poll()
+    if rc != 0 and check:
+        print(f"\n❌ Command failed (exit {rc}): {' '.join(command)}", file=sys.stderr)
+        sys.exit(rc)
+    return ""
+
+
+def run_ok(command: list) -> bool:
+    """Run a command silently. Returns True if it exits 0."""
+    result = subprocess.run(command, capture_output=True)
+    return result.returncode == 0
+
+
+def capture(command: list) -> str:
+    """Run a command and return stripped stdout."""
+    return subprocess.run(command, capture_output=True, text=True).stdout.strip()
+
+
+# ── Phase 1: kubeconfig ───────────────────────────────────────────────────────
+
+header("Phase 1: Syncing EKS kubeconfig...")
+run(["aws", "eks", "update-kubeconfig",
+     "--name", CLUSTER_NAME, "--region", REGION])
+run(["kubectl", "get", "nodes"])
+
+# ── Phase 2: EBS CSI driver ───────────────────────────────────────────────────
+
+header("Phase 2: Waiting for EBS CSI add-on to be ACTIVE...")
 while True:
-    # Query current status
-    status_proc = subprocess.run(
-        ["aws", "eks", "describe-addon", "--cluster-name", "bookstore-eks", "--addon-name", "aws-ebs-csi-driver", "--region", "us-west-1", "--query", "addon.status", "--output", "text"],
-        capture_output=True, text=True
-    )
-    status = status_proc.stdout.strip()
+    status = capture(["aws", "eks", "describe-addon",
+                       "--cluster-name", CLUSTER_NAME,
+                       "--addon-name", "aws-ebs-csi-driver",
+                       "--region", REGION,
+                       "--query", "addon.status", "--output", "text"])
     if status == "ACTIVE":
-        print("✅ EBS CSI dynamic driver is officially ACTIVE!")
+        print("✅ EBS CSI driver is ACTIVE.")
         break
-    else:
-        print(f"🔄 Add-on provisioning status: [{status}]... retrying in 10 seconds...")
-        sys.stdout.flush()
-        time.sleep(10)
+    print(f"  [{status}] — retrying in 10s...")
+    sys.stdout.flush()
+    time.sleep(10)
 
-write_header("Deploying Baseline gp3 StorageClass Resource Manifest...")
-if os.path.exists("gp3-storageclass.yaml"):
-    run_command(["kubectl", "apply", "-f", "gp3-storageclass.yaml"])
+sc_file = os.path.join(os.path.dirname(__file__), "gp3-storageclass.yaml")
+if os.path.exists(sc_file):
+    run(["kubectl", "apply", "-f", sc_file])
 else:
-    print("⚠️ gp3-storageclass.yaml not found, skipping...")
+    print("⚠️  gp3-storageclass.yaml not found — skipping StorageClass.")
 
-# --- Phase 3: Immediate Compute Optimization ---
-write_header("Phase 3: Scaling Node Group to Pre-empt 'Too Many Pods' Threshold...")
-run_command(["aws", "eks", "update-nodegroup-config", "--cluster-name", "bookstore-eks", "--nodegroup-name", "bookstore-node-group", "--scaling-config", "minSize=1,maxSize=4,desiredSize=2", "--region", "us-west-1"])
+# ── Phase 3: Scale node group ─────────────────────────────────────────────────
 
-write_header("Pausing for 20 seconds to allow the secondary worker instance to join cluster...")
-time.sleep(20)
-run_command(["kubectl", "get", "nodes"])
+header("Phase 3: Scaling node group to 2 (prevents 'Too many pods')...")
+run(["aws", "eks", "update-nodegroup-config",
+     "--cluster-name", CLUSTER_NAME,
+     "--nodegroup-name", f"{CLUSTER_NAME.replace('eks', 'node-group')}",
+     "--scaling-config", "minSize=1,maxSize=4,desiredSize=2",
+     "--region", REGION])
+print("Waiting 30s for second node to join...")
+time.sleep(30)
+run(["kubectl", "get", "nodes"])
 
-# --- Phase 4: Platform Engine Provisioning via Helm ---
-write_header("Phase 4: Registering and Synchronizing Helm Repositories...")
-run_command(["helm", "repo", "add", "jetstack", "https://charts.jetstack.io"])
-run_command(["helm", "repo", "add", "external-secrets", "https://charts.external-secrets.io"])
-run_command(["helm", "repo", "add", "ingress-nginx", "https://kubernetes.github.io/ingress-nginx"])
-run_command(["helm", "repo", "update"])
+# ── Phase 4: Helm add-ons ─────────────────────────────────────────────────────
 
-write_header("Deploying Cryptographic Cert-Manager Sub-plane...")
-run_command(["helm", "install", "cert-manager", "jetstack/cert-manager", "--namespace", "cert-manager", "--create-namespace", "--version", "v1.14.4", "--set", "installCRDs=true"])
-run_command(["kubectl", "wait", "pods", "-n", "cert-manager", "--all", "--for=condition=Ready", "--timeout=120s"])
+header("Phase 4: Helm repositories...")
+for name, url in [
+    ("jetstack",        "https://charts.jetstack.io"),
+    ("external-secrets","https://charts.external-secrets.io"),
+    ("ingress-nginx",   "https://kubernetes.github.io/ingress-nginx"),
+]:
+    run(["helm", "repo", "add", name, url], check=False)
+run(["helm", "repo", "update"])
 
-write_header("Applying Production Let's Encrypt Certificate ClusterIssuer...")
-if os.path.exists("cluster-issuer.yaml"):
-    run_command(["kubectl", "apply", "-f", "cluster-issuer.yaml"])
+header("Installing cert-manager...")
+run(["helm", "upgrade", "--install", "cert-manager", "jetstack/cert-manager",
+     "--namespace", "cert-manager", "--create-namespace",
+     "--version", "v1.14.4", "--set", "installCRDs=true"])
+run(["kubectl", "wait", "pods", "-n", "cert-manager", "--all",
+     "--for=condition=Ready", "--timeout=180s"])
+
+issuer_file = os.path.join(os.path.dirname(__file__), "cluster-issuer.yaml")
+if os.path.exists(issuer_file):
+    run(["kubectl", "apply", "-f", issuer_file])
 else:
-    print("⚠️ cluster-issuer.yaml not found, skipping...")
+    print("⚠️  cluster-issuer.yaml not found — skipping ClusterIssuer.")
 
-write_header("Deploying External Secrets Operator Architecture...")
-run_command(["helm", "install", "external-secrets", "external-secrets/external-secrets", "--namespace", "external-secrets", "--create-namespace", "--set", "installCRDs=true"])
-run_command(["kubectl", "wait", "pods", "-n", "external-secrets", "--all", "--for=condition=Ready", "--timeout=120s"])
+header("Installing External Secrets Operator (ESO)...")
+run(["helm", "upgrade", "--install", "external-secrets", "external-secrets/external-secrets",
+     "--namespace", "external-secrets", "--create-namespace",
+     "--set", "installCRDs=true"])
+run(["kubectl", "wait", "pods", "-n", "external-secrets", "--all",
+     "--for=condition=Ready", "--timeout=180s"])
 
-write_header("Wiping Local Kubectl Discovery Cache and Establishing ClusterSecretStore...")
-# Clear the cache to prevent schema lookup conflicts
+header("Installing ingress-nginx...")
+run(["helm", "upgrade", "--install", "ingress-nginx", "ingress-nginx/ingress-nginx",
+     "--namespace", "ingress-nginx", "--create-namespace"])
+print("Waiting 30s for NLB to provision...")
+time.sleep(30)
+run(["kubectl", "get", "svc", "-n", "ingress-nginx"])
+
+# ── Phase 5: IRSA for external-secrets-sa ────────────────────────────────────
+#
+# The ClusterSecretStore uses a service account (external-secrets-sa) in the
+# external-secrets namespace. That SA needs an IAM role (IRSA) with Secrets
+# Manager read permission.
+#
+# IMPORTANT: The EKS OIDC provider URL is cluster-specific and changes every
+# time the cluster is destroyed and recreated. This phase always updates the
+# trust policy to match the current cluster, so re-running after a destroy is safe.
+# ─────────────────────────────────────────────────────────────────────────────
+
+header("Phase 5: IRSA for external-secrets-sa...")
+
+account_id = capture(["aws", "sts", "get-caller-identity",
+                       "--query", "Account", "--output", "text"])
+oidc_url   = capture(["aws", "eks", "describe-cluster",
+                       "--name", CLUSTER_NAME, "--region", REGION,
+                       "--query", "cluster.identity.oidc.issuer", "--output", "text"])
+oidc_id    = oidc_url.replace("https://", "")
+
+print(f"  Account ID:    {account_id}")
+print(f"  OIDC provider: {oidc_id}")
+
+irsa_policy_arn = f"arn:aws:iam::{account_id}:policy/{IRSA_POLICY_NAME}"
+irsa_role_arn   = f"arn:aws:iam::{account_id}:role/{IRSA_ROLE_NAME}"
+
+# 5a. Ensure the Secrets Manager read policy exists
+if not run_ok(["aws", "iam", "get-policy", "--policy-arn", irsa_policy_arn]):
+    print(f"Creating IAM policy {IRSA_POLICY_NAME}...")
+    policy_doc = json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret"
+            ],
+            "Resource": f"arn:aws:secretsmanager:{REGION}:{account_id}:secret:/bookstore/*"
+        }]
+    })
+    run(["aws", "iam", "create-policy",
+         "--policy-name", IRSA_POLICY_NAME,
+         "--policy-document", policy_doc])
+else:
+    print(f"✅ IAM policy {IRSA_POLICY_NAME} already exists.")
+
+# 5b. Build trust policy pointing to the CURRENT cluster OIDC provider
+trust_policy = json.dumps({
+    "Version": "2012-10-17",
+    "Statement": [{
+        "Effect": "Allow",
+        "Principal": {
+            "Federated": f"arn:aws:iam::{account_id}:oidc-provider/{oidc_id}"
+        },
+        "Action": "sts:AssumeRoleWithWebIdentity",
+        "Condition": {
+            "StringEquals": {
+                f"{oidc_id}:aud": "sts.amazonaws.com",
+                f"{oidc_id}:sub": "system:serviceaccount:external-secrets:external-secrets-sa"
+            }
+        }
+    }]
+})
+
+# 5c. Create the IRSA role (or update its trust policy if the cluster was recreated)
+if not run_ok(["aws", "iam", "get-role", "--role-name", IRSA_ROLE_NAME]):
+    print(f"Creating IRSA role {IRSA_ROLE_NAME}...")
+    run(["aws", "iam", "create-role",
+         "--role-name", IRSA_ROLE_NAME,
+         "--assume-role-policy-document", trust_policy])
+    run(["aws", "iam", "attach-role-policy",
+         "--role-name", IRSA_ROLE_NAME,
+         "--policy-arn", irsa_policy_arn])
+else:
+    # Role exists — always update the trust policy because the EKS OIDC provider
+    # URL changes every time the cluster is destroyed and recreated.
+    print(f"✅ IRSA role {IRSA_ROLE_NAME} exists — updating trust policy for new cluster OIDC...")
+    run(["aws", "iam", "update-assume-role-policy",
+         "--role-name", IRSA_ROLE_NAME,
+         "--policy-document", trust_policy])
+
+# 5d. Create external-secrets-sa service account if it doesn't exist
+if not run_ok(["kubectl", "get", "serviceaccount", "external-secrets-sa",
+               "-n", "external-secrets"]):
+    print("Creating external-secrets-sa service account...")
+    run(["kubectl", "create", "serviceaccount", "external-secrets-sa",
+         "-n", "external-secrets"])
+
+# 5e. Annotate the SA with the IRSA role ARN
+run(["kubectl", "annotate", "serviceaccount", "external-secrets-sa",
+     "-n", "external-secrets",
+     f"eks.amazonaws.com/role-arn={irsa_role_arn}",
+     "--overwrite"])
+print(f"✅ IRSA: external-secrets-sa → {irsa_role_arn}")
+
+# Restart ESO so pods pick up the new IRSA annotation
+run(["kubectl", "rollout", "restart", "deployment/external-secrets", "-n", "external-secrets"])
+run(["kubectl", "rollout", "status", "deployment/external-secrets",
+     "-n", "external-secrets", "--timeout=120s"])
+
+# ── Phase 6: AWS Secrets Manager secret ──────────────────────────────────────
+
+header("Phase 6: Ensuring Secrets Manager secret has correct JSON structure...")
+
+secret_exists = run_ok(["aws", "secretsmanager", "describe-secret",
+                         "--secret-id", DB_SECRET_ID, "--region", REGION])
+
+def _prompt_and_store_secret():
+    print(f"Enter credentials to store at {DB_SECRET_ID}:")
+    db_user = input("  DB_USERNAME [admin]: ").strip() or "admin"
+    db_pass  = getpass.getpass("  DB_PASSWORD: ")
+    secret_value = json.dumps({"DB_USERNAME": db_user, "DB_PASSWORD": db_pass})
+    return secret_value
+
+if not secret_exists:
+    print(f"Secret '{DB_SECRET_ID}' does not exist — creating it...")
+    secret_value = _prompt_and_store_secret()
+    run(["aws", "secretsmanager", "create-secret",
+         "--name", DB_SECRET_ID, "--region", REGION,
+         "--secret-string", secret_value])
+    print(f"✅ Secret '{DB_SECRET_ID}' created.")
+else:
+    raw = capture(["aws", "secretsmanager", "get-secret-value",
+                   "--secret-id", DB_SECRET_ID, "--region", REGION,
+                   "--query", "SecretString", "--output", "text"])
+    try:
+        parsed = json.loads(raw)
+        missing = [k for k in ("DB_USERNAME", "DB_PASSWORD") if k not in parsed]
+        if missing:
+            print(f"⚠️  Secret is missing keys: {missing} — updating...")
+            secret_value = _prompt_and_store_secret()
+            run(["aws", "secretsmanager", "put-secret-value",
+                 "--secret-id", DB_SECRET_ID, "--region", REGION,
+                 "--secret-string", secret_value])
+        else:
+            print(f"✅ Secret has correct keys: {list(parsed.keys())}")
+    except (json.JSONDecodeError, TypeError):
+        print(f"⚠️  Secret value is not valid JSON — overwriting...")
+        secret_value = _prompt_and_store_secret()
+        run(["aws", "secretsmanager", "put-secret-value",
+             "--secret-id", DB_SECRET_ID, "--region", REGION,
+             "--secret-string", secret_value])
+
+# ── Phase 7: ArgoCD ───────────────────────────────────────────────────────────
+
+header("Phase 7: Installing ArgoCD...")
+run(["kubectl", "create", "namespace", "argocd"], check=False)
+run(["kubectl", "apply", "-n", "argocd", "-f",
+     "https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml",
+     "--server-side"])
+
+header("Waiting for ArgoCD server to be Available...")
+run(["kubectl", "wait", "deployment", "argocd-server",
+     "-n", "argocd", "--for=condition=Available", "--timeout=300s"])
+
+header("Patching argocd-secret (server.secretkey)...")
+generated_key = secrets_mod.token_hex(32)
+patch = f'{{"stringData":{{"server.secretkey":"{generated_key}"}}}}'
+run(["kubectl", "-n", "argocd", "patch", "secret", "argocd-secret", "-p", patch])
+
+header("Applying ArgoCD Application manifest...")
+app_manifest = os.path.join(os.path.dirname(__file__), "k8s", "argocd", "application.yaml")
+if os.path.exists(app_manifest):
+    run(["kubectl", "apply", "-f", app_manifest])
+else:
+    print(f"⚠️  {app_manifest} not found — skipping.")
+
+header("Restarting ArgoCD controllers...")
+for dep in ("argocd-dex-server", "argocd-applicationset-controller"):
+    run(["kubectl", "rollout", "restart", f"deployment/{dep}", "-n", "argocd"])
+
+time.sleep(10)
+run(["kubectl", "annotate", "application", "bookstore",
+     "-n", "argocd", "argocd.argoproj.io/refresh=hard", "--overwrite"], check=False)
+
+# ── Phase 8: Clear kubectl cache + force ESO resync ──────────────────────────
+
+header("Phase 8: Clearing kubectl discovery cache...")
 cache_path = os.path.expandvars(r"%USERPROFILE%\.kube\cache")
 if os.path.exists(cache_path):
     shutil.rmtree(cache_path, ignore_errors=True)
+    print("✅ kubectl cache cleared.")
 
-if os.path.exists("cluster-secret-store.yaml"):
-    run_command(["kubectl", "apply", "-f", "cluster-secret-store.yaml"])
+print("Waiting 20s for ESO to reconcile with new IRSA credentials...")
+time.sleep(20)
+
+ts = int(datetime.datetime.now().timestamp())
+run(["kubectl", "annotate", "externalsecret", "db-secret",
+     "-n", APP_NAMESPACE, f"force-sync={ts}", "--overwrite"], check=False)
+
+# ── Phase 9: Summary + Route53 reminder ──────────────────────────────────────
+
+header("Phase 9: Bootstrap Summary")
+
+print("\n--- Cluster Nodes ---")
+run(["kubectl", "get", "nodes"])
+
+print("\n--- Platform pods ---")
+run(["kubectl", "get", "pods", "--all-namespaces",
+     "--field-selector=metadata.namespace!=kube-system"])
+
+print("\n--- ExternalSecret status ---")
+run(["kubectl", "get", "externalsecret", "-n", APP_NAMESPACE], check=False)
+
+# Print the NLB hostname — user must update Route53 A records to this value
+print("\n--- Load Balancer (IMPORTANT: update Route53 A records) ---")
+lb_hostname = ""
+for _ in range(12):          # wait up to 2 min for NLB hostname
+    lb_hostname = capture(["kubectl", "get", "svc", "ingress-nginx-controller",
+                            "-n", "ingress-nginx",
+                            "-o", "jsonpath={.status.loadBalancer.ingress[0].hostname}"])
+    if lb_hostname:
+        break
+    print("  Waiting for NLB hostname...")
+    time.sleep(10)
+
+if lb_hostname:
+    print(f"""
+  ⚠️  The ingress load balancer hostname has CHANGED.
+  Update these Route53 records in the public hosted zone for {DOMAIN}:
+
+    Record            Type    Value
+    ──────────────    ──────  ──────────────────────────────────────
+    {DOMAIN}.         A       ALIAS → {lb_hostname}
+    *.{DOMAIN}.       A       ALIAS → {lb_hostname}
+
+  AWS Console path:
+    Route 53 → Hosted zones → {DOMAIN} → Edit each A record → Alias to NLB
+""")
 else:
-    print("⚠️ cluster-secret-store.yaml not found, skipping...")
+    print("  NLB hostname not yet available. Check later:")
+    print("  kubectl get svc ingress-nginx-controller -n ingress-nginx")
 
-write_header("Deploying Ingress NGINX Gateway LoadBalancer...")
-run_command(["helm", "install", "ingress-nginx", "ingress-nginx/ingress-nginx", "--namespace", "ingress-nginx", "--create-namespace"])
-time.sleep(15)
-run_command(["kubectl", "get", "svc", "-n", "ingress-nginx"])
+print(f"""
+  Key resource ARNs for reference:
+    IRSA role (external-secrets):  arn:aws:iam::{account_id}:role/{IRSA_ROLE_NAME}
+    GitHub OIDC role (CI/CD):      arn:aws:iam::{account_id}:role/bookstore-github-oidc-role
+    DB secret:                     {DB_SECRET_ID}
+""")
 
-# --- Phase 5: GitOps Control Plane Setup ---
-write_header("Phase 5: Instantiating GitOps Delivery Architecture (ArgoCD)...")
-# Server-side apply to completely bypass client annotation size limits
-run_command(["kubectl", "create", "namespace", "argocd"], shell=True) # allow graceful error if exists
-run_command(["kubectl", "apply", "-n", "argocd", "-f", "https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml", "--server-side"])
-
-write_header("Patching Missing Core Security Layer (server.secretkey)...")
-generated_key = secrets.token_hex(32)
-# Windows Shell escaped formatting for clean JSON parsing
-patch_string = f'{{"stringData": {{"server.secretkey": "{generated_key}"}}}}'
-run_command(["kubectl", "-n", "argocd", "patch", "secret", "argocd-secret", "-p", patch_string])
-
-write_header("Registering the Core 3-Tier Application Root Spec...")
-if os.path.exists("k8s/argocd/application.yaml"):
-    run_command(["kubectl", "apply", "-f", "k8s/argocd/application.yaml"])
-else:
-    print("⚠️ k8s/argocd/application.yaml not found, skipping...")
-
-write_header("Triggering Controller Deployment Recycling Loop...")
-run_command(["kubectl", "rollout", "restart", "deployment/argocd-dex-server", "-n", "argocd"])
-run_command(["kubectl", "rollout", "restart", "deployment/argocd-applicationset-controller", "-n", "argocd"])
-
-write_header("Unifying GitOps Target Synchronization Point to Branch: main...")
-time.sleep(5)
-target_revision_patch = '{"spec":{"source":{"targetRevision":"main"}}}'
-run_command(["kubectl", "patch", "application", "bookstore", "-n", "argocd", "--type", "merge", "-p", target_revision_patch])
-run_command(["kubectl", "annotate", "application", "bookstore", "-n", "argocd", "argocd.argoproj.io/refresh=hard", "--overwrite"])
-
-write_header("Bootstrap Complete! Fetching Running Control Plane Workloads Map...")
-time.sleep(5)
-run_command(["kubectl", "get", "pods", "-n", "argocd"])
-
-print("\n🎉 [SUCCESS] All EKS cluster platform tools have been successfully bootstrapped via Python GitOps automation!")
+print("🎉 Bootstrap complete! ArgoCD will sync within 3 minutes.")
+print("   Monitor: kubectl get pods -n bookstore -w")
