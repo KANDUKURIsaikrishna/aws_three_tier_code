@@ -385,14 +385,139 @@ c. Added `RUN apk upgrade --no-cache` to all three image stages (node:22-alpine 
 
 ---
 
+## 16. ArgoCD — SyncFailed: ExternalSecret/ClusterSecretStore apiVersion v1beta1 not found
+
+**Error** (from `kubectl describe application bookstore -n argocd`)
+```
+The Kubernetes API could not find version "v1beta1" of external-secrets.io/ExternalSecret
+for requested resource bookstore/db-secret. Version "v1" of external-secrets.io/ExternalSecret
+is installed on the destination cluster.
+
+The Kubernetes API could not find version "v1beta1" of external-secrets.io/ClusterSecretStore
+for requested resource bookstore/aws-secretsmanager. Version "v1" of
+external-secrets.io/ClusterSecretStore is installed on the destination cluster.
+```
+
+**Root cause**  
+`k8s/secrets/external-secret.yaml` used `apiVersion: external-secrets.io/v1beta1` for both the `ClusterSecretStore` and `ExternalSecret` resources. The installed External Secrets Operator only serves the `v1` API — `v1beta1` was removed in ESO ≥ 0.10.0. ArgoCD hard-fails the entire sync because of the invalid API version, leaving every resource (Deployments, Services, Ingress, etc.) as OutOfSync even though only these two resources are the problem.
+
+**Fix**  
+`k8s/secrets/external-secret.yaml` — change both resources:
+```yaml
+# Before
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+
+# After
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+```
+
+---
+
+## 17. Frontend pods — CrashLoopBackOff: nginx cannot mkdir `/tmp/nginx/client_temp`
+
+**Error** (from `kubectl logs -n bookstore <frontend-pod>`)
+```
+[emerg] 1#1: mkdir() "/tmp/nginx/client_temp" failed (2: No such file or directory)
+nginx: [emerg] mkdir() "/tmp/nginx/client_temp" failed (2: No such file or directory)
+```
+
+**Root cause**  
+The frontend Deployment sets `readOnlyRootFilesystem: true` and mounts an `emptyDir` at `/tmp`. The `nginx.conf` configured all temp paths under `/tmp/nginx/` (e.g. `client_body_temp_path /tmp/nginx/client_temp`). nginx's `mkdir()` call creates only the leaf directory — it does not create intermediate paths. Since `/tmp/nginx/` itself never exists (the emptyDir is empty), the leaf `mkdir()` fails with ENOENT and nginx exits immediately.
+
+**Fix**  
+`client/nginx.conf` — remove the `/nginx/` subdirectory from all temp paths so they write directly into `/tmp`, which is already a writable emptyDir:
+```nginx
+# Before
+client_body_temp_path /tmp/nginx/client_temp;
+proxy_temp_path       /tmp/nginx/proxy_temp;
+fastcgi_temp_path     /tmp/nginx/fastcgi_temp;
+uwsgi_temp_path       /tmp/nginx/uwsgi_temp;
+scgi_temp_path        /tmp/nginx/scgi_temp;
+
+# After
+client_body_temp_path /tmp/client_temp;
+proxy_temp_path       /tmp/proxy_temp;
+fastcgi_temp_path     /tmp/fastcgi_temp;
+uwsgi_temp_path       /tmp/uwsgi_temp;
+scgi_temp_path        /tmp/scgi_temp;
+```
+
+---
+
+## 18. Backend/MySQL pods — CreateContainerConfigError: `db-secret` not found
+
+**Error** (from `kubectl get pods -n bookstore`)
+```
+backend-xxx   0/1   CreateContainerConfigError
+mysql-0       0/1   CreateContainerConfigError
+```
+
+**Root cause (two parts)**
+
+1. The `ExternalSecret` (`db-secret`) had `STATUS: SecretSyncedError` — it could not fetch the credentials from AWS Secrets Manager. The ClusterSecretStore was valid (IRSA authentication worked), but the secret at `/bookstore/db-credentials` contained keys with wrong names. The first `put-secret-value` call stored malformed JSON (keys without quotes) due to PowerShell single-quote stripping, resulting in `{DB_USERNAME:admin,DB_PASSWORD:...}` instead of `{"DB_USERNAME":"admin","DB_PASSWORD":"..."}`.
+
+2. Because the ExternalSecret never synced, the Kubernetes `db-secret` Secret was never created. The backend and MySQL pods reference this Secret for `DB_USERNAME` and `DB_PASSWORD` env vars — Kubernetes rejects the pod spec at container creation time with `CreateContainerConfigError`.
+
+**Fix**
+
+a. Update the AWS Secrets Manager secret with correct JSON using a PowerShell variable to avoid quoting issues:
+```powershell
+$json = '{"DB_USERNAME":"admin","DB_PASSWORD":"<your-password>"}'
+aws secretsmanager put-secret-value `
+  --secret-id /bookstore/db-credentials `
+  --region us-west-1 `
+  --secret-string $json
+```
+
+b. Verify the stored value is valid JSON:
+```powershell
+aws secretsmanager get-secret-value `
+  --secret-id /bookstore/db-credentials `
+  --region us-west-1 `
+  --query SecretString `
+  --output text
+# Expected: {"DB_USERNAME":"admin","DB_PASSWORD":"..."}
+```
+
+c. Force an immediate resync (bypass the 1h refresh interval):
+```powershell
+kubectl annotate externalsecret db-secret -n bookstore `
+  "force-sync=$(Get-Date -UFormat %s)" --overwrite
+```
+
+d. If ESO is still caching the error state, restart the controller:
+```powershell
+kubectl rollout restart deployment/external-secrets -n external-secrets
+kubectl rollout status deployment/external-secrets -n external-secrets
+```
+
+**Diagnosis commands**
+```powershell
+kubectl describe externalsecret db-secret -n bookstore   # shows exact ESO error
+kubectl describe clustersecretstore aws-secretsmanager   # shows IRSA auth status
+kubectl get secret db-secret -n bookstore                # confirms secret exists once ESO syncs
+```
+
+---
+
 ## Pending / Not Yet Done
 
-| Item | What's needed |
-|---|---|
-| Rotate the SSH keys that were in `3-teir` and `github` | Revoke old keys, generate new ones outside the repo |
-| `ACCOUNT_ID` placeholder in `k8s/kustomization.yaml` | Replace with real 12-digit AWS account ID |
-| S3 backend bucket + DynamoDB table in `main.tf` | Fill in `backend "s3"` block before running terraform |
-| GitHub Secrets | Set `AWS_ACCOUNT_ID`, `AWS_ROLE_ARN`, `API_URL` in repo Settings → Secrets |
-| `deletion_protection` in `main.tf` | Re-enable (`true`) after infrastructure is rebuilt and stable |
-| Manual approval gate for terraform apply | Add `environment: production` to the terraform job so apply requires a reviewer |
-| IDE error "Value 'production' is not valid" in ci-cd.yml | Create the `production` environment in GitHub Settings → Environments — the VS Code extension validates against live repo environments; the YAML is correct |
+| Item | Status | What's needed |
+|---|---|---|
+| Rotate the SSH keys that were in `3-teir` and `github` | ⚠️ Pending | Revoke old keys, generate new ones outside the repo |
+| `ACCOUNT_ID` placeholder in `k8s/kustomization.yaml` | ✅ Done | CI deploy job (`kustomize edit set image`) replaced it with the real ECR URL on first successful run |
+| S3 backend bucket + DynamoDB table in `main.tf` | ⚠️ Pending | Fill in `backend "s3"` block before running terraform |
+| GitHub Secrets (`AWS_ACCOUNT_ID`, `AWS_ROLE_ARN`, `API_URL`) | ✅ Done | Set — pipeline passes and ECR push succeeds |
+| `production` GitHub Environment | ✅ Done | Created — deploy job approval gate works |
+| `deletion_protection` in `main.tf` | ⚠️ Pending | Re-enable (`true`) after infrastructure is stable |
+| ExternalSecret `db-secret` sync | ⚠️ In progress | ESO restarts needed after fixing secret JSON format — see Issue #18 |
+| Frontend nginx crash | ✅ Done | Fixed in `client/nginx.conf` — see Issue #17 |
+| Terraform OIDC role ECR policy | ✅ Done | Added to `main.tf`; also applied via `aws iam put-role-policy` directly |
