@@ -162,7 +162,7 @@ jobs:
 
       # ── Backend image ────────────────────────────────────────────────────
       - name: Build backend image (no push yet)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context:   ./backend
           push:      false
@@ -182,7 +182,7 @@ jobs:
           ignore-unfixed: true
 
       - name: Upload backend Trivy SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: trivy-backend.sarif
@@ -197,7 +197,7 @@ jobs:
 
       # ── Frontend image ───────────────────────────────────────────────────
       - name: Build frontend image (no push yet)
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context:   ./client
           push:      false
@@ -218,7 +218,7 @@ jobs:
           ignore-unfixed: true
 
       - name: Upload frontend Trivy SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: trivy-frontend.sarif

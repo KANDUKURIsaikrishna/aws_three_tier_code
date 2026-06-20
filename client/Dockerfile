@@ -1,4 +1,4 @@
-FROM node:18-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -12,7 +12,7 @@ ENV REACT_APP_API_URL=$REACT_APP_API_URL
 
 RUN npm run build
 
-FROM nginx:1.25-alpine AS runner
+FROM nginx:1.27-alpine AS runner
 
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
