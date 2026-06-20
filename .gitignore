@@ -35,3 +35,4 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+kubectl.exe
