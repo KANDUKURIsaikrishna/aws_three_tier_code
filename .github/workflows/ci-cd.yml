@@ -110,10 +110,17 @@ jobs:
       - name: ESLint — frontend (zero warnings allowed)
         run: cd client && npx eslint src --max-warnings=0
 
-      - name: Validate Kubernetes manifests (kubeval)
-        uses: instrumenta/kubeval-action@master
-        with:
-          files: k8s
+      - name: Validate Kubernetes manifests (kubeconform)
+        run: |
+          curl -sLo kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/v0.6.4/kubeconform-linux-amd64.tar.gz"
+          tar -xzf kubeconform.tar.gz
+          sudo mv kubeconform /usr/local/bin/
+          find k8s -name "*.yaml" ! -name "kustomization.yaml" | \
+            xargs kubeconform \
+              -ignore-missing-schemas \
+              -kubernetes-version 1.31.0 \
+              -summary
 
   # ─────────────────────────────────────────────────────────────────────────
   # STAGE 3 · Build → Container Scan → Push
