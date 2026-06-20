@@ -181,6 +181,16 @@ jobs:
           exit-code:      "1"
           ignore-unfixed: true
 
+      - name: Show backend CVEs in CI log (diagnostic on failure)
+        if: failure()
+        run: |
+          [ -f trivy-backend.sarif ] && \
+            jq -r '.runs[].results[] |
+              "[" + (.level | ascii_upcase) + "] " + .ruleId +
+              ": " + (.message.text | split("\n")[0])' \
+            trivy-backend.sarif \
+          || echo "trivy-backend.sarif not found"
+
       - name: Upload backend Trivy SARIF to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
         if: always()
@@ -216,6 +226,16 @@ jobs:
           severity:       CRITICAL,HIGH
           exit-code:      "1"
           ignore-unfixed: true
+
+      - name: Show frontend CVEs in CI log (diagnostic on failure)
+        if: failure()
+        run: |
+          [ -f trivy-frontend.sarif ] && \
+            jq -r '.runs[].results[] |
+              "[" + (.level | ascii_upcase) + "] " + .ruleId +
+              ": " + (.message.text | split("\n")[0])' \
+            trivy-frontend.sarif \
+          || echo "trivy-frontend.sarif not found"
 
       - name: Upload frontend Trivy SARIF to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4

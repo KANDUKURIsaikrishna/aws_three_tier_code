@@ -1,5 +1,7 @@
 FROM node:22-alpine AS builder
 
+RUN apk upgrade --no-cache
+
 WORKDIR /app
 
 COPY package*.json ./
@@ -13,6 +15,8 @@ ENV REACT_APP_API_URL=$REACT_APP_API_URL
 RUN npm run build
 
 FROM nginx:1.27-alpine AS runner
+
+RUN apk upgrade --no-cache
 
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
