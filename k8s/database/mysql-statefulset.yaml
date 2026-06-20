@@ -19,6 +19,8 @@ spec:
       containers:
         - name: mysql
           image: mysql:8.0
+          securityContext:
+            allowPrivilegeEscalation: false
           ports:
             - containerPort: 3306
           env:

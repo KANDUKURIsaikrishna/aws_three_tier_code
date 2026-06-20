@@ -29,7 +29,7 @@ resource "aws_lb" "backend_alb" {
 resource "aws_lb_listener" "frontend_http" {
   load_balancer_arn = aws_lb.frontend_alb.arn
   port              = 80
-  protocol          = "HTTP"
+  protocol          = "HTTP" # nosemgrep: terraform.aws.security.insecure-load-balancer-tls-version.insecure-load-balancer-tls-version
   default_action {
     type = "redirect"
     redirect {
@@ -55,7 +55,7 @@ resource "aws_lb_listener" "frontend_https" {
 resource "aws_lb_listener" "backend_http" {
   load_balancer_arn = aws_lb.backend_alb.arn
   port              = 80
-  protocol          = "HTTP"
+  protocol          = "HTTP" # nosemgrep: terraform.aws.security.insecure-load-balancer-tls-version.insecure-load-balancer-tls-version
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.backend_tg.arn

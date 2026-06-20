@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import secrets
+import shutil
 import subprocess
 
 def write_header(msg):
@@ -105,7 +106,7 @@ write_header("Wiping Local Kubectl Discovery Cache and Establishing ClusterSecre
 # Clear the cache to prevent schema lookup conflicts
 cache_path = os.path.expandvars(r"%USERPROFILE%\.kube\cache")
 if os.path.exists(cache_path):
-    subprocess.run(f'rmdir /s /q "{cache_path}"', shell=True)
+    shutil.rmtree(cache_path, ignore_errors=True)
 
 if os.path.exists("cluster-secret-store.yaml"):
     run_command(["kubectl", "apply", "-f", "cluster-secret-store.yaml"])

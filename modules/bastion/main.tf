@@ -5,6 +5,11 @@ resource "aws_instance" "bastion" {
   subnet_id       = var.public_subnet_id
   security_groups = [var.security_group_id]
 
+  metadata_options {
+    http_tokens   = "required"
+    http_endpoint = "enabled"
+  }
+
   tags = {
     Name = var.bastion_name
   }
