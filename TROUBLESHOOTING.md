@@ -339,37 +339,39 @@ Both replacements applied to all occurrences (backend and frontend scan steps).
 
 ---
 
-## 15. CI — Trivy exits 1 on backend image (Alpine OS package CVEs)
+## 15. CI — Trivy exits 1 on backend image (dev-dep packages in lock file)
 
-**Error**
+**Error** (first attempt — visible after diagnostic step was added)
 ```
-[alpine] Detecting vulnerabilities...  os_version="3.24" pkg_num=18
-[node-pkg] Detecting vulnerabilities...
-Error: Process completed with exit code 1.
+Error:  CVE-2026-33671: Package: picomatch     ← HIGH, causes exit code 1
+Warning: CVE-2026-33750: Package: brace-expansion
+Warning: CVE-2026-42338: Package: ip-address
+Warning: CVE-2026-33672: Package: picomatch
+Warning: CVE-2026-53655: Package: tar
 ```
-(CVE details are in the SARIF file, not in the log — check GitHub Security → Code scanning)
 
-**Root cause**  
-`node:22-alpine` (and `nginx:1.27-alpine`) may ship OS packages with CRITICAL/HIGH CVEs that have fixes available in the Alpine repository. The Trivy action fails because `exit-code: "1"` and `ignore-unfixed: true` mean any fixable CVE triggers a hard fail. The base image is regularly rebuilt by Docker Hub but can lag slightly behind Alpine's security patch cadence.
+**Root cause (two parts)**
 
-**Fix** — add `RUN apk upgrade --no-cache` as the first RUN in each Dockerfile stage to apply all pending Alpine package patches at build time:
+1. `picomatch` and `brace-expansion` are marked `"dev": true` in `backend/package-lock.json` (they're pulled in by nodemon). `npm ci --omit=dev` does NOT install them, but Trivy reads `package-lock.json` from inside the image and does not always filter out `"dev": true` packages — so it flags them as if they were installed.
 
-`backend/Dockerfile`:
+2. `tar` and `ip-address` are not in the project lock file at all; they come from npm's own bundled packages at `/usr/local/lib/node_modules/npm/` (npm uses `tar` internally). These are MEDIUM severity (Warning) and don't trigger the exit code 1 — only the picomatch HIGH CVE does.
+
+**Fix (three changes)**
+
+a. `backend/Dockerfile` — delete `package-lock.json` AFTER all `COPY` steps (it's not needed at runtime; removing it prevents Trivy from reading it and flagging dev-only packages):
 ```dockerfile
-FROM node:22-alpine AS base
-RUN apk upgrade --no-cache
+COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+COPY --chown=appuser:appgroup . .
+RUN rm -f package-lock.json    # must come after COPY . . or it gets copied back
 ```
 
-`client/Dockerfile` (both stages):
-```dockerfile
-FROM node:22-alpine AS builder
-RUN apk upgrade --no-cache
-...
-FROM nginx:1.27-alpine AS runner
-RUN apk upgrade --no-cache
-```
+b. Changed `--only=production` → `--omit=dev` (the former was deprecated as of npm 7).
 
-**Diagnostic step added** — when Trivy fails, a follow-up step (`if: failure()`) now prints CVE IDs to the CI log via `jq` so you don't need to download the SARIF file:
+c. Added `RUN apk upgrade --no-cache` to all three image stages (node:22-alpine backend, node:22-alpine builder, nginx:1.27-alpine runner) to patch OS-level packages — this is general hygiene and was added in the same commit.
+
+**Diagnostic step added** — when Trivy fails, a follow-up step (`if: failure()`) now prints CVE IDs to the CI log via `jq`:
 ```yaml
 - name: Show backend CVEs in CI log (diagnostic on failure)
   if: failure()
