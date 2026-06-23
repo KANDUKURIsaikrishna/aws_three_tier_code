@@ -93,21 +93,19 @@ Internet
 aws_three_tier_code-main/
 │
 ├── main.tf                        # Root Terraform — all module wiring
-├── github-oidc-trust.json         # Trust policy for GitHub OIDC IAM role
-├── github-oidc-policy.json        # Permissions policy for GitHub OIDC role
+├── eks_bootstrap.py               # One-time cluster setup after terraform apply
+├── gp3-storageclass.yaml          # EBS gp3 StorageClass for MySQL PVC
+├── cluster-issuer.yaml            # Let's Encrypt ClusterIssuer for cert-manager
 │
 ├── modules/
 │   ├── network/                   # VPC, subnets, IGW, NAT, route tables
-│   ├── security/                  # Security groups: ALB ingress + RDS only
+│   ├── security/                  # Security groups: NLB (80/443 public) + RDS (3306 VPC-only)
 │   ├── acm/                       # ACM TLS certificate (b17facebook.xyz)
 │   ├── rds/                       # RDS MySQL 8.0 Multi-AZ
-│   ├── ecr/                       # ECR repos: bookstore-frontend, bookstore-backend
+│   ├── ecr/                       # ECR repos: bookstore-frontend, bookstore-backend (IMMUTABLE)
 │   ├── eks/                       # EKS cluster 1.31, OIDC provider, node group
 │   ├── route53/                   # Private hosted zone for RDS internal DNS
-│   ├── bastion/                   # (deprecated, kept in tree, not wired)
-│   ├── load_balancers/            # (deprecated, kept in tree, not wired)
-│   ├── launch_templates/          # (deprecated, kept in tree, not wired)
-│   └── asg/                       # (deprecated, kept in tree, not wired)
+│   └── security/                  # Security groups
 │
 ├── k8s/
 │   ├── namespace.yaml             # bookstore namespace
@@ -124,11 +122,11 @@ aws_three_tier_code-main/
 │   ├── backend/
 │   │   ├── deployment.yaml       # Backend Deployment (non-root, read-only FS)
 │   │   ├── service.yaml
-│   │   └── hpa.yaml              # HPA: CPU 70%, min 2 / max 5
+│   │   └── hpa.yaml              # HPA: CPU 70%, Memory 80%, min 2 / max 10
 │   ├── frontend/
 │   │   ├── deployment.yaml       # Frontend Deployment (non-root, read-only FS)
 │   │   ├── service.yaml
-│   │   └── hpa.yaml
+│   │   └── hpa.yaml              # HPA: CPU 70%, min 2 / max 5
 │   ├── ingress/
 │   │   └── ingress.yaml          # Nginx Ingress + cert-manager TLS
 │   ├── network-policy/
@@ -139,14 +137,13 @@ aws_three_tier_code-main/
 │       └── application.yaml      # ArgoCD Application manifest
 │
 ├── .github/workflows/
-│   ├── ci-cd.yml                  # DevSecOps app pipeline (4 stages)
+│   ├── ci-cd.yml                  # DevSecOps app pipeline (5 stages)
 │   └── terraform.yml              # Terraform plan / apply pipeline
 │
 ├── backend/
 │   ├── index.js                   # Express CRUD API (/books)
 │   ├── Dockerfile
-│   ├── package.json
-│   └── test.sql                   # Schema seed for local dev
+│   └── package.json
 │
 ├── client/
 │   ├── src/pages/config.js        # API_BASE_URL (set for local dev)
@@ -161,6 +158,7 @@ aws_three_tier_code-main/
 ├── README.md
 ├── IMPLEMENTATION_GUIDE.md        # Step-by-step deployment guide
 ├── FUTURE.md                      # ADRs, known limitations, roadmap
+├── TROUBLESHOOTING.md             # Running log of every error + fix
 └── PROJECT_SUMMARY.md             # ← this file
 ```
 
@@ -198,13 +196,13 @@ terraform output eks_oidc_provider_arn
 | Index | CIDR | AZ | Purpose |
 |-------|------|----|---------|
 | public[0] | 170.20.1.0/24 | us-west-1a | IGW / NLB |
-| public[1] | 170.20.2.0/24 | us-west-1b | IGW / NLB |
+| public[1] | 170.20.2.0/24 | us-west-1c | IGW / NLB |
 | private[0] | 170.20.3.0/24 | us-west-1a | EKS nodes |
-| private[1] | 170.20.4.0/24 | us-west-1b | EKS nodes |
+| private[1] | 170.20.4.0/24 | us-west-1c | EKS nodes |
 | private[2] | 170.20.5.0/24 | us-west-1a | EKS nodes |
-| private[3] | 170.20.6.0/24 | us-west-1b | EKS nodes |
+| private[3] | 170.20.6.0/24 | us-west-1c | EKS nodes |
 | private[4] | 170.20.7.0/24 | us-west-1a | RDS |
-| private[5] | 170.20.8.0/24 | us-west-1b | RDS |
+| private[5] | 170.20.8.0/24 | us-west-1c | RDS |
 
 ---
 
@@ -225,8 +223,8 @@ terraform output eks_oidc_provider_arn
 
 | Resource | Replicas | Image | Port |
 |----------|----------|-------|------|
-| `frontend` Deployment | 2 | `bookstore-frontend:<sha>` | 8080 |
-| `backend` Deployment | 2 | `bookstore-backend:<sha>` | 3000 |
+| `frontend` Deployment | 2 (HPA: 2–5) | `bookstore-frontend:<sha8>` | 8080 |
+| `backend` Deployment | 2 (HPA: 2–10) | `bookstore-backend:<sha8>` | 3000 |
 | `mysql` StatefulSet | 1 | `mysql:8.0` | 3306 (dev only) |
 
 ### Security Posture of All Pods
@@ -255,7 +253,7 @@ terraform output eks_oidc_provider_arn
 
 ### HPA
 
-Both `backend` and `frontend` scale on CPU target 70%, min 2 replicas, max 5.
+Frontend scales on CPU 70%, min 2, max 5. Backend scales on CPU 70% or Memory 80%, min 2, max 10.
 
 ---
 
@@ -374,7 +372,19 @@ RDS master password is also managed by AWS Secrets Manager automatically via `ma
 
 ---
 
-## 10. Changes Made During This Session
+## 10. Known Issues / Pending Items
+
+| Item | Status | Action |
+|------|--------|--------|
+| Terraform S3 backend | Empty strings in `main.tf` | Run `scripts/bootstrap-tf-state.sh us-west-1` then fill in bucket + table |
+| RDS deletion protection | Currently `false` | Re-enable once infrastructure is stable |
+| SSH keys from leaked files | Previously committed | Revoke old keys at provider level (files removed from git) |
+| In-cluster MySQL vs RDS | StatefulSet in current deploy | Switch `DB_HOST` in `backend-config.yaml` to RDS endpoint for prod |
+| EKS add-ons | Manual install via `eks_bootstrap.py` | Not yet managed by Terraform |
+
+---
+
+## 10b. Historical Context (EC2/ASG Path Removal)
 
 ### Bug Fixes Applied (from `terraform apply` errors)
 
@@ -427,45 +437,38 @@ Every file updated:
 | `IMPLEMENTATION_GUIDE.md` | All region/AZ/URL references |
 | `README.md` | All region/AZ/URL references |
 
-**Note:** us-west-1 has only 2 AZs (`us-west-1a`, `us-west-1b`). The 6 private subnets alternate between these two — same topology, different region.
+**Note:** us-west-1 has only 2 AZs (`us-west-1a`, `us-west-1c`). The 6 private subnets alternate between these two — same topology, different region.
 
 ---
 
 ## 11. Open Items / Known Limitations
 
-### Must Do Before First Apply
-
-- [ ] Run `scripts/bootstrap-tf-state.sh us-west-1` to create S3 bucket + DynamoDB lock table
-- [ ] Fill in `backend "s3"` block in `main.tf` with the bucket name and table name printed by the script
-- [ ] Replace `YOUR_ORG/YOUR_REPO` in `k8s/argocd/application.yaml` with your actual GitHub repo URL
-- [ ] Replace `ACCOUNT_ID` in `k8s/kustomization.yaml` with your 12-digit AWS account ID
-
 ### Infrastructure
 
-- **Terraform remote state not enabled** — `backend "s3"` block bucket/table values are empty strings. Bootstrap script must run first.
-- **EKS add-ons are manual** — EBS CSI, cert-manager, ESO, and Nginx Ingress are not managed by Terraform; they must be installed via `aws eks create-addon` and Helm after cluster creation.
-- **No gp3 StorageClass manifest** — must `kubectl apply` the StorageClass inline after EBS CSI is active.
+- **Terraform remote state** — run `scripts/bootstrap-tf-state.sh us-west-1` then fill the `backend "s3"` block in `main.tf`.
+- **EKS add-ons are manual** — EBS CSI, cert-manager, ESO, and Nginx Ingress installed via `eks_bootstrap.py`, not Terraform.
+- **gp3 StorageClass** — installed by `eks_bootstrap.py` or via `kubectl apply -f gp3-storageclass.yaml`.
 
 ### Application
 
-- **In-cluster MySQL is dev-only** — `k8s/database/mysql-statefulset.yaml` must not be applied to production; change `DB_HOST` in `k8s/configmaps/backend-config.yaml` to the RDS endpoint for prod.
+- **In-cluster MySQL is dev-only** — change `DB_HOST` in `k8s/configmaps/backend-config.yaml` to the RDS endpoint for production.
 - **No graceful shutdown** — backend has no `process.on('SIGTERM')` handler; in-flight requests may drop on pod termination.
 - **No integration tests** — backend has no automated test suite beyond `npm audit`.
 
 ---
 
-## 12. Planned Improvements (from FUTURE.md)
+## 12. Planned Improvements
 
 ### Short Term
-1. Kustomize dev/staging/prod overlays (replaces manual `ACCOUNT_ID` substitution)
-2. Add `k8s/storageclass/gp3.yaml` manifest
-3. Manage EKS add-ons in Terraform (`helm_release` in a `modules/eks-addons/` module)
-4. Enable Terraform remote state (bootstrap script exists; just needs to be run)
+1. Kustomize dev/staging/prod overlays for multi-environment config
+2. Manage EKS add-ons in Terraform (`helm_release` in a `modules/eks-addons/` module)
+3. Enable Terraform remote state (bootstrap script exists; fill in `main.tf` backend block)
+4. Backend graceful shutdown (`process.on('SIGTERM')`)
 
 ### Medium Term
-5. GitOps already partially implemented (ArgoCD + kustomize image tag commit); complete by removing any remaining direct `kubectl` calls
-6. Helm chart packaging for environment-specific config
-7. Observability stack: Prometheus + Grafana + Loki
+5. Helm chart packaging for environment-specific config
+6. Observability stack: Prometheus + Grafana + Loki
+7. Backend integration tests (Jest + test containers)
 
 ### Long Term
 8. Multi-region active-passive failover (us-west-1 primary + us-west-2 DR)
