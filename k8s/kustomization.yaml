@@ -28,7 +28,7 @@ resources:
 images:
 - name: bookstore-backend
   newName: YOUR_AWS_ACCOUNT_ID.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
-  newTag: 02cf7c88
+  newTag: a024ee97
 - name: bookstore-frontend
   newName: YOUR_AWS_ACCOUNT_ID.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
-  newTag: 02cf7c88
+  newTag: a024ee97
