@@ -87,6 +87,16 @@ run(["kubectl", "get", "nodes"])
 
 header("Phase 2: Installing EBS CSI add-on...")
 
+# The EBS CSI driver requires AmazonEBSCSIDriverPolicy on the node role.
+# Attach it idempotently before creating the add-on — without this the
+# driver pods can never start and the add-on stays stuck in CREATING forever.
+node_role = f"{CLUSTER_NAME.replace('-eks', '')}-eks-node-role"
+print(f"Attaching AmazonEBSCSIDriverPolicy to node role: {node_role}")
+run(["aws", "iam", "attach-role-policy",
+     "--role-name", node_role,
+     "--policy-arn", "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"],
+    check=False)  # check=False — already attached on re-runs is not an error
+
 # Check if the add-on already exists before trying to create it
 existing_status = capture(["aws", "eks", "describe-addon",
                             "--cluster-name", CLUSTER_NAME,

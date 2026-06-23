@@ -89,6 +89,12 @@ resource "aws_iam_role_policy_attachment" "node_ecr_readonly" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
+resource "aws_iam_role_policy_attachment" "node_ebs_csi" {
+  # Required for the aws-ebs-csi-driver add-on to provision EBS volumes
+  role       = aws_iam_role.node_group.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}
+
 # ── Managed Node Group ────────────────────────────────────────────────────────
 
 resource "aws_eks_node_group" "this" {
