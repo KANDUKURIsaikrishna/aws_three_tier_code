@@ -727,24 +727,106 @@ Error: Host '170.20.5.88' is not allowed to connect to this MySQL server
 **Root cause**  
 MySQL's `ER_HOST_NOT_PRIVILEGED` (error 1130) means no row in `mysql.user` matches the connecting host for the user. The MySQL Docker image creates `MYSQL_USER@'%'` during first-run initialization, but if `db-secret` did not exist when `mysql-0` first started (pod was in `CreateContainerConfigError`), and then was created moments later causing a restart, the initialization timing can result in `admin@'localhost'` being created instead of `admin@'%'`, or the user not being created at all.
 
-**Diagnosis** (PowerShell-safe — decodes the password from the k8s secret then calls mysql directly without going through bash -c quoting):
-```powershell
-$pass = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((kubectl get secret db-secret -n bookstore -o jsonpath='{.data.DB_PASSWORD}')))
-kubectl exec -n bookstore mysql-0 -- mysql -uroot -p"$pass" -e "SELECT user, host FROM mysql.user;"
-```
-Look for `admin` — if host is `localhost` instead of `%` the backend pods on other nodes are blocked.
+**Note — PowerShell quoting trap**  
+`kubectl exec -- bash -c '...'` with single quotes fails in PowerShell because PowerShell strips the outer single quotes and the shell command breaks. Always decode the secret in PowerShell first, then pass values directly as kubectl exec arguments (no bash -c needed).
 
-**Fix** — create `admin@'%'` and grant privileges:
-```powershell
-kubectl exec -n bookstore mysql-0 -- mysql -uroot -p"$pass" -e "CREATE USER IF NOT EXISTS 'admin'@'%' IDENTIFIED BY '$pass'; GRANT ALL PRIVILEGES ON *.* TO 'admin'@'%'; FLUSH PRIVILEGES;"
+See Issue #26 for the full resolution — root cause turned out to be a MySQL root password mismatch requiring `--skip-grant-tables` reset.
+
+---
+
+## 26. MySQL root password mismatch — `Access denied for user 'root'@'localhost'`
+
+**Error**
 ```
-After this, delete the backend pods so they restart and reconnect:
+ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)
+```
+
+**Root cause**  
+MySQL was initialized with a different root password than the value currently in `db-secret`. This happens when:
+- The pod PVC survived a `terraform destroy`/`apply` cycle but the Secrets Manager value changed, OR
+- MySQL init ran before the ESO sync completed (empty or wrong `MYSQL_ROOT_PASSWORD` at init time)
+
+The `MYSQL_ROOT_PASSWORD` env var in the running pod reflected the current secret value, but MySQL's internal `mysql.user` table stored the old (original) password hash from initialization — so no form of passing the current secret's value worked for root login.
+
+**Additional complication — password contains a single quote**  
+The password (`KANDUKURI's@698`) contains a `'` character. Embedding it directly in a SQL string like `IDENTIFIED BY '$pass'` breaks the SQL syntax. Must escape before use.
+
+**Fix — full sequence (PowerShell)**
+
 ```powershell
+# 1. Patch StatefulSet to boot MySQL with no auth enforcement
+Set-Content -Path "$env:TEMP\patch.json" -Value '[{"op":"add","path":"/spec/template/spec/containers/0/args","value":["--skip-grant-tables","--skip-networking"]}]' -Encoding utf8
+kubectl patch statefulset mysql -n bookstore --type=json --patch-file="$env:TEMP\patch.json"
+
+# 2. Bounce pod
+kubectl delete pod mysql-0 -n bookstore
+kubectl wait pod/mysql-0 -n bookstore --for=condition=Ready --timeout=120s
+
+# 3. Get password and escape the single quote for SQL
+$pass = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((kubectl get secret db-secret -n bookstore -o jsonpath='{.data.DB_PASSWORD}')))
+$sqlPass = $pass.Replace("'", "''")
+
+# 4. Reset root password and create admin@'%'
+$sql = "FLUSH PRIVILEGES; ALTER USER 'root'@'localhost' IDENTIFIED BY '$sqlPass'; CREATE USER IF NOT EXISTS 'admin'@'%' IDENTIFIED BY '$sqlPass'; GRANT ALL PRIVILEGES ON *.* TO 'admin'@'%'; FLUSH PRIVILEGES;"
+$sql | kubectl exec -i -n bookstore mysql-0 -- mysql -uroot
+
+# 5. Restore normal StatefulSet (remove skip-grant-tables)
+Set-Content -Path "$env:TEMP\unpatch.json" -Value '[{"op":"remove","path":"/spec/template/spec/containers/0/args"}]' -Encoding utf8
+kubectl patch statefulset mysql -n bookstore --type=json --patch-file="$env:TEMP\unpatch.json"
+kubectl delete pod mysql-0 -n bookstore
+kubectl wait pod/mysql-0 -n bookstore --for=condition=Ready --timeout=120s
+
+# 6. Restart backend pods to reconnect
 kubectl delete pods -n bookstore -l app=backend
 ```
 
-**Note — PowerShell quoting trap**  
-`kubectl exec -- bash -c '...'` with single quotes fails in PowerShell because PowerShell strips the outer single quotes and the shell command breaks. Always use the pattern above: decode the secret in PowerShell, then pass values directly as kubectl exec arguments (no bash -c needed).
+**Why `--patch-file` instead of `-p`**  
+PowerShell strips double-quotes from string arguments passed to external executables. `kubectl patch ... -p '[{"op":...}]'` arrives at kubectl as `[{op:...}]` (unquoted, invalid JSON/YAML). Writing the patch to a temp file and using `--patch-file` sidesteps this entirely.
+
+**Why pipe SQL via stdin (`$sql | kubectl exec -i ...`) instead of `-e`**  
+The `-e` flag embeds the SQL in the command line, where special characters in the password (single quotes, `@`, `$`) can be further mangled by shell argument parsing. Piping via stdin sends the string as-is with no additional interpretation.
+
+---
+
+## 27. Backend `CrashLoopBackOff` — `ER_BAD_DB_ERROR: Unknown database 'test'`
+
+**Error** (from `kubectl logs -n bookstore <backend-pod>`)
+```
+Error: Unknown database 'test'
+    code: 'ER_BAD_DB_ERROR'
+```
+
+**Root cause**  
+MySQL's `/docker-entrypoint-initdb.d/init.sql` (mounted from `mysql-init` ConfigMap) only runs during the very first start when the data directory is empty. If the PVC already contains MySQL data from a previous run — even with broken passwords or a failed init — Docker's entrypoint skips the init scripts entirely. The `test` database and `books` table are never created, so the backend crashes immediately on connect.
+
+**Immediate fix** (one-off — PowerShell)
+```powershell
+$pass = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((kubectl get secret db-secret -n bookstore -o jsonpath='{.data.DB_PASSWORD}')))
+
+$initSql = @'
+CREATE DATABASE IF NOT EXISTS test;
+USE test;
+CREATE TABLE IF NOT EXISTS books (
+  id     INT NOT NULL AUTO_INCREMENT,
+  title  VARCHAR(300) NOT NULL,
+  `desc` VARCHAR(500) NOT NULL,
+  price  FLOAT NOT NULL,
+  cover  VARCHAR(500) NOT NULL,
+  PRIMARY KEY (id)
+);
+INSERT IGNORE INTO books (title, `desc`, price, cover) VALUES
+  ('The Great Gatsby', 'A novel by F. Scott Fitzgerald', 12.99, 'https://covers.openlibrary.org/b/id/8432472-L.jpg'),
+  ('To Kill a Mockingbird', 'A novel by Harper Lee', 10.99, 'https://covers.openlibrary.org/b/id/8810494-L.jpg');
+'@
+
+$initSql | kubectl exec -i -n bookstore mysql-0 -- mysql -uroot -p"$pass"
+```
+
+**Permanent fix — automated in `eks_bootstrap.py` Phase 9**  
+Phase 9 now waits for `mysql-0` to be Ready, reads the root password from `db-secret`, and pipes the init SQL to MySQL via `subprocess.run` with a list of arguments (no shell, so password special characters — including single quotes — are passed safely). The SQL uses `CREATE DATABASE IF NOT EXISTS` and `INSERT IGNORE`, so re-runs are idempotent.
+
+**Why many backend pods appeared**  
+While MySQL was broken, rolling updates kept creating new ReplicaSets (each CI deploy = new RS) but pods kept crashing, so Kubernetes never scaled down old RSes. After MySQL was fixed, all new pods became healthy and old RSes were cleaned up automatically.
 
 ---
 
@@ -766,4 +848,5 @@ kubectl delete pods -n bookstore -l app=backend
 | Route53 A records after cluster recreate | ⚠️ Pending | Update `bookstore.b17facebook.xyz` and `api.bookstore.b17facebook.xyz` to NLB: `a537e4bede0ec4041b0ea73b5f889999-1994490591.us-west-1.elb.amazonaws.com` |
 | ECR images after terraform destroy/apply | ⚠️ Pending | Trigger CI/CD pipeline (push to main) to rebuild and push images — see Issue #22 |
 | ECR immutable tag — `latest` push fails | ✅ Done | Removed `latest` tag push from ci-cd.yml — see Issue #24 |
-| MySQL `ER_HOST_NOT_PRIVILEGED` on backend pods | ⚠️ In progress | `admin@'%'` user missing or wrong host — see Issue #25 |
+| MySQL root password reset + `admin@'%'` | ✅ Done | Reset via `--skip-grant-tables`; `admin@'%'` created — see Issues #25, #26 |
+| MySQL `test` DB + `books` table missing | ✅ Done | Created manually; now automated in `eks_bootstrap.py` Phase 9 — see Issue #27 |

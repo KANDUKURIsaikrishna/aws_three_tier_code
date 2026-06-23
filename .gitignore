@@ -36,3 +36,6 @@ Thumbs.db
 .vscode/
 .idea/
 kubectl.exe
+
+# Claude Code — local AI assistant config (not team config)
+.claude/
