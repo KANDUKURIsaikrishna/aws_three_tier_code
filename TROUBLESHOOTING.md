@@ -715,6 +715,39 @@ Same change applied to the frontend step.
 
 ---
 
+## 25. Backend `CrashLoopBackOff` — MySQL `ER_HOST_NOT_PRIVILEGED` (backend pod IP rejected)
+
+**Error** (from `kubectl logs -n bookstore <backend-pod>`)
+```
+Connected to backend on port 3000.
+Error: Host '170.20.5.88' is not allowed to connect to this MySQL server
+    code: 'ER_HOST_NOT_PRIVILEGED'
+```
+
+**Root cause**  
+MySQL's `ER_HOST_NOT_PRIVILEGED` (error 1130) means no row in `mysql.user` matches the connecting host for the user. The MySQL Docker image creates `MYSQL_USER@'%'` during first-run initialization, but if `db-secret` did not exist when `mysql-0` first started (pod was in `CreateContainerConfigError`), and then was created moments later causing a restart, the initialization timing can result in `admin@'localhost'` being created instead of `admin@'%'`, or the user not being created at all.
+
+**Diagnosis** (PowerShell-safe — decodes the password from the k8s secret then calls mysql directly without going through bash -c quoting):
+```powershell
+$pass = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((kubectl get secret db-secret -n bookstore -o jsonpath='{.data.DB_PASSWORD}')))
+kubectl exec -n bookstore mysql-0 -- mysql -uroot -p"$pass" -e "SELECT user, host FROM mysql.user;"
+```
+Look for `admin` — if host is `localhost` instead of `%` the backend pods on other nodes are blocked.
+
+**Fix** — create `admin@'%'` and grant privileges:
+```powershell
+kubectl exec -n bookstore mysql-0 -- mysql -uroot -p"$pass" -e "CREATE USER IF NOT EXISTS 'admin'@'%' IDENTIFIED BY '$pass'; GRANT ALL PRIVILEGES ON *.* TO 'admin'@'%'; FLUSH PRIVILEGES;"
+```
+After this, delete the backend pods so they restart and reconnect:
+```powershell
+kubectl delete pods -n bookstore -l app=backend
+```
+
+**Note — PowerShell quoting trap**  
+`kubectl exec -- bash -c '...'` with single quotes fails in PowerShell because PowerShell strips the outer single quotes and the shell command breaks. Always use the pattern above: decode the secret in PowerShell, then pass values directly as kubectl exec arguments (no bash -c needed).
+
+---
+
 ## Pending / Not Yet Done
 
 | Item | Status | What's needed |
@@ -733,3 +766,4 @@ Same change applied to the frontend step.
 | Route53 A records after cluster recreate | ⚠️ Pending | Update `bookstore.b17facebook.xyz` and `api.bookstore.b17facebook.xyz` to NLB: `a537e4bede0ec4041b0ea73b5f889999-1994490591.us-west-1.elb.amazonaws.com` |
 | ECR images after terraform destroy/apply | ⚠️ Pending | Trigger CI/CD pipeline (push to main) to rebuild and push images — see Issue #22 |
 | ECR immutable tag — `latest` push fails | ✅ Done | Removed `latest` tag push from ci-cd.yml — see Issue #24 |
+| MySQL `ER_HOST_NOT_PRIVILEGED` on backend pods | ⚠️ In progress | `admin@'%'` user missing or wrong host — see Issue #25 |
