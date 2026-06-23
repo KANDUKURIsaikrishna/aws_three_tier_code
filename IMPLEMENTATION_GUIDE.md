@@ -10,19 +10,20 @@ Follow every part in order on a first deployment. After initial setup, only Part
 
 1. [Architecture Overview](#1-architecture-overview)
 2. [Prerequisites](#2-prerequisites)
-3. [Part 1 — AWS Account Setup](#part-1--aws-account-setup)
-4. [Part 2 — Bootstrap Terraform Remote State](#part-2--bootstrap-terraform-remote-state)
-5. [Part 3 — Provision Infrastructure with Terraform](#part-3--provision-infrastructure-with-terraform)
-6. [Part 4 — Configure kubectl and Install EKS Add-ons](#part-4--configure-kubectl-and-install-eks-add-ons)
-7. [Part 5 — Install ArgoCD](#part-5--install-argocd)
-8. [Part 6 — Configure Secret Management](#part-6--configure-secret-management)
-9. [Part 7 — GitHub Repository Setup](#part-7--github-repository-setup)
-10. [Part 8 — Update Repository Placeholders](#part-8--update-repository-placeholders)
-11. [Part 9 — First Deployment](#part-9--first-deployment)
-12. [Part 10 — DNS and TLS Configuration](#part-10--dns-and-tls-configuration)
-13. [Part 11 — Verify the Application](#part-11--verify-the-application)
-14. [Part 12 — Local Development Setup](#part-12--local-development-setup)
-15. [Troubleshooting](#troubleshooting)
+3. [Part 0 — One-time Configuration](#part-0--one-time-configuration)
+4. [Part 1 — AWS Account Setup](#part-1--aws-account-setup)
+5. [Part 2 — Bootstrap Terraform Remote State](#part-2--bootstrap-terraform-remote-state)
+6. [Part 3 — Provision Infrastructure with Terraform](#part-3--provision-infrastructure-with-terraform)
+7. [Part 4 — Bootstrap the EKS Cluster](#part-4--bootstrap-the-eks-cluster)
+8. [Part 5 — Install ArgoCD](#part-5--install-argocd)
+9. [Part 6 — Configure Secret Management](#part-6--configure-secret-management)
+10. [Part 7 — GitHub Repository Setup](#part-7--github-repository-setup)
+11. [Part 8 — Apply Configuration and First Deploy](#part-8--apply-configuration-and-first-deploy)
+12. [Part 9 — First Deployment](#part-9--first-deployment)
+13. [Part 10 — DNS and TLS Configuration](#part-10--dns-and-tls-configuration)
+14. [Part 11 — Verify the Application](#part-11--verify-the-application)
+15. [Part 12 — Local Development Setup](#part-12--local-development-setup)
+16. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -40,7 +41,7 @@ Follow every part in order on a first deployment. After initial setup, only Part
 │   │  ┌──────────────────────────────────────────────────────────────────┐   │   │
 │   │  │  Public Subnets                                                  │   │   │
 │   │  │                                                                  │   │   │
-│   │  │   us-west-1a (170.20.1.0/24)    us-west-1b (170.20.2.0/24)      │   │   │
+│   │  │   us-west-1a (170.20.1.0/24)    us-west-1c (170.20.2.0/24)      │   │   │
 │   │  │   ┌──────────────────────┐      ┌──────────────────────┐        │   │   │
 │   │  │   │  Internet Gateway    │      │   NAT Gateway         │        │   │   │
 │   │  │   │  Nginx Ingress NLB   │      │   (outbound traffic)  │        │   │   │
@@ -51,7 +52,7 @@ Follow every part in order on a first deployment. After initial setup, only Part
 │   │  ┌──────────────────────────────────────────────────────────────────┐   │   │
 │   │  │  Private Subnets — App Tier (EKS)                                │   │   │
 │   │  │                                                                  │   │   │
-│   │  │   us-west-1a (170.20.3.0/24)    us-west-1b (170.20.4.0/24)      │   │   │
+│   │  │   us-west-1a (170.20.3.0/24)    us-west-1c (170.20.4.0/24)      │   │   │
 │   │  │   ┌──────────────────────────────────────────────────────────┐   │   │   │
 │   │  │   │  EKS Managed Node Group  (t3.medium × 1–4 nodes)         │   │   │   │
 │   │  │   │                                                          │   │   │   │
@@ -73,7 +74,7 @@ Follow every part in order on a first deployment. After initial setup, only Part
 │   │  ┌──────────────────────────────────────────────────────────────────┐   │   │
 │   │  │  Private Subnets — Data Tier                                     │   │   │
 │   │  │                                                                  │   │   │
-│   │  │   us-west-1a (170.20.7.0/24)    us-west-1b (170.20.8.0/24)      │   │   │
+│   │  │   us-west-1a (170.20.7.0/24)    us-west-1c (170.20.8.0/24)      │   │   │
 │   │  │   ┌──────────────────────────────────────────────────────────┐   │   │   │
 │   │  │   │  RDS MySQL 8.0  (db.t3.micro, Multi-AZ, deletion-protect)│   │   │   │
 │   │  │   └──────────────────────────────────────────────────────────┘   │   │   │
@@ -195,7 +196,48 @@ kustomize version
 You also need:
 - An **AWS account** with administrator access (or a scoped IAM user — see Part 1)
 - A **GitHub account** with a repository for this project
-- A **registered domain name** (this project uses `b17facebook.xyz`) with Route 53 as the DNS provider, or the ability to add DNS records wherever your domain is hosted
+- A **registered domain name** with Route 53 as the DNS provider, or the ability to add DNS records wherever your domain is hosted
+
+---
+
+## Part 0 — One-time Configuration
+
+All environment-specific values (account ID, domain, GitHub repo) live in a single gitignored file. Fill it in once; every script and manifest picks up the values automatically.
+
+### Step 0.1 — Create config.env
+
+```bash
+# From the repo root
+cp config.env.example config.env
+```
+
+Open `config.env` and fill in your real values:
+
+```bash
+AWS_ACCOUNT_ID=123456789012        # 12-digit account ID (aws sts get-caller-identity)
+AWS_REGION=us-west-1
+DOMAIN=your-domain.com             # e.g. example.com  — app lives at bookstore.<DOMAIN>
+GITHUB_REPO=YOUR_GITHUB_USERNAME/aws_three_tier_code
+```
+
+### Step 0.2 — Run the configure script
+
+```bash
+python scripts/configure.py
+```
+
+What it does:
+
+| Target | What gets written |
+|---|---|
+| `terraform.tfvars` | `aws_region`, `domain`, `github_repo` variables (gitignored) |
+| `k8s/ingress/ingress.yaml` | host rules with your real domain |
+| `k8s/argocd/application.yaml` | `repoURL` with your real GitHub repo |
+| `k8s/kustomization.yaml` | ECR registry with your real account ID |
+
+> **Re-run this script** any time you change `config.env` (e.g. domain change, new account). It is idempotent.
+
+> `config.env` and `terraform.tfvars` are in `.gitignore` — never commit them.
 
 ---
 
@@ -248,7 +290,13 @@ aws iam create-open-id-connect-provider \
 
 If the provider already exists you will get a `EntityAlreadyExists` error — that is fine, continue.
 
-**2. Create the trust policy file. Replace `YOUR_ORG` and `YOUR_REPO`:**
+**2. Create the trust policy file:**
+
+> `GITHUB_REPO` and `ACCOUNT_ID` come from `config.env` (set in Part 0). Source it first if you haven't already:
+> ```bash
+> source config.env
+> export ACCOUNT_ID=$AWS_ACCOUNT_ID
+> ```
 
 ```bash
 cat > /tmp/github-oidc-trust.json << EOF
@@ -266,7 +314,7 @@ cat > /tmp/github-oidc-trust.json << EOF
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:YOUR_ORG/YOUR_REPO:*"
+          "token.actions.githubusercontent.com:sub": "repo:${GITHUB_REPO}:*"
         }
       }
     }
@@ -378,13 +426,13 @@ backend block with the values below, then run: terraform init -migrate-state
   }
 ```
 
-### Step 2.2 — Update main.tf with your account ID
+### Step 2.2 — Fill in the backend block in main.tf
 
-Open `main.tf` and replace the `ACCOUNT_ID` placeholder in the backend block with your 12-digit account ID printed by the script:
+The S3 backend block cannot use Terraform variables (it is parsed before variables are loaded), so you must edit `main.tf` directly — once. Replace the empty `bucket` and `dynamodb_table` strings with the values printed by the bootstrap script:
 
 ```hcl
 backend "s3" {
-  bucket         = "bookstore-terraform-state-123456789012"   # ← your actual account ID
+  bucket         = "bookstore-terraform-state-123456789012"   # ← printed by bootstrap script
   key            = "prod/terraform.tfstate"
   region         = "us-west-1"
   dynamodb_table = "terraform-state-lock"
@@ -392,7 +440,9 @@ backend "s3" {
 }
 ```
 
-> **Important:** Do this substitution exactly once. Every subsequent `terraform init` and `terraform apply` will reuse the same S3 object. The state file is never recreated.
+> **All other project-specific values** (`domain`, `github_repo`) are in `terraform.tfvars`, which was generated by `scripts/configure.py` in Part 0. You do not need to edit `main.tf` for those.
+
+> Do this substitution exactly once. Every subsequent `terraform init` and `terraform apply` reuse the same S3 object.
 
 ---
 
@@ -459,11 +509,39 @@ terraform output eks_oidc_provider_arn
 
 ---
 
-## Part 4 — Configure kubectl and Install EKS Add-ons
+## Part 4 — Bootstrap the EKS Cluster
 
-EKS needs four cluster add-ons that are not managed by Terraform: the EBS CSI driver (for persistent volumes), cert-manager (TLS), External Secrets Operator (secret sync), and Nginx Ingress.
+All of the steps in this section (kubectl config, EBS CSI driver, gp3 StorageClass, cert-manager, ClusterIssuer, External Secrets Operator, IRSA, Nginx Ingress, MySQL DB init) are automated by `eks_bootstrap.py`. **Run the script** instead of following the manual steps, unless you want full control over each phase.
 
-### Step 4.1 — Configure kubectl
+### Step 4.0 — Run eks_bootstrap.py (recommended)
+
+```bash
+# Source config.env so DOMAIN is available, then run the bootstrap script
+source config.env
+DOMAIN=$DOMAIN python eks_bootstrap.py
+```
+
+The script runs 10 phases in order and is safe to re-run (all steps are idempotent). Expected output ends with:
+
+```
+>>> Phase 10: ArgoCD — cluster registered
+======================================================================
+Bootstrap complete. Apply the ArgoCD Application manifest:
+  kubectl apply -f k8s/argocd/application.yaml
+======================================================================
+```
+
+If all phases pass, skip to [Part 5](#part-5--install-argocd).
+
+If a single phase fails, re-run the script — it picks up where it left off. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for phase-specific errors.
+
+---
+
+### Manual steps (reference — skip if you used eks_bootstrap.py)
+
+The steps below document exactly what the script does. Follow them only if you want to run phases individually.
+
+#### Step 4.1 — Configure kubectl
 
 ```bash
 aws eks update-kubeconfig \
@@ -525,7 +603,7 @@ kubectl get storageclass
 
 ### Step 4.3 — Install cert-manager
 
-cert-manager issues and renews TLS certificates from Let's Encrypt for the `bookstore.b17facebook.xyz` and `api.bookstore.b17facebook.xyz` domains.
+cert-manager issues and renews TLS certificates from Let's Encrypt for `bookstore.<DOMAIN>` and `api.bookstore.<DOMAIN>` (your domain from `config.env`).
 
 ```bash
 helm repo add jetstack https://charts.jetstack.io
@@ -678,6 +756,8 @@ Note the `EXTERNAL-IP` value (an AWS ELB hostname) — you will need it for DNS 
 
 ArgoCD is the GitOps engine. It watches the `k8s/` directory in your GitHub repository and reconciles the cluster state to match what is in git.
 
+> **If you ran `eks_bootstrap.py` in Part 4**, ArgoCD is already installed. Skip to Step 5.3 to register the Application manifest.
+
 ### Step 5.1 — Install ArgoCD
 
 ```bash
@@ -734,8 +814,9 @@ argocd login localhost:8080 \
   --insecure
 
 # Add the repo (use a GitHub Personal Access Token with repo scope)
-argocd repo add https://github.com/YOUR_ORG/YOUR_REPO \
-  --username YOUR_GITHUB_USERNAME \
+# GITHUB_REPO comes from config.env — source it first: source config.env
+argocd repo add https://github.com/$GITHUB_REPO \
+  --username $(echo $GITHUB_REPO | cut -d/ -f1) \
   --password YOUR_GITHUB_PAT
 ```
 
@@ -780,7 +861,7 @@ Create each secret:
 |---|---|---|
 | `AWS_ACCOUNT_ID` | `123456789012` | Your 12-digit AWS account ID |
 | `AWS_ROLE_ARN` | `arn:aws:iam::123456789012:role/bookstore-github-oidc-role` | OIDC role ARN from Step 1.2 |
-| `API_URL` | `https://api.bookstore.b17facebook.xyz` | Backend API URL injected into the React build |
+| `API_URL` | `https://api.bookstore.<YOUR_DOMAIN>` | Backend API URL injected into the React build (use your domain from config.env) |
 | `SEMGREP_APP_TOKEN` | *(optional)* | Semgrep Cloud token. If you don't have one, remove the `SEMGREP_APP_TOKEN` env line from `.github/workflows/ci-cd.yml` |
 
 ### Step 7.2 — Create the production GitHub Environment
@@ -795,42 +876,34 @@ The pipeline requires a manual approval gate before deploying. This is enforced 
 
 ---
 
-## Part 8 — Update Repository Placeholders
+## Part 8 — Apply Configuration and First Deploy
 
-Two files contain `ACCOUNT_ID` placeholders that must be replaced with your real account ID.
+If you completed Part 0, `scripts/configure.py` already stamped all real values into the k8s files. Verify and commit them now.
 
-### Step 8.1 — Update k8s/kustomization.yaml
-
-Open `k8s/kustomization.yaml` and replace both `ACCOUNT_ID` occurrences in the `images:` section:
-
-```yaml
-images:
-  - name: bookstore-backend
-    newName: 123456789012.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
-    newTag: latest
-  - name: bookstore-frontend
-    newName: 123456789012.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
-    newTag: latest
-```
-
-### Step 8.2 — Update k8s/argocd/application.yaml
-
-Open `k8s/argocd/application.yaml` and replace `YOUR_ORG/YOUR_REPO` with your actual GitHub repository URL:
-
-```yaml
-source:
-  repoURL: https://github.com/your-org/your-repo   # ← your actual repo
-  targetRevision: main
-  path: k8s
-```
-
-### Step 8.3 — Commit and push the changes
+### Step 8.1 — Verify configure.py has run
 
 ```bash
-git add k8s/kustomization.yaml k8s/argocd/application.yaml main.tf
-git commit -m "config: set account ID and repo URL placeholders"
+# Should show your real values, not placeholders
+grep -E "newName|repoURL|host:" k8s/kustomization.yaml k8s/argocd/application.yaml k8s/ingress/ingress.yaml
+```
+
+If you see `ACCOUNT_ID`, `YOUR_GITHUB_USERNAME`, or `YOUR_DOMAIN_HERE`, re-run the configure script:
+
+```bash
+python scripts/configure.py
+```
+
+### Step 8.2 — Commit and push the configured k8s files
+
+```bash
+git add k8s/kustomization.yaml k8s/argocd/application.yaml k8s/ingress/ingress.yaml
+git commit -m "chore: configure k8s manifests for deployment"
 git push origin main
 ```
+
+This push triggers the CI/CD pipeline (Stage 0→3). After you approve the production gate (Part 9, Step 9.3), Stage 4 will run `kustomize edit set image` and commit the real ECR image reference, overwriting `kustomization.yaml` with the final registry URL and SHA tag.
+
+> **Note:** `terraform.tfvars` is gitignored — do not add it to the commit.
 
 ---
 
@@ -867,7 +940,7 @@ Stage 3: Build→Scan→Push → ~5–8 minutes (parallel with Stage 2)
 Stage 4: Deploy          → awaiting manual approval
 ```
 
-Monitor at: `https://github.com/YOUR_ORG/YOUR_REPO/actions`
+Monitor at: `https://github.com/$GITHUB_REPO/actions` (your repo from `config.env`)
 
 ### Step 9.3 — Approve the production deployment
 
@@ -917,48 +990,51 @@ kubectl get svc ingress-nginx-controller -n ingress-nginx \
 
 ### Step 10.2 — Create DNS records
 
-In Route 53 (or your DNS provider), create two **CNAME** records:
+In Route 53 (or your DNS provider), create two **CNAME** records pointing to the NLB hostname from Step 10.1:
 
 | Name | Type | Value |
 |---|---|---|
-| `bookstore.b17facebook.xyz` | CNAME | `abc123.us-west-1.elb.amazonaws.com` |
-| `api.bookstore.b17facebook.xyz` | CNAME | `abc123.us-west-1.elb.amazonaws.com` |
+| `bookstore.<YOUR_DOMAIN>` | CNAME | NLB hostname from Step 10.1 |
+| `api.bookstore.<YOUR_DOMAIN>` | CNAME | same NLB hostname |
 
 With Route 53 you can also use **Alias** records, which are free for AWS resources:
 
 ```bash
+# Source config.env so DOMAIN is available
+source config.env
+
 # Get the hosted zone ID for your domain
 ZONE_ID=$(aws route53 list-hosted-zones-by-name \
-  --dns-name b17facebook.xyz \
+  --dns-name $DOMAIN \
   --query "HostedZones[0].Id" --output text | sed 's|/hostedzone/||')
 
-# Get the ELB hosted zone ID (us-west-1 ALB zone)
-ELB_HOSTNAME="abc123.us-west-1.elb.amazonaws.com"   # replace with actual value
+# NLB hostname from Step 10.1
+ELB_HOSTNAME="<nlb-hostname>.us-west-1.elb.amazonaws.com"   # replace with actual value
 
 aws route53 change-resource-record-sets \
   --hosted-zone-id "$ZONE_ID" \
-  --change-batch '{
-    "Changes": [
+  --change-batch "{
+    \"Changes\": [
       {
-        "Action": "UPSERT",
-        "ResourceRecordSet": {
-          "Name": "bookstore.b17facebook.xyz",
-          "Type": "CNAME",
-          "TTL": 300,
-          "ResourceRecords": [{"Value": "'"$ELB_HOSTNAME"'"}]
+        \"Action\": \"UPSERT\",
+        \"ResourceRecordSet\": {
+          \"Name\": \"bookstore.$DOMAIN\",
+          \"Type\": \"CNAME\",
+          \"TTL\": 300,
+          \"ResourceRecords\": [{\"Value\": \"$ELB_HOSTNAME\"}]
         }
       },
       {
-        "Action": "UPSERT",
-        "ResourceRecordSet": {
-          "Name": "api.bookstore.b17facebook.xyz",
-          "Type": "CNAME",
-          "TTL": 300,
-          "ResourceRecords": [{"Value": "'"$ELB_HOSTNAME"'"}]
+        \"Action\": \"UPSERT\",
+        \"ResourceRecordSet\": {
+          \"Name\": \"api.bookstore.$DOMAIN\",
+          \"Type\": \"CNAME\",
+          \"TTL\": 300,
+          \"ResourceRecords\": [{\"Value\": \"$ELB_HOSTNAME\"}]
         }
       }
     ]
-  }'
+  }"
 ```
 
 ### Step 10.3 — Verify TLS certificate issuance
@@ -991,7 +1067,7 @@ kubectl get pods -n bookstore
 
 kubectl get hpa -n bookstore
 # NAME       REFERENCE             TARGETS         MINPODS   MAXPODS
-# backend    Deployment/backend    cpu: 5%/70%     2         5
+# backend    Deployment/backend    cpu: 5%/70%     2         10
 # frontend   Deployment/frontend   cpu: 2%/70%     2         5
 ```
 
@@ -1011,19 +1087,22 @@ kubectl get secret db-secret -n bookstore
 ### Step 11.3 — Test the application endpoints
 
 ```bash
+# Source config.env so DOMAIN is available
+source config.env
+
 # Frontend
-curl -I https://bookstore.b17facebook.xyz
+curl -I https://bookstore.$DOMAIN
 # HTTP/2 200
 # server: nginx
 
 # Backend API
-curl https://api.bookstore.b17facebook.xyz/books
+curl https://api.bookstore.$DOMAIN/books
 # [{"id":1,"title":"..."},...]
 
 # HTTP redirect (must return 301/302 to HTTPS)
-curl -I http://bookstore.b17facebook.xyz
+curl -I http://bookstore.$DOMAIN
 # HTTP/1.1 308 Permanent Redirect
-# location: https://bookstore.b17facebook.xyz/
+# location: https://bookstore.$DOMAIN/
 ```
 
 ### Step 11.4 — Verify ArgoCD shows healthy
@@ -1059,8 +1138,19 @@ DB_NAME=test
 APP_PORT=3000
 EOF
 
-# Seed the database schema (requires local MySQL)
-mysql -u root -p < test.sql
+# Seed the database schema (requires local MySQL running)
+# The init SQL is in k8s/database/mysql-init-configmap.yaml — copy the SQL block and run:
+mysql -u root -p -e "
+  CREATE DATABASE IF NOT EXISTS test;
+  USE test;
+  CREATE TABLE IF NOT EXISTS books (
+    id INT NOT NULL AUTO_INCREMENT,
+    title VARCHAR(300) NOT NULL,
+    \`desc\` VARCHAR(500) NOT NULL,
+    price FLOAT NOT NULL,
+    cover VARCHAR(500) NOT NULL,
+    PRIMARY KEY (id)
+  );"
 
 # Start the server
 node index.js
@@ -1086,12 +1176,15 @@ npm start
 Use this only for hotfixes or pre-release testing. The pipeline does this automatically:
 
 ```bash
+# Load your values from config.env first
+source config.env
+
 chmod +x scripts/build-and-push.sh
 ./scripts/build-and-push.sh \
-  123456789012 \
-  us-west-1 \
+  $AWS_ACCOUNT_ID \
+  $AWS_REGION \
   v1.0.0-hotfix \
-  https://api.bookstore.b17facebook.xyz
+  https://api.bookstore.$DOMAIN
 ```
 
 ---
@@ -1149,7 +1242,8 @@ kubectl describe externalsecret db-secret -n bookstore
 # Error: "Could not assume role"
 # Verify:
 # 1. The OIDC provider is registered in IAM for your account
-# 2. The trust policy contains YOUR_ORG/YOUR_REPO (exact match)
+# 2. The IAM role trust policy sub condition matches your GITHUB_REPO exactly
+#    (check: aws iam get-role --role-name bookstore-github-oidc-role --query Role.AssumeRolePolicyDocument)
 # 3. AWS_ROLE_ARN secret in GitHub matches the role ARN exactly
 ```
 
@@ -1158,8 +1252,8 @@ kubectl describe externalsecret db-secret -n bookstore
 ```bash
 kubectl describe certificaterequest -n bookstore
 # Common cause: HTTP-01 challenge cannot reach the domain
-# Let's Encrypt must be able to hit http://bookstore.b17facebook.xyz/.well-known/acme-challenge/
-# Verify DNS records are propagated: dig bookstore.b17facebook.xyz
+# Let's Encrypt must be able to hit http://bookstore.<YOUR_DOMAIN>/.well-known/acme-challenge/
+# Verify DNS records are propagated: dig bookstore.<YOUR_DOMAIN>
 # Verify port 80 is open on the Nginx Ingress LoadBalancer security group
 ```
 

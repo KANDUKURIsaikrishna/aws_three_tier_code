@@ -27,37 +27,45 @@ A production-grade, cloud-native bookstore application deployed on AWS using a c
 Internet
     │
     ▼
+Route 53  (b17facebook.xyz)
+    │  bookstore.b17facebook.xyz     → NLB
+    │  api.bookstore.b17facebook.xyz → NLB
+    ▼
+AWS Network Load Balancer  (port 80/443)
+    │
+    ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  VPC  170.20.0.0/16  (us-west-1)                            │
 │                                                             │
-│  Public Subnets (us-west-1a / us-west-1b)                   │
+│  Public Subnets (us-west-1a / us-west-1c)                   │
 │  ┌────────────────────┐  ┌──────────────────┐               │
 │  │  Internet Gateway  │  │  NAT Gateway     │               │
-│  │  ALB (Frontend)    │  │                  │               │
+│  │  NLB ENIs          │  │  (outbound only) │               │
 │  └────────────────────┘  └──────────────────┘               │
 │                                                             │
 │  Private Subnets — App Tier                                  │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │  EKS Node Group  (t3.medium × 2–4)                   │   │
+│  │  EKS Node Group  (t3.medium × 1–4, desired 2)        │   │
 │  │  ┌──────────────────┐  ┌──────────────────────────┐  │   │
 │  │  │  Frontend Pods   │  │  Backend Pods            │  │   │
 │  │  │  (React / Nginx) │  │  (Node.js / Express)     │  │   │
 │  │  └──────────────────┘  └──────────────────────────┘  │   │
+│  │  MySQL StatefulSet (dev — in-cluster)                │   │
 │  └──────────────────────────────────────────────────────┘   │
 │                                                             │
 │  Private Subnets — Data Tier                                 │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │  RDS MySQL 8.0  (db.t3.micro, Multi-AZ)              │   │
-│  │  — OR —                                              │   │
-│  │  MySQL StatefulSet in-cluster (dev / local k8s)      │   │
+│  │  Production database (managed alternative to         │   │
+│  │  in-cluster StatefulSet)                             │   │
 │  └──────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 **Traffic flow:**
-1. User hits the public ALB → Nginx Ingress → Frontend React SPA
-2. Frontend calls `api.bookstore.b17facebook.xyz` → Backend Node.js API
-3. Backend reads/writes to MySQL (RDS in prod, StatefulSet in-cluster for dev)
+1. User → Route 53 → NLB → ingress-nginx (TLS termination) → Frontend React SPA
+2. Frontend calls `api.bookstore.b17facebook.xyz` → same NLB → Backend Node.js API
+3. Backend reads/writes to MySQL StatefulSet (dev) or RDS (prod)
 
 ---
 
@@ -82,11 +90,15 @@ Internet
 
 ```
 .
+├── main.tf                   # Root Terraform configuration
+├── eks_bootstrap.py          # One-time cluster setup script (post terraform apply)
+├── gp3-storageclass.yaml     # EBS gp3 StorageClass for MySQL PVC
+├── cluster-issuer.yaml       # Let's Encrypt ClusterIssuer for cert-manager
+│
 ├── backend/                  # Node.js/Express API
 │   ├── Dockerfile
 │   ├── index.js              # Express routes (CRUD /books)
-│   ├── package.json
-│   └── test.sql              # Schema seed for local MySQL
+│   └── package.json
 │
 ├── client/                   # React frontend
 │   ├── Dockerfile            # Multi-stage: build → Nginx
@@ -94,7 +106,8 @@ Internet
 │   └── src/
 │       └── pages/config.js   # Set REACT_APP_API_URL here for local dev
 │
-├── k8s/                      # Kubernetes manifests
+├── k8s/                      # Kubernetes manifests (managed by ArgoCD + Kustomize)
+│   ├── kustomization.yaml    # Kustomize root — image tags updated by CI
 │   ├── namespace.yaml
 │   ├── configmaps/
 │   │   └── backend-config.yaml
@@ -117,30 +130,29 @@ Internet
 │   │   └── ingress.yaml
 │   ├── network-policy/
 │   │   └── network-policy.yaml
-│   └── pdb/
-│       └── pdb.yaml
+│   ├── pdb/
+│   │   └── pdb.yaml
+│   └── argocd/
+│       └── application.yaml  # ArgoCD Application manifest
 │
 ├── modules/                  # Terraform reusable modules
 │   ├── acm/                  # ACM TLS certificate
-│   ├── asg/                  # Auto Scaling Groups
-│   ├── bastion/              # Bastion host
 │   ├── ecr/                  # ECR repositories
 │   ├── eks/                  # EKS cluster + OIDC + node group
-│   ├── launch_templates/     # EC2 launch templates
-│   ├── load_balancers/       # ALBs + target groups
 │   ├── network/              # VPC, subnets, NAT gateway
 │   ├── rds/                  # RDS MySQL (production)
-│   ├── route53/              # DNS records
+│   ├── route53/              # Private hosted zone for RDS DNS
 │   └── security/             # Security groups
 │
 ├── scripts/
-│   └── build-and-push.sh     # Manual Docker build + ECR push helper
+│   ├── build-and-push.sh     # Manual Docker build + ECR push helper
+│   └── bootstrap-tf-state.sh # Creates S3 + DynamoDB for Terraform remote state
 │
 ├── .github/workflows/
 │   ├── ci-cd.yml             # DevSecOps application pipeline
 │   └── terraform.yml         # Terraform plan / apply pipeline
 │
-└── main.tf                   # Root Terraform configuration
+└── TROUBLESHOOTING.md        # Running log of errors and fixes
 ```
 
 ---
@@ -176,8 +188,8 @@ DB_NAME=test
 APP_PORT=3000
 EOF
 
-# Seed the database
-mysql -u root -p < test.sql
+# Seed the database — copy the SQL from k8s/database/mysql-init-configmap.yaml
+mysql -u root -p < k8s/database/mysql-init-configmap.yaml   # or paste the SQL directly
 
 # Start the server
 node index.js
@@ -245,17 +257,13 @@ terraform apply -var="allowed_ssh_cidr=<YOUR_IP>/32"
 
 | Module | Resources created |
 |---|---|
-| `network` | VPC, 2 public + 6 private subnets, IGW, NAT Gateway, route tables |
-| `security` | Security groups for ALB, EC2 (frontend/backend), RDS, bastion |
+| `network` | VPC `170.20.0.0/16`, 2 public + 6 private subnets (us-west-1a/1c), IGW, NAT Gateway, route tables |
+| `security` | 2 security groups: NLB (80/443 public) and RDS (3306 from VPC CIDR only) |
 | `acm` | ACM TLS certificate for `b17facebook.xyz` and `*.b17facebook.xyz` |
-| `rds` | MySQL 8.0, Multi-AZ, automated backups, deletion protection |
-| `ecr` | Two ECR repositories — `bookstore-frontend` and `bookstore-backend` |
-| `eks` | EKS 1.31 cluster, OIDC provider, managed node group (t3.medium × 2–4) |
-| `alb` | Frontend public ALB + backend internal ALB, target groups, HTTPS listeners |
-| `launch_templates` | EC2 launch templates for the classic EC2 ASG path |
-| `asg` | Auto Scaling Groups for EC2-based frontend/backend (legacy path) |
-| `bastion` | Bastion host in public subnet for emergency SSH access |
-| `route53` | DNS records wiring the domain to the ALBs |
+| `rds` | MySQL 8.0, `db.t3.micro`, Multi-AZ, 7-day backups, password in Secrets Manager |
+| `ecr` | `bookstore-frontend` and `bookstore-backend` repos, IMMUTABLE tags, 10-image retention |
+| `eks` | EKS 1.31 cluster, OIDC provider, managed node group (t3.medium, min 1 / desired 2 / max 4) |
+| `route53` | Private hosted zone for internal RDS DNS resolution |
 
 ### Key outputs after apply
 
@@ -353,7 +361,7 @@ Push/PR to main
 ┌─────────┐  ┌────────────┐
 │ 1. SAST │  │ 2. Validate│
 │ npm audit│  │ ESLint     │
-│ Semgrep  │  │ kubeval    │
+│ Semgrep  │  │ kubeconform│
 └────┬────┘  └─────┬──────┘
      └──────┬──────┘
             │  (both must pass)
@@ -362,20 +370,23 @@ Push/PR to main
 │ 3. Build → Scan → Push    │ main branch only
 │ Docker build (backend)    │
 │ Trivy scan → SARIF upload │
-│ Push to ECR               │
+│ Push to ECR  :<sha8>      │
 │ Docker build (frontend)   │
 │ Trivy scan → SARIF upload │
-│ Push to ECR               │
+│ Push to ECR  :<sha8>      │
 └────────────┬──────────────┘
              │  (manual approval gate)
              ▼
-┌───────────────────────────┐
-│ 4. Deploy to EKS          │ main branch only, production environment
-│ Apply k8s manifests       │
-│ Sync secrets via ESO      │
-│ kubectl set image         │
-│ rollout status check      │
-└───────────────────────────┘
+┌───────────────────────────────────────┐
+│ 4. GitOps image-tag update            │ main branch only, production environment
+│ kustomize edit set image → <sha8>     │
+│ git commit k8s/kustomization.yaml     │
+│ git push (GITHUB_TOKEN)               │
+│                                       │
+│ ArgoCD detects commit (~3 min)        │
+│ kustomize build k8s/ → apply diff     │
+│ Pods rolling-restart with new image   │
+└───────────────────────────────────────┘
 ```
 
 ### Authentication model
