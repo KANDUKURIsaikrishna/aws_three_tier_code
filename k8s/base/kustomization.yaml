@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: bookstore
+
+resources:
+- storageclass/gp3.yaml
+- namespace.yaml
+- configmaps/backend-config.yaml
+- secrets/external-secret.yaml
+- database/mysql-init-configmap.yaml
+- database/mysql-service.yaml
+- database/mysql-statefulset.yaml
+- backend/rollout.yaml
+- backend/service.yaml
+- frontend/deployment.yaml
+- frontend/service.yaml
+- ingress/ingress.yaml
+- network-policy/network-policy.yaml
+- pdb/pdb.yaml
+- monitoring/servicemonitor.yaml

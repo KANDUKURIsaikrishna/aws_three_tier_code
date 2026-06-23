@@ -84,6 +84,60 @@ resource "helm_release" "ingress_nginx" {
   }
 }
 
+# ── Kube Prometheus Stack ─────────────────────────────────────────────────────
+
+resource "helm_release" "kube_prometheus_stack" {
+  name             = "kube-prometheus-stack"
+  repository       = "https://prometheus-community.github.io/helm-charts"
+  chart            = "kube-prometheus-stack"
+  namespace        = "monitoring"
+  create_namespace = true
+  wait             = true
+  timeout          = 600
+
+  set {
+    name  = "prometheus.prometheusSpec.replicas"
+    value = "1"
+  }
+  set {
+    name  = "alertmanager.enabled"
+    value = "false"
+  }
+  set {
+    name  = "grafana.replicas"
+    value = "1"
+  }
+  set {
+    name  = "grafana.persistence.enabled"
+    value = "false"
+  }
+  set {
+    name  = "prometheus.prometheusSpec.retention"
+    value = "24h"
+  }
+}
+
+# ── Argo Rollouts ─────────────────────────────────────────────────────────────
+
+resource "helm_release" "argo_rollouts" {
+  name             = "argo-rollouts"
+  repository       = "https://argoproj.github.io/argo-helm"
+  chart            = "argo-rollouts"
+  namespace        = "argo-rollouts"
+  create_namespace = true
+  wait             = true
+  timeout          = 300
+
+  set {
+    name  = "controller.replicas"
+    value = "1"
+  }
+  set {
+    name  = "dashboard.enabled"
+    value = "false"
+  }
+}
+
 # ── ArgoCD ────────────────────────────────────────────────────────────────────
 
 resource "helm_release" "argocd" {

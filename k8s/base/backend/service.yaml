@@ -3,10 +3,13 @@ kind: Service
 metadata:
   name: backend-service
   namespace: bookstore
+  labels:
+    app: backend
 spec:
   selector:
     app: backend
   ports:
-    - port: 80
+    - name: http
+      port: 80
       targetPort: 3000
   type: ClusterIP
