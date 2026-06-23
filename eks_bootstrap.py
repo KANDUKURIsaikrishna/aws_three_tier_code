@@ -14,6 +14,7 @@ Usage:
   python eks_bootstrap.py
 """
 
+import base64
 import datetime
 import getpass
 import json
@@ -37,6 +38,9 @@ IRSA_POLICY_NAME = "bookstore-secretsmanager-read"
 
 # AWS Secrets Manager path — must match k8s/secrets/external-secret.yaml
 DB_SECRET_ID = "/bookstore/db-credentials"
+
+# Database name the backend app expects (matches k8s/configmaps/backend-config.yaml)
+DB_NAME = "test"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -372,9 +376,77 @@ ts = int(datetime.datetime.now().timestamp())
 run(["kubectl", "annotate", "externalsecret", "db-secret",
      "-n", APP_NAMESPACE, f"force-sync={ts}", "--overwrite"], check=False)
 
-# ── Phase 9: Summary + Route53 reminder ──────────────────────────────────────
+# ── Phase 9: Database schema initialisation ───────────────────────────────────
+#
+# MySQL's docker-entrypoint-initdb.d only runs on first init (empty data dir).
+# If the PVC already has data (e.g. after a crash/restart cycle that skipped init)
+# the schema never gets created. This phase ensures it always exists, idempotently.
+# Uses subprocess list args — no shell involved, so password special chars are safe.
 
-header("Phase 9: Bootstrap Summary")
+header("Phase 9: Ensuring MySQL schema exists...")
+
+print("Waiting for mysql-0 to be Ready (up to 10 min)...")
+_mysql_ready = False
+for _attempt in range(40):
+    _status = capture(["kubectl", "get", "pod", "mysql-0", "-n", APP_NAMESPACE,
+                        "-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}"])
+    if _status == "True":
+        print("✅ mysql-0 is Ready.")
+        _mysql_ready = True
+        break
+    print(f"  mysql-0 not ready yet — retrying in 15s ({_attempt + 1}/40)...")
+    sys.stdout.flush()
+    time.sleep(15)
+
+if not _mysql_ready:
+    print("⚠️  mysql-0 did not become Ready within 10 min — skipping DB init.")
+    print("   Re-run the script after MySQL starts, or run manually:")
+    print("   kubectl exec -i -n bookstore mysql-0 -- mysql -uroot -p<pass> < k8s/database/init.sql")
+else:
+    _pw_b64 = capture(["kubectl", "get", "secret", "db-secret",
+                        "-n", APP_NAMESPACE,
+                        "-o", "jsonpath={.data.DB_PASSWORD}"])
+    if not _pw_b64:
+        print("⚠️  db-secret not found — skipping DB init. ESO may not have synced yet.")
+    else:
+        _db_password = base64.b64decode(_pw_b64).decode()
+
+        _init_sql = (
+            f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}`;\n"
+            f"USE `{DB_NAME}`;\n"
+            "CREATE TABLE IF NOT EXISTS books (\n"
+            "  id     INT NOT NULL AUTO_INCREMENT,\n"
+            "  title  VARCHAR(300) NOT NULL,\n"
+            "  `desc` VARCHAR(500) NOT NULL,\n"
+            "  price  FLOAT NOT NULL,\n"
+            "  cover  VARCHAR(500) NOT NULL,\n"
+            "  PRIMARY KEY (id)\n"
+            ");\n"
+            "INSERT IGNORE INTO books (title, `desc`, price, cover) VALUES\n"
+            "  ('The Great Gatsby', 'A novel by F. Scott Fitzgerald', 12.99,\n"
+            "   'https://covers.openlibrary.org/b/id/8432472-L.jpg'),\n"
+            "  ('To Kill a Mockingbird', 'A novel by Harper Lee', 10.99,\n"
+            "   'https://covers.openlibrary.org/b/id/8810494-L.jpg');\n"
+        )
+
+        print(f"Running schema init on database '{DB_NAME}'...")
+        _result = subprocess.run(
+            ["kubectl", "exec", "-i", "-n", APP_NAMESPACE, "mysql-0", "--",
+             "mysql", "-uroot", f"-p{_db_password}"],
+            input=_init_sql,
+            capture_output=True,
+            text=True,
+        )
+        _stderr = _result.stderr or ""
+        if _result.returncode == 0 or (_result.returncode != 0 and "ERROR" not in _stderr):
+            print(f"✅ Database '{DB_NAME}' and table 'books' ready.")
+        else:
+            print(f"⚠️  DB init returned errors:\n{_stderr[:400]}")
+            print("   Check MySQL logs: kubectl logs -n bookstore mysql-0")
+
+# ── Phase 10: Summary + Route53 reminder ─────────────────────────────────────
+
+header("Phase 10: Bootstrap Summary")
 
 print("\n--- Cluster Nodes ---")
 run(["kubectl", "get", "nodes"])
