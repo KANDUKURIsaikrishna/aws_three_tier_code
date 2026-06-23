@@ -90,106 +90,19 @@ run(["aws", "eks", "update-kubeconfig",
      "--name", CLUSTER_NAME, "--region", REGION])
 run(["kubectl", "get", "nodes"])
 
-# ── Phase 2: EBS CSI driver ───────────────────────────────────────────────────
+# ── Phase 2: ClusterIssuer ─────────────────────────────────────────────────────
+# cert-manager, ESO, ingress-nginx, and ArgoCD are managed by Terraform
+# (modules/eks-addons). By the time this script runs, those helm_release
+# resources are already ACTIVE. Apply the ClusterIssuer CRD instance here.
 
-header("Phase 2: Installing EBS CSI add-on...")
-
-# The EBS CSI driver requires AmazonEBSCSIDriverPolicy on the node role.
-# Attach it idempotently before creating the add-on — without this the
-# driver pods can never start and the add-on stays stuck in CREATING forever.
-node_role = f"{CLUSTER_NAME.replace('-eks', '')}-eks-node-role"
-print(f"Attaching AmazonEBSCSIDriverPolicy to node role: {node_role}")
-run(["aws", "iam", "attach-role-policy",
-     "--role-name", node_role,
-     "--policy-arn", "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"],
-    check=False)  # check=False — already attached on re-runs is not an error
-
-# Check if the add-on already exists before trying to create it
-existing_status = capture(["aws", "eks", "describe-addon",
-                            "--cluster-name", CLUSTER_NAME,
-                            "--addon-name", "aws-ebs-csi-driver",
-                            "--region", REGION,
-                            "--query", "addon.status", "--output", "text"])
-if not existing_status:
-    print("Add-on not found — creating it now...")
-    run(["aws", "eks", "create-addon",
-         "--cluster-name", CLUSTER_NAME,
-         "--addon-name", "aws-ebs-csi-driver",
-         "--region", REGION,
-         "--resolve-conflicts", "OVERWRITE"])
-else:
-    print(f"Add-on already exists (status: {existing_status}) — waiting for ACTIVE...")
-
-while True:
-    status = capture(["aws", "eks", "describe-addon",
-                       "--cluster-name", CLUSTER_NAME,
-                       "--addon-name", "aws-ebs-csi-driver",
-                       "--region", REGION,
-                       "--query", "addon.status", "--output", "text"])
-    if status == "ACTIVE":
-        print("✅ EBS CSI driver is ACTIVE.")
-        break
-    print(f"  [{status}] — retrying in 15s...")
-    sys.stdout.flush()
-    time.sleep(15)
-
-sc_file = os.path.join(os.path.dirname(__file__), "gp3-storageclass.yaml")
-if os.path.exists(sc_file):
-    run(["kubectl", "apply", "-f", sc_file])
-else:
-    print("⚠️  gp3-storageclass.yaml not found — skipping StorageClass.")
-
-# ── Phase 3: Scale node group ─────────────────────────────────────────────────
-
-header("Phase 3: Scaling node group to 2 (prevents 'Too many pods')...")
-run(["aws", "eks", "update-nodegroup-config",
-     "--cluster-name", CLUSTER_NAME,
-     "--nodegroup-name", f"{CLUSTER_NAME.replace('eks', 'node-group')}",
-     "--scaling-config", "minSize=1,maxSize=4,desiredSize=2",
-     "--region", REGION])
-print("Waiting 30s for second node to join...")
-time.sleep(30)
-run(["kubectl", "get", "nodes"])
-
-# ── Phase 4: Helm add-ons ─────────────────────────────────────────────────────
-
-header("Phase 4: Helm repositories...")
-for name, url in [
-    ("jetstack",        "https://charts.jetstack.io"),
-    ("external-secrets","https://charts.external-secrets.io"),
-    ("ingress-nginx",   "https://kubernetes.github.io/ingress-nginx"),
-]:
-    run(["helm", "repo", "add", name, url], check=False)
-run(["helm", "repo", "update"])
-
-header("Installing cert-manager...")
-run(["helm", "upgrade", "--install", "cert-manager", "jetstack/cert-manager",
-     "--namespace", "cert-manager", "--create-namespace",
-     "--version", "v1.14.4", "--set", "installCRDs=true"])
-run(["kubectl", "wait", "pods", "-n", "cert-manager", "--all",
-     "--for=condition=Ready", "--timeout=180s"])
-
+header("Phase 2: Applying ClusterIssuer...")
 issuer_file = os.path.join(os.path.dirname(__file__), "cluster-issuer.yaml")
 if os.path.exists(issuer_file):
     run(["kubectl", "apply", "-f", issuer_file])
 else:
     print("⚠️  cluster-issuer.yaml not found — skipping ClusterIssuer.")
 
-header("Installing External Secrets Operator (ESO)...")
-run(["helm", "upgrade", "--install", "external-secrets", "external-secrets/external-secrets",
-     "--namespace", "external-secrets", "--create-namespace",
-     "--set", "installCRDs=true"])
-run(["kubectl", "wait", "pods", "-n", "external-secrets", "--all",
-     "--for=condition=Ready", "--timeout=180s"])
-
-header("Installing ingress-nginx...")
-run(["helm", "upgrade", "--install", "ingress-nginx", "ingress-nginx/ingress-nginx",
-     "--namespace", "ingress-nginx", "--create-namespace"])
-print("Waiting 30s for NLB to provision...")
-time.sleep(30)
-run(["kubectl", "get", "svc", "-n", "ingress-nginx"])
-
-# ── Phase 5: IRSA for external-secrets-sa ────────────────────────────────────
+# ── Phase 3: IRSA for external-secrets-sa ────────────────────────────────────
 #
 # The ClusterSecretStore uses a service account (external-secrets-sa) in the
 # external-secrets namespace. That SA needs an IAM role (IRSA) with Secrets
@@ -200,7 +113,7 @@ run(["kubectl", "get", "svc", "-n", "ingress-nginx"])
 # trust policy to match the current cluster, so re-running after a destroy is safe.
 # ─────────────────────────────────────────────────────────────────────────────
 
-header("Phase 5: IRSA for external-secrets-sa...")
+header("Phase 3: IRSA for external-secrets-sa...")
 
 account_id = capture(["aws", "sts", "get-caller-identity",
                        "--query", "Account", "--output", "text"])
@@ -289,9 +202,9 @@ run(["kubectl", "rollout", "restart", "deployment/external-secrets", "-n", "exte
 run(["kubectl", "rollout", "status", "deployment/external-secrets",
      "-n", "external-secrets", "--timeout=120s"])
 
-# ── Phase 6: AWS Secrets Manager secret ──────────────────────────────────────
+# ── Phase 4: AWS Secrets Manager secret ──────────────────────────────────────
 
-header("Phase 6: Ensuring Secrets Manager secret has correct JSON structure...")
+header("Phase 4: Ensuring Secrets Manager secret has correct JSON structure...")
 
 secret_exists = run_ok(["aws", "secretsmanager", "describe-secret",
                          "--secret-id", DB_SECRET_ID, "--region", REGION])
@@ -332,15 +245,13 @@ else:
              "--secret-id", DB_SECRET_ID, "--region", REGION,
              "--secret-string", secret_value])
 
-# ── Phase 7: ArgoCD ───────────────────────────────────────────────────────────
+# ── Phase 5: ArgoCD application configuration ─────────────────────────────────
+# ArgoCD is installed by Terraform (modules/eks-addons). Apply the Application
+# manifest and configure the server secret key.
 
-header("Phase 7: Installing ArgoCD...")
-run(["kubectl", "create", "namespace", "argocd"], check=False)
-run(["kubectl", "apply", "-n", "argocd", "-f",
-     "https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml",
-     "--server-side"])
+header("Phase 5: Configuring ArgoCD application...")
 
-header("Waiting for ArgoCD server to be Available...")
+header("Waiting for ArgoCD server to be Available (installed by Terraform)...")
 run(["kubectl", "wait", "deployment", "argocd-server",
      "-n", "argocd", "--for=condition=Available", "--timeout=300s"])
 
@@ -364,9 +275,9 @@ time.sleep(10)
 run(["kubectl", "annotate", "application", "bookstore",
      "-n", "argocd", "argocd.argoproj.io/refresh=hard", "--overwrite"], check=False)
 
-# ── Phase 8: Clear kubectl cache + force ESO resync ──────────────────────────
+# ── Phase 6: Clear kubectl cache + force ESO resync ──────────────────────────
 
-header("Phase 8: Clearing kubectl discovery cache...")
+header("Phase 6: Clearing kubectl discovery cache...")
 cache_path = os.path.expandvars(r"%USERPROFILE%\.kube\cache")
 if os.path.exists(cache_path):
     shutil.rmtree(cache_path, ignore_errors=True)
@@ -379,14 +290,14 @@ ts = int(datetime.datetime.now().timestamp())
 run(["kubectl", "annotate", "externalsecret", "db-secret",
      "-n", APP_NAMESPACE, f"force-sync={ts}", "--overwrite"], check=False)
 
-# ── Phase 9: Database schema initialisation ───────────────────────────────────
+# ── Phase 7: Database schema initialisation ───────────────────────────────────
 #
 # MySQL's docker-entrypoint-initdb.d only runs on first init (empty data dir).
 # If the PVC already has data (e.g. after a crash/restart cycle that skipped init)
 # the schema never gets created. This phase ensures it always exists, idempotently.
 # Uses subprocess list args — no shell involved, so password special chars are safe.
 
-header("Phase 9: Ensuring MySQL schema exists...")
+header("Phase 7: Ensuring MySQL schema exists...")
 
 print("Waiting for mysql-0 to be Ready (up to 10 min)...")
 _mysql_ready = False
@@ -447,9 +358,9 @@ else:
             print(f"⚠️  DB init returned errors:\n{_stderr[:400]}")
             print("   Check MySQL logs: kubectl logs -n bookstore mysql-0")
 
-# ── Phase 10: Summary + Route53 reminder ─────────────────────────────────────
+# ── Phase 8: Summary + Route53 reminder ──────────────────────────────────────
 
-header("Phase 10: Bootstrap Summary")
+header("Phase 8: Bootstrap Summary")
 
 print("\n--- Cluster Nodes ---")
 run(["kubectl", "get", "nodes"])

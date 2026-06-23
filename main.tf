@@ -6,6 +6,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.0"
+    }
   }
 
   # ── Remote State ────────────────────────────────────────────────────────
@@ -173,6 +177,33 @@ module "eks" {
 output "eks_cluster_name"      { value = module.eks.cluster_name }
 output "eks_cluster_endpoint"  { value = module.eks.cluster_endpoint }
 output "eks_oidc_provider_arn" { value = module.eks.oidc_provider_arn }
+
+# ── Helm provider (auth via aws eks get-token — no static kubeconfig) ─────────
+
+provider "helm" {
+  kubernetes {
+    host                   = module.eks.cluster_endpoint
+    cluster_ca_certificate = base64decode(module.eks.cluster_ca_cert)
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.aws_region]
+    }
+  }
+}
+
+# ── EKS add-ons (cert-manager, ESO, ingress-nginx, ArgoCD, EBS CSI) ───────────
+
+module "eks_addons" {
+  source = "./modules/eks-addons"
+
+  cluster_name      = module.eks.cluster_name
+  oidc_provider_arn = module.eks.oidc_provider_arn
+  aws_region        = var.aws_region
+  node_role_name    = module.eks.node_role_name
+
+  depends_on = [module.eks]
+}
 
 # ── GitHub Actions OIDC Role ───────────────────────────────────────────────
 # Lets GitHub Actions assume an AWS role via OIDC — no static AWS keys.

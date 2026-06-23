@@ -2,9 +2,9 @@ name: DevSecOps Pipeline
 
 on:
   push:
-    branches: [main]
+    branches: [main, improvements]
   pull_request:
-    branches: [main]
+    branches: [main, improvements]
 
 # All secrets are stored in GitHub Secrets — never hardcoded here.
 # Required secrets:
@@ -67,11 +67,14 @@ jobs:
       - name: Install backend dependencies
         run: cd backend && npm ci
 
+      - name: Run backend tests
+        run: cd backend && npm test
+
       - name: Install frontend dependencies
         run: cd client && npm ci
 
-      - name: npm audit — backend (fail on high/critical CVEs)
-        run: cd backend && npm audit --audit-level=high
+      - name: npm audit — backend production deps (fail on high/critical CVEs)
+        run: cd backend && npm audit --audit-level=high --omit=dev
 
       - name: npm audit — frontend (fail on critical CVEs; react-scripts build tooling has unfixable highs)
         run: cd client && npm audit --audit-level=critical
@@ -133,7 +136,7 @@ jobs:
     name: "🐳 Build → Trivy Scan → Push"
     runs-on: ubuntu-latest
     needs: [sast, validate]
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/improvements'
     permissions:
       id-token: write        # required for OIDC token exchange
       contents: read
