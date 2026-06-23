@@ -85,7 +85,24 @@ run(["kubectl", "get", "nodes"])
 
 # ── Phase 2: EBS CSI driver ───────────────────────────────────────────────────
 
-header("Phase 2: Waiting for EBS CSI add-on to be ACTIVE...")
+header("Phase 2: Installing EBS CSI add-on...")
+
+# Check if the add-on already exists before trying to create it
+existing_status = capture(["aws", "eks", "describe-addon",
+                            "--cluster-name", CLUSTER_NAME,
+                            "--addon-name", "aws-ebs-csi-driver",
+                            "--region", REGION,
+                            "--query", "addon.status", "--output", "text"])
+if not existing_status:
+    print("Add-on not found — creating it now...")
+    run(["aws", "eks", "create-addon",
+         "--cluster-name", CLUSTER_NAME,
+         "--addon-name", "aws-ebs-csi-driver",
+         "--region", REGION,
+         "--resolve-conflicts", "OVERWRITE"])
+else:
+    print(f"Add-on already exists (status: {existing_status}) — waiting for ACTIVE...")
+
 while True:
     status = capture(["aws", "eks", "describe-addon",
                        "--cluster-name", CLUSTER_NAME,
@@ -95,9 +112,9 @@ while True:
     if status == "ACTIVE":
         print("✅ EBS CSI driver is ACTIVE.")
         break
-    print(f"  [{status}] — retrying in 10s...")
+    print(f"  [{status}] — retrying in 15s...")
     sys.stdout.flush()
-    time.sleep(10)
+    time.sleep(15)
 
 sc_file = os.path.join(os.path.dirname(__file__), "gp3-storageclass.yaml")
 if os.path.exists(sc_file):
