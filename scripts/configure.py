@@ -88,8 +88,8 @@ def main():
     )
     print(f"  [ok]  terraform.tfvars  (generated)")
 
-    # ── 2. k8s/ingress/ingress.yaml ──────────────────────────────────────────
-    substitute("k8s/ingress/ingress.yaml", {
+    # ── 2. k8s/base/ingress/ingress.yaml ─────────────────────────────────────
+    substitute("k8s/base/ingress/ingress.yaml", {
         PLACEHOLDERS["domain"]: domain,
     })
 
@@ -100,10 +100,10 @@ def main():
         PLACEHOLDERS["user"]: github_user,
     })
 
-    # ── 4. k8s/kustomization.yaml ────────────────────────────────────────────
-    # CI overwrites this on every push via `kustomize edit set image`.
+    # ── 4. k8s/overlays/prod/kustomization.yaml ───────────────────────────────
+    # CI overwrites image tags on every push via `kustomize edit set image`.
     # This step only matters for the very first local apply before CI has run.
-    substitute("k8s/kustomization.yaml", {
+    substitute("k8s/overlays/prod/kustomization.yaml", {
         f"{PLACEHOLDERS['account']}.dkr.ecr": f"{account_id}.dkr.ecr",
     })
 
@@ -118,7 +118,7 @@ Done. Next steps
      DOMAIN={domain} python eks_bootstrap.py
 
 3. Commit k8s files so ArgoCD can sync:
-     git add k8s/ingress/ingress.yaml k8s/argocd/application.yaml k8s/kustomization.yaml
+     git add k8s/base/ingress/ingress.yaml k8s/argocd/application.yaml k8s/overlays/prod/kustomization.yaml
      git commit -m "chore: configure for {domain}"
      git push
    (CI will rebuild images and ArgoCD will sync within 3 min.)

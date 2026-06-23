@@ -1,12 +1,12 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
 metadata:
   name: backend
   namespace: bookstore
   labels:
     app: backend
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: backend
@@ -62,13 +62,6 @@ spec:
                 secretKeyRef:
                   name: db-secret
                   key: DB_PASSWORD
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "256Mi"
           readinessProbe:
             httpGet:
               path: /
@@ -89,3 +82,12 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+  strategy:
+    canary:
+      steps:
+      - setWeight: 10
+      - pause:
+          duration: 30s
+      - setWeight: 50
+      - pause:
+          duration: 30s

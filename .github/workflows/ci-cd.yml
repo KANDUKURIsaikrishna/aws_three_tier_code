@@ -288,7 +288,7 @@ jobs:
         env:
           TAG: ${{ needs.build-and-push.outputs.image-tag }}
         run: |
-          cd k8s
+          cd k8s/overlays/prod
           kustomize edit set image \
             bookstore-backend=${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:${TAG}
           kustomize edit set image \
@@ -300,7 +300,7 @@ jobs:
         run: |
           git config user.email "ci-bot@github-actions"
           git config user.name "GitHub Actions"
-          git add k8s/kustomization.yaml
+          git add k8s/overlays/prod/kustomization.yaml
           # Skips the commit if kustomization.yaml did not actually change
           git diff --staged --quiet && echo "No image tag changes." && exit 0
           git commit -m "chore: bump image tags to ${TAG}"

@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../base
+- hpa-backend.yaml
+- hpa-frontend.yaml
+
+# CI updates these via:
+#   cd k8s/overlays/prod
+#   kustomize edit set image bookstore-backend=<registry>/bookstore-backend:<sha>
+# configure.py fills in ACCOUNT_ID from config.env on first local setup.
+images:
+- name: bookstore-backend
+  newName: ACCOUNT_ID.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
+  newTag: 1e48e2ec
+- name: bookstore-frontend
+  newName: ACCOUNT_ID.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
+  newTag: 1e48e2ec
+
+patches:
+- target:
+    group: argoproj.io
+    version: v1alpha1
+    kind: Rollout
+    name: backend
+  patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/resources
+      value:
+        requests:
+          cpu: "128m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
