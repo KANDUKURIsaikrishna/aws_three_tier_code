@@ -164,10 +164,10 @@ module "eks" {
     module.network.private_subnet_ids[3],
   ]
 
-  node_instance_type = "t3.medium"
+  node_instance_type = "t3.medium"  # smallest that fits all add-ons (4 GB RAM)
   node_min_size      = 1
-  node_max_size      = 4
-  node_desired_size  = 2
+  node_max_size      = 2            # tech demo cap — raise to 4 for production
+  node_desired_size  = 1            # single node at rest; HPA scales pods, CA scales nodes
 }
 
 output "eks_cluster_name"      { value = module.eks.cluster_name }
