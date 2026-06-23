@@ -198,12 +198,9 @@ jobs:
           sarif_file: trivy-backend.sarif
           category:   trivy-backend
 
-      - name: Push backend image + tag as latest
+      - name: Push backend image
         run: |
           docker push ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:${{ steps.tag.outputs.tag }}
-          docker tag  ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:${{ steps.tag.outputs.tag }} \
-                      ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:latest
-          docker push ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:latest
 
       # ── Frontend image ───────────────────────────────────────────────────
       - name: Build frontend image (no push yet)
@@ -244,12 +241,9 @@ jobs:
           sarif_file: trivy-frontend.sarif
           category:   trivy-frontend
 
-      - name: Push frontend image + tag as latest
+      - name: Push frontend image
         run: |
           docker push ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:${{ steps.tag.outputs.tag }}
-          docker tag  ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:${{ steps.tag.outputs.tag }} \
-                      ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:latest
-          docker push ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:latest
 
   # ─────────────────────────────────────────────────────────────────────────
   # STAGE 4 · GitOps image-tag update
