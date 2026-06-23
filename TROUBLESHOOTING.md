@@ -682,6 +682,39 @@ Both records point to the same NLB. Go to Route 53 → Hosted zones → `b17face
 
 ---
 
+## 24. CI/CD pipeline — `latest` tag push fails on immutable ECR repository
+
+**Error** (GitHub Actions `build-and-push` job)
+```
+tag invalid: The image tag 'latest' already exists in the 'bookstore-backend' repository
+and cannot be overwritten because the tag is immutable.
+Error: Process completed with exit code 1.
+```
+
+**Root cause**  
+ECR repos are configured with `image_tag_mutability = "IMMUTABLE"` (correct for security — prevents accidental tag overwrites). The pipeline pushed the SHA tag successfully, then tried to also tag and push `latest`. On the second and every subsequent pipeline run, `latest` already exists in ECR and cannot be overwritten due to immutability. The build fails after images are already pushed.
+
+**Fix**  
+`.github/workflows/ci-cd.yml` — remove the `latest` re-tag and push for both backend and frontend. The `latest` tag is redundant: kustomize always deploys specific SHA tags, so `latest` is never referenced by the cluster.
+
+```yaml
+# Before (broken on second run)
+- name: Push backend image + tag as latest
+  run: |
+    docker push $ECR/$BACKEND_REPO:$TAG
+    docker tag  $ECR/$BACKEND_REPO:$TAG $ECR/$BACKEND_REPO:latest
+    docker push $ECR/$BACKEND_REPO:latest   # ← fails if latest exists
+
+# After (correct)
+- name: Push backend image
+  run: |
+    docker push $ECR/$BACKEND_REPO:$TAG
+```
+
+Same change applied to the frontend step.
+
+---
+
 ## Pending / Not Yet Done
 
 | Item | Status | What's needed |
@@ -699,3 +732,4 @@ Both records point to the same NLB. Go to Route 53 → Hosted zones → `b17face
 | EBS CSI driver policy on node role | ✅ Done | `AmazonEBSCSIDriverPolicy` added to `modules/eks/main.tf` and `eks_bootstrap.py` — see Issue #20 |
 | Route53 A records after cluster recreate | ⚠️ Pending | Update `bookstore.b17facebook.xyz` and `api.bookstore.b17facebook.xyz` to NLB: `a537e4bede0ec4041b0ea73b5f889999-1994490591.us-west-1.elb.amazonaws.com` |
 | ECR images after terraform destroy/apply | ⚠️ Pending | Trigger CI/CD pipeline (push to main) to rebuild and push images — see Issue #22 |
+| ECR immutable tag — `latest` push fails | ✅ Done | Removed `latest` tag push from ci-cd.yml — see Issue #24 |
