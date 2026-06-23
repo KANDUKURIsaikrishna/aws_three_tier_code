@@ -46,6 +46,18 @@ variable "environment" {
   default = "prod"
 }
 
+variable "domain" {
+  type        = string
+  description = "Primary domain for ACM cert and Route 53 (e.g. example.com)"
+  default     = "your-domain.com"
+}
+
+variable "github_repo" {
+  type        = string
+  description = "GitHub repo that assumes the OIDC CI role, in owner/name format"
+  default     = "YOUR_GITHUB_USERNAME/aws_three_tier_code"
+}
+
 # ── Networking ─────────────────────────────────────────────────────────────
 
 module "network" {
@@ -83,8 +95,8 @@ module "security_groups" {
 
 module "acm" {
   source      = "./modules/acm"
-  domain_name = "b17facebook.xyz"
-  san_names   = ["*.b17facebook.xyz"]
+  domain_name = var.domain
+  san_names   = ["*.${var.domain}"]
 }
 
 # ── RDS ────────────────────────────────────────────────────────────────────
@@ -188,7 +200,7 @@ resource "aws_iam_role" "github_oidc" {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
         }
         StringLike = {
-          "token.actions.githubusercontent.com:sub" = "repo:KANDUKURIsaikrishna/aws_three_tier_code:*"
+          "token.actions.githubusercontent.com:sub" = "repo:${var.github_repo}:*"
         }
       }
     }]

@@ -1,48 +1,178 @@
-# 3tier_architecture_terraform
+# Bookstore — AWS Three-Tier Architecture (EKS Edition)
 
 ![3-Tier Architecture](3_tier_architecture.png)
 
-This architecture represents a highly available, scalable, and secure AWS infrastructure for a web application. Below is a breakdown of the key components:
+A production-grade three-tier bookstore application running on **Amazon EKS** with full GitOps delivery, DevSecOps CI/CD, and zero static AWS credentials.
 
-# 1. User Access Layer
-User: End-users access the application through the internet.
-Route 53: AWS's DNS service for domain name resolution.
+---
 
-# 2. Networking Layer (VPC & Subnets)
-The infrastructure is deployed inside a VPC (Virtual Private Cloud).
-Two Availability Zones (AZs) are used for high availability.
-Subnets:
-Public Subnets (Green): Contain NAT Gateways and a Bastion Host (EC2 instance) for secure SSH access.
-Web Subnets (Light Blue): Hosts web servers (likely EC2 instances in an Auto Scaling Group) behind an Elastic Load Balancer.
-App Subnets (Light Orange): Application layer, possibly hosting microservices or backend logic, also in an Auto Scaling Group.
-Database Subnets (Purple): Private subnets containing Amazon RDS (Relational Database Service) instances, forming a DB Subnet Group for redundancy.
+## Architecture Overview
 
-# 3. Load Balancing & Auto Scaling
-Elastic Load Balancer (ELB) distributes incoming traffic to web servers across AZs.
-Auto Scaling Groups ensure that instances scale up or down based on demand.
+```
+Internet
+    │
+    ▼
+Route 53 (b17facebook.xyz)
+    │  bookstore.b17facebook.xyz     → NLB
+    │  api.bookstore.b17facebook.xyz → NLB
+    ▼
+AWS Network Load Balancer (NLB)
+    │  Port 80 / 443 — ingress-nginx handles TLS termination
+    ▼
+┌─────────────────────────────────────────────────────────────┐
+│  VPC  170.20.0.0/16  —  us-west-1                           │
+│                                                             │
+│  Public Subnets (NAT Gateway / NLB ENIs)                    │
+│  ┌──────────────────────┐  ┌──────────────────────┐         │
+│  │ 170.20.1.0/24        │  │ 170.20.2.0/24         │        │
+│  │ us-west-1a           │  │ us-west-1c            │        │
+│  │ Internet Gateway     │  │ NAT Gateway           │        │
+│  └──────────────────────┘  └──────────────────────┘         │
+│                                                             │
+│  Private Subnets — App Tier (EKS nodes)                     │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  EKS Managed Node Group  (t3.medium, desired 2)       │  │
+│  │                                                       │  │
+│  │  Namespace: bookstore                                 │  │
+│  │  ┌──────────────────┐  ┌───────────────────┐          │  │
+│  │  │  Frontend Pods   │  │  Backend Pods     │          │  │
+│  │  │  React + nginx   │  │  Node.js/Express  │          │  │
+│  │  │  replicas: 2     │  │  replicas: 2      │          │  │
+│  │  │  port: 8080      │  │  port: 3000       │          │  │
+│  │  └──────────────────┘  └─────────┬─────────┘          │  │
+│  │                                  │ :3306              │  │
+│  │                       ┌──────────▼──────────┐         │  │
+│  │                       │  mysql-0             │         │  │
+│  │                       │  StatefulSet (dev)   │         │  │
+│  │                       │  10 Gi EBS volume    │         │  │
+│  │                       └─────────────────────┘         │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                             │
+│  Private Subnets — Data Tier (RDS)                          │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  RDS MySQL 8.0  (db.t3.micro, Multi-AZ)               │  │
+│  │  170.20.7.0/24 (us-west-1a) + 170.20.8.0/24 (1c)     │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
 
-# 4. Security Considerations
-Public access is restricted: Only the Bastion Host can be accessed via SSH.
-NAT Gateway allows instances in private subnets to access the internet securely (for updates, API calls, etc.).
-RDS is in private subnets, preventing direct internet access.
-Multi-AZ deployments ensure fault tolerance.
+AWS Services (outside VPC)
+  ECR            — Docker image registry
+  Secrets Manager — /bookstore/db-credentials
+  IAM / OIDC     — Keyless auth for GitHub Actions + ESO
+  ACM            — TLS cert for *.b17facebook.xyz
+```
 
-# 5. Database Layer
-Amazon RDS provides a managed relational database (e.g., MySQL, PostgreSQL, or Aurora).
-Deployed across DB Subnet Groups to ensure high availability.
+---
 
-# 6. Scalability & High Availability
-Load Balancers distribute traffic evenly.
-Auto Scaling Groups dynamically adjust capacity.
-Multi-AZ architecture ensures failover and redundancy.
+## Tier Breakdown
 
-# Summary
-This architecture is well-designed for scalability, fault tolerance, and security, making it suitable for production-grade applications. Let me know if you need a Terraform implementation for this! 
+### 1. Presentation Tier — React + nginx
+- **React 18** SPA served by **nginx 1.27-alpine**
+- Docker image built by CI, pushed to ECR, tagged with git SHA
+- Kubernetes Deployment: 2 replicas, HPA scales 2–5 pods on 70% CPU
+- Non-root (UID 101), read-only filesystem, capabilities dropped
 
-# Workflow Overview
+### 2. Application Tier — Node.js/Express API
+- **Node.js 22** REST API — CRUD endpoints for `/books`
+- Connects to MySQL via env vars from Kubernetes Secret (`db-secret`)
+- Kubernetes Deployment: 2 replicas, HPA scales 2–10 pods on 70% CPU / 80% Memory
+- Non-root (UID 1001), read-only filesystem, capabilities dropped
 
-# 1. User Request: A user sends a request, which is routed through Route 53.
-# 2. Load Balancing: The ELB distributes the request to an available web server in the web subnet.
-# 3. Web Server Processing: The web server processes the request or forwards it to the app server.
-# 4. App Server Logic: The app server performs business logic, querying the Amazon RDS database if needed.
-# 5. Response Delivery: The data flows back from the app server to the web server, through route53, and then to the user.
+### 3. Data Tier — MySQL
+- **In-cluster:** MySQL 8.0 StatefulSet (`mysql-0`) on 10 Gi EBS (`gp3`) PVC — used in dev/EKS
+- **Managed:** RDS MySQL 8.0 Multi-AZ — available as production alternative
+- Schema auto-initialized via ConfigMap init scripts on first boot
+- Root password pulled from `db-secret` Kubernetes Secret (never hardcoded)
+
+---
+
+## Networking
+
+| Layer | Component | How |
+|-------|-----------|-----|
+| DNS | Route 53 A records (Alias) | Both hostnames → same NLB |
+| Ingress | ingress-nginx + NLB | TLS termination, host-based routing |
+| TLS | cert-manager + Let's Encrypt | Auto-issued, auto-renewed |
+| Pod-to-pod | Kubernetes NetworkPolicy | Default deny-all; explicit allow per tier |
+| Egress | NAT Gateway | EKS nodes reach ECR + AWS APIs |
+| RDS access | Security Group (3306 from VPC CIDR only) | No internet exposure |
+
+---
+
+## CI/CD and GitOps
+
+```
+Developer pushes to main
+    │
+    ▼
+GitHub Actions — DevSecOps Pipeline
+    │  Stage 0: Gitleaks secret scan
+    │  Stage 1: Semgrep SAST + npm audit
+    │  Stage 2: ESLint + kubeconform
+    │  Stage 3: Docker build → Trivy scan → ECR push (:<sha8>)
+    │  Stage 4: kustomize update → git commit  [requires approval]
+    ▼
+ArgoCD (polls GitHub every 3 min)
+    │  Detects kustomization.yaml change
+    │  kustomize build k8s/ → apply diff
+    ▼
+Kubernetes rolling update — zero downtime
+```
+
+**Key security properties:**
+- No AWS_ACCESS_KEY_ID anywhere — GitHub OIDC exchanges token for short-lived credentials
+- ECR tags are IMMUTABLE — `latest` never pushed, SHA tags only
+- All images Trivy-scanned before push — CRITICAL/HIGH CVE = hard fail
+- DB password lives only in AWS Secrets Manager → synced by ESO to in-cluster Secret
+
+---
+
+## Secret Management Flow
+
+```
+AWS Secrets Manager
+  /bookstore/db-credentials
+  {"DB_USERNAME":"admin","DB_PASSWORD":"..."}
+        │
+        │  IRSA (IAM Role for Service Account — no static keys)
+        ▼
+External Secrets Operator
+  Syncs every 1 hour → Kubernetes Secret "db-secret"
+        │
+        ├─ mysql-0 pod (MYSQL_ROOT_PASSWORD)
+        └─ backend pods (DB_USERNAME, DB_PASSWORD env vars)
+```
+
+---
+
+## Infrastructure — What Terraform Creates
+
+| Module | Resources |
+|--------|-----------|
+| `network` | VPC, 8 subnets, IGW, NAT Gateway, route tables |
+| `security` | NLB SG (80/443 public) + RDS SG (3306 VPC-only) |
+| `acm` | ACM certificate for `b17facebook.xyz` + `*.b17facebook.xyz` |
+| `rds` | RDS MySQL 8.0 Multi-AZ, password in Secrets Manager |
+| `ecr` | `bookstore-frontend` + `bookstore-backend` repos |
+| `eks` | EKS 1.31 cluster, OIDC provider, t3.medium node group |
+| `route53` | Private hosted zone for RDS internal DNS |
+
+---
+
+## Quick Start
+
+```bash
+# 1. Bootstrap Terraform state
+./scripts/bootstrap-tf-state.sh us-west-1
+
+# 2. Provision AWS infrastructure
+terraform init && terraform apply
+
+# 3. Install cluster components (EBS CSI, cert-manager, ESO, nginx, ArgoCD)
+python eks_bootstrap.py
+
+# 4. Push to main → approve deploy stage in GitHub Actions
+# → ArgoCD deploys automatically
+```
+
+See `IMPLEMENTATION_GUIDE.md` for the complete step-by-step guide.

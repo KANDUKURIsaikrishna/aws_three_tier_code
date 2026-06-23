@@ -10,8 +10,8 @@ The project is a learning/production-reference implementation of a three-tier ap
 
 | Path | Status | Notes |
 |---|---|---|
-| EC2 / ASG (classic) | **Removed** | Deprecated in favour of EKS path. Modules still exist in git history. |
-| EKS / Kubernetes | **Active** | Cluster + ECR provisioned; k8s manifests written; node min/desired = 1; add-on installation is manual |
+| EC2 / ASG (classic) | **Removed** | Deprecated in favour of EKS path. Modules (asg, bastion, launch_templates, load_balancers) deleted. |
+| EKS / Kubernetes | **Active** | Cluster running in us-west-1; all add-ons installed via `eks_bootstrap.py`; ArgoCD GitOps live |
 
 The CI/CD pipeline is DevSecOps-ready: Gitleaks, Semgrep, npm audit, Trivy, tfsec, OIDC auth, and a manual production approval gate are all in place.
 
@@ -21,13 +21,11 @@ The CI/CD pipeline is DevSecOps-ready: Gitleaks, Semgrep, npm audit, Trivy, tfse
 
 ### Infrastructure
 
-- **Terraform remote state not enabled.** The `backend "s3"` block in `main.tf` is commented out. Before the project is used by more than one person, the S3 bucket and DynamoDB lock table must be created and the block uncommented.
+- **Terraform remote state not fully configured.** The `backend "s3"` block in `main.tf` exists but has empty bucket/table strings. Run `scripts/bootstrap-tf-state.sh us-west-1` and fill in the values before collaborative use.
 
-- **EKS add-ons are manual.** EBS CSI driver, cert-manager, External Secrets Operator, and Nginx Ingress are not managed by Terraform. They should be brought under IaC (either Terraform Helm provider or a dedicated `modules/eks-addons/` module).
+- **EKS add-ons are manual.** EBS CSI driver, cert-manager, External Secrets Operator, Nginx Ingress, and ArgoCD are installed by `eks_bootstrap.py` — not managed by Terraform. They should eventually be brought under IaC via `helm_release` resources.
 
-- **`ACCOUNT_ID` placeholder in k8s manifests.** `k8s/backend/deployment.yaml` and `k8s/frontend/deployment.yaml` use the literal string `ACCOUNT_ID` in the image reference. This must be replaced before `kubectl apply`. A Kustomize overlay or envsubst substitution in the deploy step would eliminate this manual step.
-
-- **No StorageClass manifest for gp3.** The MySQL StatefulSet requests `storageClassName: gp3`, but the gp3 StorageClass is not created by default on all EKS versions. Add a `k8s/storageclass/gp3.yaml` manifest.
+- **gp3 StorageClass** is installed by `eks_bootstrap.py` or via `kubectl apply -f gp3-storageclass.yaml`. A `k8s/storageclass/gp3.yaml` manifest would make this declarative.
 
 ### Application
 
@@ -44,35 +42,23 @@ The CI/CD pipeline is DevSecOps-ready: Gitleaks, Semgrep, npm audit, Trivy, tfse
 ### Short Term (next sprint)
 
 1. **Kustomize overlays for dev / staging / prod**
-   Replace the `ACCOUNT_ID` placeholder with a proper `kustomization.yaml` base + overlays pattern. Each environment overlay sets the correct image registry, replica count, and resource limits.
+   Add `base/` + per-environment overlays so replica counts, resource limits, and DB host differ per environment — no manual substitution.
 
-2. **Add gp3 StorageClass manifest**
-   ```yaml
-   # k8s/storageclass/gp3.yaml
-   apiVersion: storage.k8s.io/v1
-   kind: StorageClass
-   metadata:
-     name: gp3
-   provisioner: ebs.csi.aws.com
-   parameters:
-     type: gp3
-   reclaimPolicy: Retain
-   volumeBindingMode: WaitForFirstConsumer
-   ```
+2. **Manage EKS add-ons in Terraform**
+   Add a `modules/eks-addons/` module using `helm_release` for cert-manager, ESO, and Nginx Ingress. This eliminates the `eks_bootstrap.py` dependency after cluster creation.
 
-3. **Manage EKS add-ons in Terraform**
-   Add a `modules/eks-addons/` module using the `helm_release` resource for EBS CSI, cert-manager, ESO, and Nginx Ingress. This removes the manual `helm install` steps from the README.
+3. **Fill in Terraform remote state**
+   Run `scripts/bootstrap-tf-state.sh us-west-1` and fill in the `backend "s3"` block in `main.tf`. The script already exists.
 
-4. **Enable Terraform remote state**
-   Uncomment the `backend "s3"` block and add a bootstrap script (`scripts/bootstrap-tf-state.sh`) that creates the bucket and DynamoDB table with a single command.
-
-5. **Fix image tag substitution in CI/CD**
-   The deploy job should use `envsubst` or Kustomize `set image` rather than a raw `kubectl set image`, so the full image URL is never constructed at runtime from multiple pipeline variables.
+4. **Backend graceful shutdown**
+   Add `process.on('SIGTERM')` to drain in-flight requests before the Node.js process exits.
 
 ### Medium Term
 
-6. **GitOps with ArgoCD or Flux**
-   Replace the `kubectl`-based deploy stage in the CI/CD pipeline with a GitOps push model. The pipeline pushes the new image tag to a `gitops/` config repo; ArgoCD or Flux reconciles the cluster state. Benefits: full audit trail, self-healing, drift detection.
+5. **Helm chart**
+   Package the k8s manifests as a Helm chart. Easier multi-environment config than Kustomize overlays for complex scenarios.
+
+> **Already completed:** GitOps with ArgoCD is fully live — CI commits new image SHA to `k8s/kustomization.yaml`, ArgoCD syncs within 3 minutes. Image tag substitution uses `kustomize edit set image` (not raw `kubectl set image`).
 
 7. **Helm chart**
    Package the k8s manifests as a Helm chart under `charts/bookstore/`. This makes environment-specific configuration (image tag, replicas, ingress hostname, resource limits) a first-class concern and simplifies multi-environment rollouts.
@@ -88,7 +74,7 @@ The CI/CD pipeline is DevSecOps-ready: Gitleaks, Semgrep, npm audit, Trivy, tfse
    Add a Jest test suite to the backend that spins up an in-memory SQLite database (or test containers) and covers the CRUD endpoints. Wire the tests into Stage 1 of the CI pipeline before the build step.
 
 10. **Database migration tooling**
-    Replace the `test.sql` seed file with Flyway or Liquibase migrations. Store versioned migration scripts under `db/migrations/`. The backend pod runs migrations at startup via an init container.
+    Replace the init SQL in `k8s/database/mysql-init-configmap.yaml` with Flyway or Liquibase migrations. Store versioned migration scripts under `db/migrations/`. The backend pod runs migrations at startup via an init container.
 
 ### Long Term
 
@@ -118,9 +104,9 @@ The CI/CD pipeline is DevSecOps-ready: Gitleaks, Semgrep, npm audit, Trivy, tfse
 
 **Context:** The original project targeted EC2 with Launch Templates and ASGs. EKS was added later and both paths coexisted, causing confusion and extra cost.
 
-**Decision:** EC2/ASG path (launch templates, ASGs, bastion, EC2 IAM role, EC2 ALBs) removed from Terraform. EKS is the sole deployment path. Node group runs min/desired = 1 to stay within vCPU account limits. The Route 53 public zone for ALB DNS records is also removed; public DNS is now managed manually or via ExternalDNS after Nginx Ingress is deployed.
+**Decision:** EC2/ASG path (launch templates, ASGs, bastion, EC2 IAM role, EC2 ALBs) removed from Terraform and from the repo entirely. The modules `asg/`, `bastion/`, `launch_templates/`, and `load_balancers/` are deleted. EKS is the sole deployment path. Node group runs min 1 / desired 2 / max 4. Route53 public DNS is managed manually (two A-alias records pointing to the Nginx Ingress NLB).
 
-**Consequences:** Simpler, cheaper infrastructure. History of EC2 modules preserved in git. Anyone needing the EC2 path must restore those modules from git history.
+**Consequences:** Simpler, cheaper infrastructure. EC2 module history is in git log if ever needed. Public DNS must be updated manually if the NLB hostname changes after cluster recreate.
 
 ---
 

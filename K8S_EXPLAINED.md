@@ -115,11 +115,11 @@ It also controls **which Docker image version gets deployed**. When your CI/CD p
 
 ```
 images:
-  bookstore-backend  → your AWS ECR registry / bookstore-backend : latest
-  bookstore-frontend → your AWS ECR registry / bookstore-frontend : latest
+  bookstore-backend  → <account>.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend:<sha8>
+  bookstore-frontend → <account>.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend:<sha8>
 ```
 
-**You need to replace `ACCOUNT_ID`** in this file with your 12-digit AWS account number.
+The `<sha8>` tag is the first 8 characters of the git commit SHA. The CI pipeline updates these values automatically via `kustomize edit set image` after every successful build.
 
 ---
 
@@ -224,7 +224,7 @@ Key details:
 | Setting | Value | Why |
 |---|---|---|
 | Replicas | 2 | So one can restart without downtime |
-| Image | `bookstore-backend:latest` | The Docker image built by your CI pipeline |
+| Image | `bookstore-backend:<sha8>` | The Docker image built by your CI pipeline, tagged with git SHA |
 | Port | 3000 | Node.js Express listens here |
 | User | UID 1001 (non-root) | Security — can't escalate to root |
 | Root filesystem | Read-only | Security — container can't write to its own disk |
@@ -273,7 +273,7 @@ Same pattern as the backend but for the React app served by Nginx.
 | Setting | Value | Why |
 |---|---|---|
 | Replicas | 2 | Redundancy |
-| Image | `bookstore-frontend:latest` | Built by CI pipeline |
+| Image | `bookstore-frontend:<sha8>` | Built by CI pipeline, tagged with git SHA |
 | Port | 8080 | Nginx listens here (not 80 — non-root can't bind port 80) |
 | User | UID 101 (non-root) | Security |
 | Root filesystem | Read-only | Security |
@@ -397,7 +397,7 @@ This file tells ArgoCD what to watch and where to deploy it.
 
 | Setting | Value | Meaning |
 |---|---|---|
-| Source repo | `https://github.com/KANDUKURIsaikrishna/aws_three_tier_code.git` | Watch this git repo |
+| Source repo | `https://github.com/YOUR_GITHUB_USERNAME/aws_three_tier_code.git` | Watch this git repo |
 | Branch | `main` | Watch the `main` branch |
 | Path | `k8s/` | Look at the `k8s/` folder specifically |
 | Destination | `https://kubernetes.default.svc` | Deploy to this cluster |
@@ -441,8 +441,8 @@ This file tells ArgoCD what to watch and where to deploy it.
 
 | Name | Namespace | Pods | Image | Port |
 |---|---|---|---|---|
-| `frontend` | `bookstore` | 2–5 | `bookstore-frontend:latest` | 8080 |
-| `backend` | `bookstore` | 2–10 | `bookstore-backend:latest` | 3000 |
+| `frontend` | `bookstore` | 2–5 | `bookstore-frontend:<sha8>` | 8080 |
+| `backend` | `bookstore` | 2–10 | `bookstore-backend:<sha8>` | 3000 |
 
 ---
 

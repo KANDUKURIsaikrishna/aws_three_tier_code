@@ -125,11 +125,11 @@ ComparisonError: Failed to load target state: authentication required: Repositor
 **Fix**  
 `k8s/argocd/application.yaml`:
 ```yaml
-repoURL: https://github.com/KANDUKURIsaikrishna/aws_three_tier_code.git
+repoURL: https://github.com/YOUR_GITHUB_USERNAME/aws_three_tier_code.git
 ```
 If the repo is private, also register credentials with ArgoCD:
 ```bash
-argocd repo add https://github.com/KANDUKURIsaikrishna/aws_three_tier_code.git \
+argocd repo add https://github.com/YOUR_GITHUB_USERNAME/aws_three_tier_code.git \
   --username <github-user> \
   --password <personal-access-token>
 ```
@@ -235,7 +235,7 @@ Result: `npm audit --audit-level=high` exits 0 (zero vulnerabilities).
 ```bash
 pip install git-filter-repo
 git filter-repo --invert-paths --path 3-teir --path github --force
-git remote add origin https://github.com/KANDUKURIsaikrishna/aws_three_tier_code.git
+git remote add origin https://github.com/YOUR_GITHUB_USERNAME/aws_three_tier_code.git
 git push origin main --force
 ```
 > **Action required:** Rotate/revoke those SSH keys — they were on a public repo and may have been scraped.
@@ -749,7 +749,7 @@ MySQL was initialized with a different root password than the value currently in
 The `MYSQL_ROOT_PASSWORD` env var in the running pod reflected the current secret value, but MySQL's internal `mysql.user` table stored the old (original) password hash from initialization — so no form of passing the current secret's value worked for root login.
 
 **Additional complication — password contains a single quote**  
-The password (`KANDUKURI's@698`) contains a `'` character. Embedding it directly in a SQL string like `IDENTIFIED BY '$pass'` breaks the SQL syntax. Must escape before use.
+The DB password contained a `'` character. Embedding it directly in a SQL string like `IDENTIFIED BY '$pass'` breaks the SQL syntax. Must escape before use. Retrieve the current password from AWS Secrets Manager (`/bookstore/db-credentials`) — never hardcode it here.
 
 **Fix — full sequence (PowerShell)**
 
@@ -845,7 +845,7 @@ While MySQL was broken, rolling updates kept creating new ReplicaSets (each CI d
 | Terraform OIDC role ECR policy | ✅ Done | Added to `main.tf`; also applied via CLI directly |
 | ECR `force_delete` + RDS `skip_final_snapshot` | ✅ Done | Fixed in modules — see Issue #19 |
 | EBS CSI driver policy on node role | ✅ Done | `AmazonEBSCSIDriverPolicy` added to `modules/eks/main.tf` and `eks_bootstrap.py` — see Issue #20 |
-| Route53 A records after cluster recreate | ⚠️ Pending | Update `bookstore.b17facebook.xyz` and `api.bookstore.b17facebook.xyz` to NLB: `a537e4bede0ec4041b0ea73b5f889999-1994490591.us-west-1.elb.amazonaws.com` |
+| Route53 A records after cluster recreate | ⚠️ Pending | Update `bookstore.b17facebook.xyz` and `api.bookstore.b17facebook.xyz` A-alias records to the new NLB hostname (get it from: `kubectl get svc -n ingress-nginx ingress-nginx-controller`) |
 | ECR images after terraform destroy/apply | ⚠️ Pending | Trigger CI/CD pipeline (push to main) to rebuild and push images — see Issue #22 |
 | ECR immutable tag — `latest` push fails | ✅ Done | Removed `latest` tag push from ci-cd.yml — see Issue #24 |
 | MySQL root password reset + `admin@'%'` | ✅ Done | Reset via `--skip-grant-tables`; `admin@'%'` created — see Issues #25, #26 |

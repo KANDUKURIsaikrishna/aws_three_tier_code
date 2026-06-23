@@ -30,7 +30,10 @@ import secrets as secrets_mod
 CLUSTER_NAME  = "bookstore-eks"
 REGION        = "us-west-1"
 APP_NAMESPACE = "bookstore"
-DOMAIN        = "b17facebook.xyz"
+# Set DOMAIN env var before running: DOMAIN=your-domain.com python eks_bootstrap.py
+DOMAIN = os.environ.get("DOMAIN", "")
+if not DOMAIN:
+    sys.exit("ERROR: DOMAIN env var not set. Example: DOMAIN=your-domain.com python eks_bootstrap.py")
 
 # IAM resource names (created by this script via CLI, not Terraform)
 IRSA_ROLE_NAME   = "bookstore-external-secrets-irsa"

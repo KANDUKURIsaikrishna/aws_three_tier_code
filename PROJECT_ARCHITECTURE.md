@@ -198,7 +198,7 @@ IAM Role: bookstore-github-oidc-role
     └─ ECR: Push/pull on bookstore-* repos
 ```
 
-The trust policy restricts assumption to commits from `KANDUKURIsaikrishna/aws_three_tier_code`. No `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` is stored anywhere.
+The trust policy restricts assumption to commits from the `github_repo` Terraform variable (set in `terraform.tfvars`). No `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` is stored anywhere.
 
 ---
 
@@ -270,7 +270,7 @@ All application resources live in the `bookstore` namespace. Platform components
 |----------|------|
 | Deployment | 2 replicas, image `bookstore-backend:<sha>` |
 | Container | Node.js 22-alpine, port 3000 |
-| HPA | min 2, max 5 replicas; scales on 70% CPU |
+| HPA | min 2, max 10 replicas; scales on 70% CPU or 80% Memory |
 | PDB | at least 1 pod always available |
 | Security | `readOnlyRootFilesystem: true`, `runAsNonRoot: true`, `runAsUser: 1001` |
 | Config | `backend-config` ConfigMap (`DB_HOST`, `DB_PORT`, `DB_NAME`, `APP_PORT`) |
@@ -480,22 +480,6 @@ aws_three_tier_code-main/
 │   │   ├── main.tf                 # Private hosted zone for internal RDS DNS resolution
 │   │   ├── variables.tf
 │   │   └── output.tf
-│   ├── bastion/
-│   │   ├── main.tf                 # Bastion host (optional jump server for SSH access)
-│   │   ├── variables.tf
-│   │   └── output.tf
-│   ├── load_balancers/
-│   │   ├── main.tf                 # ALB/NLB definitions (ingress-nginx provisions NLB via k8s)
-│   │   ├── variables.tf
-│   │   └── output.tf
-│   ├── launch_templates/
-│   │   ├── main.tf                 # EC2 launch templates for node groups
-│   │   ├── variables.tf
-│   │   └── output.tf
-│   └── asg/
-│       ├── main.tf                 # Auto Scaling Group definitions
-│       ├── variables.tf
-│       └── output.tf
 │
 ├── k8s/                            # All Kubernetes manifests (managed by ArgoCD + Kustomize)
 │   ├── kustomization.yaml          # Kustomize root: lists all resources + image tags (CI updates this)
