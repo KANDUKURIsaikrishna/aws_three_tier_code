@@ -508,16 +508,135 @@ kubectl get secret db-secret -n bookstore                # confirms secret exist
 
 ---
 
+## 19. `terraform destroy` — ECR repos and RDS fail to delete
+
+**Errors**
+```
+Error: ECR Repository (bookstore-frontend) not empty, consider using force_delete
+  RepositoryNotEmptyException: cannot be deleted because it still contains images
+
+Error: deleting RDS DB Instance (bookstore-db):
+  DBSnapshotAlreadyExists: Cannot create the snapshot because a snapshot with the
+  identifier bookstore-db-final-snapshot already exists.
+```
+
+**Root cause**
+
+1. ECR repos contain images pushed by CI. Terraform's default `aws_ecr_repository` resource refuses to delete non-empty repos.
+2. The RDS resource had `skip_final_snapshot = false` and `final_snapshot_identifier = "bookstore-db-final-snapshot"`. On the first destroy, this snapshot was created. On a subsequent destroy, Terraform tries to create the same snapshot name again and AWS rejects it as a duplicate.
+
+**Fix**
+
+`modules/ecr/main.tf` — add `force_delete = true`:
+```hcl
+resource "aws_ecr_repository" "this" {
+  name         = each.key
+  force_delete = true   # ← allows destroy even when images exist
+  ...
+}
+```
+
+`modules/rds/main.tf` — skip the final snapshot (automated 7-day backups already provide recovery):
+```hcl
+skip_final_snapshot = true   # was false
+# removed: final_snapshot_identifier
+```
+
+**Note:** If an old `bookstore-db-final-snapshot` is sitting in your account after a failed destroy, delete it manually before retrying:
+```powershell
+aws rds delete-db-snapshot `
+  --db-snapshot-identifier bookstore-db-final-snapshot `
+  --region us-west-1
+```
+
+---
+
+## 20. `eks_bootstrap.py` — EBS CSI add-on stuck in CREATING forever
+
+**Symptom**
+```
+  [CREATING] — retrying in 15s...
+  [CREATING] — retrying in 15s...
+  ... (loops indefinitely)
+```
+
+**Root cause (two parts)**
+
+1. **Missing IAM policy**: The EBS CSI driver add-on requires `AmazonEBSCSIDriverPolicy` attached to the EKS node IAM role (`bookstore-eks-node-role`). Without it, the CSI driver pods start but immediately crash-loop trying to make EBS API calls. The add-on stays in `CREATING` because AWS waits for the pods to be healthy before transitioning to `ACTIVE`.
+
+2. **AWS API lag**: Even after the policy is attached and pods are running, AWS sometimes takes several minutes to update the add-on status from `CREATING` to `ACTIVE`. The pods show `6/6 Running` and health shows `"issues": []`, but the status API still returns `CREATING`.
+
+**Fix**
+
+`modules/eks/main.tf` — add policy attachment (permanent fix via Terraform):
+```hcl
+resource "aws_iam_role_policy_attachment" "node_ebs_csi" {
+  role       = aws_iam_role.node_group.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}
+```
+
+`eks_bootstrap.py` — attach the policy before creating the add-on (handles runs before terraform apply picks this up):
+```python
+run(["aws", "iam", "attach-role-policy",
+     "--role-name", node_role,
+     "--policy-arn", "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"],
+    check=False)
+```
+
+**Diagnosis** — if add-on is stuck in CREATING, check pods directly:
+```powershell
+aws eks describe-addon --cluster-name bookstore-eks --addon-name aws-ebs-csi-driver `
+  --region us-west-1 --query "addon.health"
+kubectl get pods -n kube-system -l app=ebs-csi-controller
+kubectl get pods -n kube-system -l app=ebs-csi-node
+```
+If health shows `"issues": []` and pods are `Running`, the add-on IS working — AWS status just hasn't caught up. Kill the script and re-run; the next `describe-addon` call will return `ACTIVE`.
+
+**CLI workaround** (manual policy attach while script is looping):
+```powershell
+aws iam attach-role-policy `
+  --role-name bookstore-eks-node-role `
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+```
+
+---
+
+## 21. `eks_bootstrap.py` Phase 2 — add-on polling loop never started (status empty string)
+
+**Symptom**
+```
+  [] — retrying in 10s...
+  [] — retrying in 10s...
+  ... (loops forever printing empty brackets)
+```
+
+**Root cause**  
+The original script only polled `describe-addon` but never created the add-on first. When the add-on doesn't exist, `describe-addon` returns an error (exit code 2) and the captured stdout is an empty string `""`. The loop condition checked for `== "ACTIVE"` but never detected the missing add-on, so it looped forever on `""`.
+
+**Fix**  
+`eks_bootstrap.py` Phase 2 now checks if the add-on exists first, creates it if missing, then polls:
+```python
+existing_status = capture(["aws", "eks", "describe-addon", ...])
+if not existing_status:
+    run(["aws", "eks", "create-addon", "--addon-name", "aws-ebs-csi-driver", ...])
+```
+
+---
+
 ## Pending / Not Yet Done
 
 | Item | Status | What's needed |
 |---|---|---|
 | Rotate the SSH keys that were in `3-teir` and `github` | ⚠️ Pending | Revoke old keys, generate new ones outside the repo |
-| `ACCOUNT_ID` placeholder in `k8s/kustomization.yaml` | ✅ Done | CI deploy job (`kustomize edit set image`) replaced it with the real ECR URL on first successful run |
+| `ACCOUNT_ID` placeholder in `k8s/kustomization.yaml` | ✅ Done | CI deploy job (`kustomize edit set image`) replaced it on first successful run |
 | S3 backend bucket + DynamoDB table in `main.tf` | ⚠️ Pending | Fill in `backend "s3"` block before running terraform |
 | GitHub Secrets (`AWS_ACCOUNT_ID`, `AWS_ROLE_ARN`, `API_URL`) | ✅ Done | Set — pipeline passes and ECR push succeeds |
 | `production` GitHub Environment | ✅ Done | Created — deploy job approval gate works |
 | `deletion_protection` in `main.tf` | ⚠️ Pending | Re-enable (`true`) after infrastructure is stable |
-| ExternalSecret `db-secret` sync | ⚠️ In progress | ESO restarts needed after fixing secret JSON format — see Issue #18 |
+| ExternalSecret `db-secret` sync | ⚠️ In progress | ESO restarts + IRSA setup needed — see Issues #18, #20 |
 | Frontend nginx crash | ✅ Done | Fixed in `client/nginx.conf` — see Issue #17 |
-| Terraform OIDC role ECR policy | ✅ Done | Added to `main.tf`; also applied via `aws iam put-role-policy` directly |
+| Terraform OIDC role ECR policy | ✅ Done | Added to `main.tf`; also applied via CLI directly |
+| ECR `force_delete` + RDS `skip_final_snapshot` | ✅ Done | Fixed in modules — see Issue #19 |
+| EBS CSI driver policy on node role | ✅ Done | `AmazonEBSCSIDriverPolicy` added to `modules/eks/main.tf` and `eks_bootstrap.py` — see Issue #20 |
+| Route53 A records after cluster recreate | ⚠️ Pending | Update `bookstore.b17facebook.xyz` and `api.bookstore.b17facebook.xyz` to new NLB hostname printed by `eks_bootstrap.py` |
