@@ -399,17 +399,23 @@ for _ in range(12):          # wait up to 2 min for NLB hostname
     time.sleep(10)
 
 if lb_hostname:
+    frontend_host = f"bookstore.{DOMAIN}"
+    backend_host  = f"api.bookstore.{DOMAIN}"
     print(f"""
   ⚠️  The ingress load balancer hostname has CHANGED.
   Update these Route53 records in the public hosted zone for {DOMAIN}:
 
-    Record            Type    Value
-    ──────────────    ──────  ──────────────────────────────────────
-    {DOMAIN}.         A       ALIAS → {lb_hostname}
-    *.{DOMAIN}.       A       ALIAS → {lb_hostname}
+    Record                        Type    Value
+    ────────────────────────────  ──────  ──────────────────────────────────────
+    {frontend_host}.              A       ALIAS → {lb_hostname}
+    {backend_host}.               A       ALIAS → {lb_hostname}
 
   AWS Console path:
     Route 53 → Hosted zones → {DOMAIN} → Edit each A record → Alias to NLB
+
+  NOTE: Both records must point to the SAME NLB hostname.
+        *.{DOMAIN} wildcard is NOT sufficient — api.bookstore.{DOMAIN}
+        is two levels deep and won't match a single-level wildcard.
 """)
 else:
     print("  NLB hostname not yet available. Check later:")

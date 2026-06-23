@@ -624,6 +624,64 @@ if not existing_status:
 
 ---
 
+## 22. Frontend/Backend pods — `ImagePullBackOff` after `terraform destroy` + `terraform apply`
+
+**Symptom**
+```
+bookstore   backend-xxx    0/1   ErrImagePull       0   39s
+bookstore   backend-xxx    0/1   ImagePullBackOff   0   39s
+bookstore   frontend-xxx   0/1   ErrImagePull       0   39s
+bookstore   frontend-xxx   0/1   ImagePullBackOff   0   39s
+```
+
+**Root cause**  
+`terraform destroy` deletes the ECR repositories entirely (including all images inside them, because `force_delete = true`). `terraform apply` recreates the repos but they are empty. `k8s/kustomization.yaml` still references the image tag from the last CI run (e.g. `d0a09a32`), which no longer exists in the new empty repos. Kubernetes nodes cannot pull the image and crash immediately.
+
+**Fix**  
+After every `terraform apply` that recreates ECR repos, trigger the CI/CD pipeline to rebuild and push images. The pipeline runs on push to `main`, so make any commit to `main`:
+
+```powershell
+# Option 1 – empty commit (no file changes needed)
+git commit --allow-empty -m "chore: re-trigger CI after ECR recreate"
+git push origin main
+```
+
+Then in GitHub → Actions → DevSecOps Pipeline → approve the `deploy` stage (environment: production) when prompted. After approval, the pipeline commits a new image tag to `k8s/kustomization.yaml` and ArgoCD deploys within 3 minutes.
+
+**Notes**
+- The pipeline takes ~10–15 min (SAST + Trivy scan + build + push)
+- The `deploy` stage requires manual approval — watch for the approval prompt in the GitHub Actions UI
+- After images are pushed, ArgoCD will detect the kustomization.yaml commit and roll out new pods automatically
+
+---
+
+## 23. `eks_bootstrap.py` Phase 9 — wrong Route53 DNS records printed (`*.b17facebook.xyz` doesn't match two-level subdomains)
+
+**Symptom**  
+Phase 9 told the user to create `*.b17facebook.xyz` as the Route53 wildcard A record. After doing so, `bookstore.b17facebook.xyz` worked (one level deep — matches the wildcard) but `api.bookstore.b17facebook.xyz` did not (two levels deep — wildcards in DNS only match exactly one label).
+
+**Root cause**  
+The bootstrap script printed generic records (`{DOMAIN}.` and `*.{DOMAIN}.`) without reading the actual ingress hostnames. A single-level DNS wildcard (`*.b17facebook.xyz`) matches `bookstore.b17facebook.xyz` but not `api.bookstore.b17facebook.xyz`.
+
+**Fix**  
+`eks_bootstrap.py` Phase 9 now derives the exact hostnames from the `DOMAIN` constant and prints them explicitly:
+
+```python
+frontend_host = f"bookstore.{DOMAIN}"   # bookstore.b17facebook.xyz
+backend_host  = f"api.bookstore.{DOMAIN}"  # api.bookstore.b17facebook.xyz
+```
+
+**Correct Route53 records to create/update:**
+
+| Record | Type | Value |
+|--------|------|-------|
+| `bookstore.b17facebook.xyz` | A | ALIAS → NLB hostname from Phase 9 |
+| `api.bookstore.b17facebook.xyz` | A | ALIAS → same NLB hostname |
+
+Both records point to the same NLB. Go to Route 53 → Hosted zones → `b17facebook.xyz` → edit each A record → Alias to NLB.
+
+---
+
 ## Pending / Not Yet Done
 
 | Item | Status | What's needed |
@@ -634,9 +692,10 @@ if not existing_status:
 | GitHub Secrets (`AWS_ACCOUNT_ID`, `AWS_ROLE_ARN`, `API_URL`) | ✅ Done | Set — pipeline passes and ECR push succeeds |
 | `production` GitHub Environment | ✅ Done | Created — deploy job approval gate works |
 | `deletion_protection` in `main.tf` | ⚠️ Pending | Re-enable (`true`) after infrastructure is stable |
-| ExternalSecret `db-secret` sync | ⚠️ In progress | ESO restarts + IRSA setup needed — see Issues #18, #20 |
+| ExternalSecret `db-secret` sync | ✅ Done | `SecretSynced: True` — Phase 8 confirmed sync; IRSA + secret format fixed (see Issues #16, #18) |
 | Frontend nginx crash | ✅ Done | Fixed in `client/nginx.conf` — see Issue #17 |
 | Terraform OIDC role ECR policy | ✅ Done | Added to `main.tf`; also applied via CLI directly |
 | ECR `force_delete` + RDS `skip_final_snapshot` | ✅ Done | Fixed in modules — see Issue #19 |
 | EBS CSI driver policy on node role | ✅ Done | `AmazonEBSCSIDriverPolicy` added to `modules/eks/main.tf` and `eks_bootstrap.py` — see Issue #20 |
-| Route53 A records after cluster recreate | ⚠️ Pending | Update `bookstore.b17facebook.xyz` and `api.bookstore.b17facebook.xyz` to new NLB hostname printed by `eks_bootstrap.py` |
+| Route53 A records after cluster recreate | ⚠️ Pending | Update `bookstore.b17facebook.xyz` and `api.bookstore.b17facebook.xyz` to NLB: `a537e4bede0ec4041b0ea73b5f889999-1994490591.us-west-1.elb.amazonaws.com` |
+| ECR images after terraform destroy/apply | ⚠️ Pending | Trigger CI/CD pipeline (push to main) to rebuild and push images — see Issue #22 |
