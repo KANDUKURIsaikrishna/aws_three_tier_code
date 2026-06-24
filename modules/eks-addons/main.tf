@@ -1,23 +1,20 @@
 terraform {
   required_providers {
-    aws  = { source = "hashicorp/aws" }
-    helm = { source = "hashicorp/helm" }
+    aws  = { source = "hashicorp/aws",  version = "~> 5.0" }
+    helm = { source = "hashicorp/helm", version = "~> 2.0" }
   }
 }
 
-# ── EBS CSI driver policy → node role ─────────────────────────────────────────
-# Must attach before creating the addon or driver pods stay stuck in CREATING.
+# ── EBS CSI driver — policy must exist before the addon or pods stay stuck ─────
 
 resource "aws_iam_role_policy_attachment" "ebs_csi_policy" {
   role       = var.node_role_name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
 }
 
-# ── EBS CSI driver (AWS managed addon) ────────────────────────────────────────
-
 resource "aws_eks_addon" "ebs_csi" {
-  cluster_name      = var.cluster_name
-  addon_name        = "aws-ebs-csi-driver"
+  cluster_name                = var.cluster_name
+  addon_name                  = "aws-ebs-csi-driver"
   resolve_conflicts_on_create = "OVERWRITE"
 
   depends_on = [aws_iam_role_policy_attachment.ebs_csi_policy]
@@ -84,7 +81,7 @@ resource "helm_release" "ingress_nginx" {
   }
 }
 
-# ── Kube Prometheus Stack ─────────────────────────────────────────────────────
+# ── kube-prometheus-stack (Prometheus + Grafana) ──────────────────────────────
 
 resource "helm_release" "kube_prometheus_stack" {
   name             = "kube-prometheus-stack"
