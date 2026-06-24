@@ -3,6 +3,8 @@
 **Scope:** Tech demo / learning reference. NOT production grade.
 Single cluster, single region, bare-minimum cost. Multi-region and HA are explicitly out of scope.
 
+**Status:** All 6 items are fully implemented on the `improvements` branch.
+
 ---
 
 ## Sizing baseline (already applied on this branch)
@@ -19,35 +21,37 @@ At rest: 1 node, 1 pod per service. Under load: HPA adds pods, CA adds a second 
 
 ---
 
-## Item 1 — gp3 StorageClass as a declarative manifest
+## Item 1 — gp3 StorageClass as a declarative manifest ✅ DONE
 
 **Why:** Currently created imperatively by `eks_bootstrap.py` or `kubectl apply`. Should live in git like every other resource.
 
-**What to do:**
-- Create `k8s/storageclass/gp3.yaml`
-- Add it to `k8s/kustomization.yaml` resources list
-- Remove the `kubectl apply` StorageClass block from `eks_bootstrap.py` Phase 3
+**What was done:**
+- Created `k8s/base/storageclass/gp3.yaml`
+- Added it to `k8s/base/kustomization.yaml` resources list
+- Removed the `kubectl apply` StorageClass block from `eks_bootstrap.py`
 
-**Files:** `k8s/storageclass/gp3.yaml`, `k8s/kustomization.yaml`, `eks_bootstrap.py`
+**Files:** `k8s/base/storageclass/gp3.yaml`, `k8s/base/kustomization.yaml`, `eks_bootstrap.py`
 
 **Effort:** 30 min
 
 ---
 
-## Item 2 — EKS add-ons in Terraform (`modules/eks-addons/`)
+## Item 2 — EKS add-ons in Terraform (`modules/eks-addons/`) ✅ DONE
 
 **Why:** cert-manager, ESO, Nginx Ingress, and ArgoCD are installed by `eks_bootstrap.py`. Bringing them into Terraform makes the cluster reproducible with `terraform apply` alone.
 
-**What to do:**
-- Create `modules/eks-addons/main.tf` with `helm_release` resources for:
-  - `aws-ebs-csi-driver` (EKS addon, not Helm — use `aws_eks_addon`)
-  - `cert-manager` (jetstack/cert-manager)
+**What was done:**
+- Created `modules/eks-addons/main.tf` with `helm_release` resources for:
+  - `aws-ebs-csi-driver` (EKS addon — `aws_eks_addon`, not Helm)
+  - `cert-manager` (jetstack/cert-manager v1.14.4)
   - `external-secrets` (external-secrets/external-secrets)
-  - `ingress-nginx` (ingress-nginx/ingress-nginx)
+  - `ingress-nginx` (ingress-nginx/ingress-nginx v4.9.1)
   - `argo-cd` (argo/argo-cd)
-- Create `modules/eks-addons/variables.tf` (cluster name, OIDC provider ARN, region)
-- Wire into `main.tf` after the `eks` module
-- Slim down `eks_bootstrap.py` to only: kubeconfig, IRSA role, ClusterIssuer, DB init (things Terraform can't do)
+  - `kube-prometheus-stack` (prometheus-community/kube-prometheus-stack)
+  - `argo-rollouts` (argo/argo-rollouts)
+- Created `modules/eks-addons/variables.tf` (cluster name, OIDC provider ARN, region)
+- Added `provider "helm"` (exec auth via `aws eks get-token`) and `module "eks_addons"` to root `main.tf`
+- Slimmed down `eks_bootstrap.py` from 10 phases to 8 phases (removed EBS CSI install, Helm repo add/install, ArgoCD install — all handled by Terraform)
 
 **Minimal Helm values (tech demo — no HA, no redundant replicas):**
 
@@ -61,6 +65,15 @@ set { name = "controller.replicaCount", value = "1" }
 # argocd
 set { name = "server.replicas", value = "1" }
 set { name = "repoServer.replicas", value = "1" }
+
+# kube-prometheus-stack
+set { name = "prometheus.prometheusSpec.replicas", value = "1" }
+set { name = "alertmanager.enabled", value = "false" }
+set { name = "grafana.replicas", value = "1" }
+set { name = "prometheus.prometheusSpec.retention", value = "24h" }
+
+# argo-rollouts
+set { name = "controller.replicas", value = "1" }
 ```
 
 **Files:** `modules/eks-addons/main.tf`, `modules/eks-addons/variables.tf`, `main.tf`, `eks_bootstrap.py`
@@ -69,53 +82,64 @@ set { name = "repoServer.replicas", value = "1" }
 
 ---
 
-## Item 3 — Kustomize overlays (dev / prod)
+## Item 3 — Kustomize overlays (dev / prod) ✅ DONE
 
 **Why:** Right now all environment differences (DB host, replica count, resource limits) require manual edits. Overlays make it declarative.
 
-**What to do — minimal two-overlay structure:**
+**What was done — two-overlay structure:**
 
 ```
 k8s/
-  base/                     ← move existing manifests here
+  base/                              ← all shared resources, no image tags, no HPAs
     kustomization.yaml
     backend/
+      rollout.yaml                   ← Argo Rollout (replaces deployment.yaml)
+      service.yaml
     frontend/
+      deployment.yaml
+      service.yaml
     database/
+    configmaps/
+    secrets/
     ingress/
-    ...
+    network-policy/
+    pdb/
+    storageclass/
+    namespace.yaml
+    monitoring/
+      servicemonitor.yaml
   overlays/
     dev/
-      kustomization.yaml    ← patches: replicas=1, DB_HOST=mysql-service, no resource limits
+      kustomization.yaml             ← patches replicas=1 on Rollout + Deployment
     prod/
-      kustomization.yaml    ← patches: replicas per HPA, DB_HOST=<rds-endpoint>, resource limits
+      kustomization.yaml             ← image tags managed by CI; backend resource limits patch
+      hpa-backend.yaml               ← targets argoproj.io/v1alpha1 Rollout, min 1 max 5
+      hpa-frontend.yaml              ← targets apps/v1 Deployment, min 1 max 3
+  argocd/
+    application.yaml                 ← path changed: k8s → k8s/overlays/prod
 ```
 
-**Dev overlay patches:**
-- `DB_HOST` ConfigMap → `mysql-service` (in-cluster MySQL)
-- No resource requests/limits (saves memory on 1 node)
-- HPA disabled (replace with fixed replicas=1)
+**ArgoCD application.yaml** path changed from `k8s` to `k8s/overlays/prod`.
 
-**Prod overlay patches:**
-- `DB_HOST` ConfigMap → RDS endpoint (from `terraform output rds_endpoint`)
-- Resource requests: backend 128m CPU / 128Mi RAM, frontend 64m / 64Mi
-- HPA enabled
+**CI/CD Stage 4** changed from `cd k8s` to `cd k8s/overlays/prod`; commits `k8s/overlays/prod/kustomization.yaml`.
 
-**ArgoCD application.yaml** — change `path: k8s` to `path: k8s/overlays/prod`
+**configure.py** paths updated:
+- `k8s/ingress/ingress.yaml` → `k8s/base/ingress/ingress.yaml`
+- `k8s/kustomization.yaml` → `k8s/overlays/prod/kustomization.yaml`
 
-**Files:** `k8s/` (restructure), `k8s/argocd/application.yaml`
+**Files:** `k8s/` (restructured), `k8s/argocd/application.yaml`, `.github/workflows/ci-cd.yml`, `scripts/configure.py`
 
 **Effort:** 2–3 hours
 
 ---
 
-## Item 4 — Observability (Prometheus + Grafana only, no Loki)
+## Item 4 — Observability (Prometheus + Grafana only, no Loki) ✅ DONE
 
 **Why:** Basic metrics visibility. Loki (log aggregation) is skipped — too heavy for 1 node, and `kubectl logs` is sufficient for a demo.
 
-**What to do:**
+**What was done:**
 
-Add to `modules/eks-addons/main.tf`:
+Added to `modules/eks-addons/main.tf`:
 
 ```hcl
 resource "helm_release" "kube_prometheus_stack" {
@@ -125,44 +149,43 @@ resource "helm_release" "kube_prometheus_stack" {
   namespace  = "monitoring"
   create_namespace = true
 
-  # Minimal for tech demo — no HA
-  set { name = "prometheus.prometheusSpec.replicas",        value = "1" }
-  set { name = "alertmanager.enabled",                      value = "false" }
-  set { name = "grafana.replicas",                          value = "1" }
-  set { name = "grafana.persistence.enabled",               value = "false" }
-  set { name = "prometheus.prometheusSpec.retention",       value = "24h" }
-  set { name = "prometheus.prometheusSpec.storageSpec",     value = "" }  # no PVC for demo
+  set { name = "prometheus.prometheusSpec.replicas",  value = "1" }
+  set { name = "alertmanager.enabled",                value = "false" }
+  set { name = "grafana.replicas",                    value = "1" }
+  set { name = "grafana.persistence.enabled",         value = "false" }
+  set { name = "prometheus.prometheusSpec.retention", value = "24h" }
 }
 ```
 
-Add `prom-client` to the Node.js backend:
-- `npm install prom-client`
-- Expose `/metrics` endpoint
-- Track: `http_requests_total`, `http_request_duration_seconds`, `db_query_duration_seconds`
+Added `prom-client` to the Node.js backend:
+- `backend/app.js` exposes `/metrics` endpoint using `prom-client`
+- Tracks: `http_requests_total` (Counter) and `http_request_duration_seconds` (Histogram) with method/route/status labels
+- Default Node.js metrics also collected via `collectDefaultMetrics()`
 
-Add a `k8s/monitoring/servicemonitor.yaml` so Prometheus scrapes the backend.
+Added `k8s/base/monitoring/servicemonitor.yaml` so Prometheus scrapes the backend automatically.
 
 Access Grafana: `kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80`
 
 **Skipped:** Loki, persistent storage for metrics, AlertManager, PagerDuty
 
-**Files:** `modules/eks-addons/main.tf`, `backend/index.js` (or separate `metrics.js`), `k8s/monitoring/servicemonitor.yaml`
+**Files:** `modules/eks-addons/main.tf`, `backend/app.js`, `k8s/base/monitoring/servicemonitor.yaml`
 
 **Effort:** half day
 
 ---
 
-## Item 5 — Canary deployments with Argo Rollouts
+## Item 5 — Canary deployments with Argo Rollouts ✅ DONE
 
 **Why:** Replace the current rolling `Deployment` with a progressive delivery strategy. If error rate spikes after 10% canary, it auto-rolls back.
 
-**What to do (minimal):**
-- Install Argo Rollouts via Helm in `modules/eks-addons/main.tf`
-- Convert `k8s/backend/deployment.yaml` → `k8s/backend/rollout.yaml` (kind: Rollout)
-- Simple canary strategy: 10% → 50% → 100%, step pause = 30s (auto — no manual approval needed for demo)
-- Update CI Stage 4: `kubectl argo rollouts set image` instead of `kustomize edit set image`
+**What was done:**
+- Installed Argo Rollouts via Helm in `modules/eks-addons/main.tf`
+- Converted `k8s/backend/deployment.yaml` → `k8s/base/backend/rollout.yaml` (kind: Rollout)
+- Canary strategy: 10% → 50% → 100%, step pause = 30s (auto — no manual approval needed for demo)
+- HPA in `k8s/overlays/prod/hpa-backend.yaml` targets `argoproj.io/v1alpha1 / Rollout` (not `Deployment`)
+- Dev overlay patches replicas=1 on the Rollout directly
 
-**Minimal Rollout spec:**
+**Rollout spec:**
 
 ```yaml
 strategy:
@@ -174,30 +197,29 @@ strategy:
     - pause: {duration: 30s}
 ```
 
-**Skip:** Flagger, Prometheus-based automated analysis (too complex for demo), frontend canary
+**Skipped:** Flagger, Prometheus-based automated analysis (too complex for demo), frontend canary
 
-**Files:** `k8s/backend/rollout.yaml` (replaces `deployment.yaml`), `modules/eks-addons/main.tf`, `.github/workflows/ci-cd.yml`
+**Files:** `k8s/base/backend/rollout.yaml` (replaces `deployment.yaml`), `modules/eks-addons/main.tf`, `k8s/overlays/prod/hpa-backend.yaml`
 
 **Effort:** 2 hours
 
 ---
 
-## Item 6 — Backend integration tests (Jest + SQLite)
+## Item 6 — Backend integration tests (vitest + mock db) ✅ DONE
 
-**Why:** No automated test suite means Trivy is the only quality gate. Jest + SQLite gives fast unit-level coverage with no external dependencies.
+**Why:** No automated test suite means Trivy is the only quality gate. Tests give fast unit-level coverage with no external dependencies.
 
-**What to do:**
-- `npm install --save-dev jest supertest better-sqlite3`
-- Create `backend/__tests__/books.test.js`:
-  - Uses `better-sqlite3` to spin up an in-memory DB
-  - Seeds schema from the same SQL as `mysql-init-configmap.yaml`
-  - Tests: GET /books, POST /books, GET /books/:id, DELETE /books/:id
-- Add `"test": "jest"` to `backend/package.json`
-- Wire into CI Stage 1: add a test step before `npm audit`
+**What was done:**
+- Backend split into `backend/app.js` (Express app factory `export function createApp(db)`) and `backend/index.js` (creates real MySQL connection, calls `createApp(db)`, starts server)
+- `backend/__tests__/books.test.js` — 6 vitest tests, `vi.fn()` mock db, no real DB needed
+- Tests cover: `GET /`, `GET /books` (list + empty), `POST /books`, `DELETE /books/:id`, `PUT /books/:id`
+- `npm test` runs vitest
+- Wired into CI Stage 1: `npm test` runs before `npm audit`; audit uses `--omit=dev`
+- CI pipeline triggers on push/PR to both `main` and `improvements` branches
 
-**Skip:** test containers (Docker-in-Docker in CI is slow), full E2E tests
+**Skipped:** test containers (Docker-in-Docker in CI is slow), full E2E tests, SQLite (switched to vi.fn() mock — simpler, zero native deps)
 
-**Files:** `backend/__tests__/books.test.js`, `backend/package.json`, `.github/workflows/ci-cd.yml`
+**Files:** `backend/app.js`, `backend/index.js`, `backend/__tests__/books.test.js`, `backend/package.json`, `.github/workflows/ci-cd.yml`
 
 **Effort:** 2–3 hours
 
@@ -218,11 +240,13 @@ strategy:
 
 ---
 
-## Work order for tomorrow
+## Work order — completed
 
-1. **Item 1** — gp3 StorageClass manifest (30 min, isolated change)
-2. **Item 6** — Backend tests (can do while Terraform runs)
-3. **Item 2** — EKS add-ons in Terraform (biggest change, do while fresh)
-4. **Item 3** — Kustomize overlays (depends on understanding the current structure)
-5. **Item 4** — Observability (add to eks-addons module from Item 2)
-6. **Item 5** — Argo Rollouts canary (final touch)
+| # | Item | Status |
+|---|---|---|
+| 1 | gp3 StorageClass manifest | **DONE** |
+| 2 | EKS add-ons in Terraform (`modules/eks-addons/`) | **DONE** |
+| 3 | Kustomize overlays (dev / prod) | **DONE** |
+| 4 | Observability (Prometheus + Grafana, backend `/metrics`) | **DONE** |
+| 5 | Argo Rollouts canary for backend | **DONE** |
+| 6 | Backend tests (vitest + vi.fn() mock db) | **DONE** |

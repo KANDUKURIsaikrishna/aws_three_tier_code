@@ -49,57 +49,79 @@ Your cluster has these namespaces:
 | Namespace | What lives there | Who created it |
 |---|---|---|
 | `bookstore` | Your actual app — frontend, backend, MySQL | You (via `namespace.yaml`) |
-| `argocd` | ArgoCD — the GitOps deployment tool | Helm chart |
-| `ingress-nginx` | Nginx Ingress Controller — the front door | Helm chart |
-| `cert-manager` | Automatic TLS/HTTPS certificates | Helm chart |
-| `external-secrets` | Syncs passwords from AWS Secrets Manager | Helm chart |
+| `argocd` | ArgoCD — the GitOps deployment tool | Terraform (Helm) |
+| `ingress-nginx` | Nginx Ingress Controller — the front door | Terraform (Helm) |
+| `cert-manager` | Automatic TLS/HTTPS certificates | Terraform (Helm) |
+| `external-secrets` | Syncs passwords from AWS Secrets Manager | Terraform (Helm) |
+| `monitoring` | Prometheus + Grafana — metrics and dashboards | Terraform (Helm) |
+| `argo-rollouts` | Argo Rollouts controller — canary deployments | Terraform (Helm) |
 | `kube-system` | Kubernetes' own internals (DNS, networking) | AWS EKS |
 
-The `k8s/` folder in this repo **only manages the `bookstore` namespace**. The others are installed separately via Helm.
+The `k8s/` folder in this repo **manages the `bookstore` namespace** (and the gp3 StorageClass). The platform namespaces are installed by Terraform (`modules/eks-addons/`).
 
 ---
 
 ## Folder Structure
 
+The `k8s/` folder uses **Kustomize** with a base + overlays layout:
+
 ```
 k8s/
-├── kustomization.yaml          ← Master list: tells ArgoCD which files to deploy
-├── namespace.yaml              ← Creates the "bookstore" namespace
+├── base/                               ← Shared resources (no image tags, no HPAs)
+│   ├── kustomization.yaml              ← Lists all base resources
+│   ├── namespace.yaml                  ← Creates the "bookstore" namespace
+│   │
+│   ├── storageclass/
+│   │   └── gp3.yaml                    ← EBS gp3 StorageClass for MySQL PVC
+│   │
+│   ├── configmaps/
+│   │   └── backend-config.yaml         ← Non-secret config (DB host, port, etc.)
+│   │
+│   ├── secrets/
+│   │   └── external-secret.yaml        ← PRODUCTION: pulls DB password from AWS Secrets Manager
+│   │
+│   ├── database/
+│   │   ├── mysql-init-configmap.yaml   ← SQL script: create books table + sample data
+│   │   ├── mysql-service.yaml          ← Internal DNS name for MySQL ("mysql-service")
+│   │   └── mysql-statefulset.yaml      ← The MySQL container (dev/local only)
+│   │
+│   ├── backend/
+│   │   ├── rollout.yaml                ← Argo Rollout (replaces Deployment — canary strategy)
+│   │   └── service.yaml                ← Internal DNS name for the API ("backend-service")
+│   │
+│   ├── frontend/
+│   │   ├── deployment.yaml             ← Runs the React+Nginx containers
+│   │   └── service.yaml                ← Internal DNS name for the website ("frontend-service")
+│   │
+│   ├── ingress/
+│   │   └── ingress.yaml                ← The front door: routes domain names → services
+│   │
+│   ├── monitoring/
+│   │   └── servicemonitor.yaml         ← Tells Prometheus to scrape backend /metrics
+│   │
+│   ├── network-policy/
+│   │   └── network-policy.yaml         ← Firewall rules between pods
+│   │
+│   └── pdb/
+│       └── pdb.yaml                    ← Ensures at least 1 pod stays alive during maintenance
 │
-├── configmaps/
-│   └── backend-config.yaml    ← Non-secret config for the backend (DB host, port, etc.)
-│
-├── secrets/
-│   ├── external-secret.yaml   ← PRODUCTION: pulls DB password from AWS Secrets Manager
-│   └── db-secret.yaml         ← LOCAL DEV ONLY: hardcoded placeholder (never commit real values)
-│
-├── database/
-│   ├── mysql-init-configmap.yaml   ← SQL script to create the books table + sample data
-│   ├── mysql-service.yaml          ← Internal DNS name for MySQL ("mysql-service")
-│   └── mysql-statefulset.yaml      ← The MySQL container itself (dev/local only)
-│
-├── backend/
-│   ├── deployment.yaml         ← Runs the Node.js API containers
-│   ├── service.yaml            ← Internal DNS name for the API ("backend-service")
-│   └── hpa.yaml                ← Auto-scaling rules for the API
-│
-├── frontend/
-│   ├── deployment.yaml         ← Runs the React+Nginx containers
-│   ├── service.yaml            ← Internal DNS name for the website ("frontend-service")
-│   └── hpa.yaml                ← Auto-scaling rules for the website
-│
-├── ingress/
-│   └── ingress.yaml            ← The front door: routes domain names → services
-│
-├── network-policy/
-│   └── network-policy.yaml     ← Firewall rules between pods
-│
-├── pdb/
-│   └── pdb.yaml                ← Ensures at least 1 pod stays alive during maintenance
+├── overlays/
+│   ├── dev/
+│   │   └── kustomization.yaml          ← Patches: replicas=1 on Rollout + Deployment
+│   └── prod/
+│       ├── kustomization.yaml          ← Image tags (CI updates this) + backend resource limits
+│       ├── hpa-backend.yaml            ← HPA: Rollout/backend, min 1, max 5
+│       └── hpa-frontend.yaml           ← HPA: Deployment/frontend, min 1, max 3
 │
 └── argocd/
-    └── application.yaml        ← Tells ArgoCD: "watch this git repo and keep the cluster in sync"
+    └── application.yaml                ← Tells ArgoCD: watch k8s/overlays/prod/
 ```
+
+**Why base + overlays?**
+
+The `base/` layer contains everything that is identical in every environment — the database, networking, security. The `overlays/` layer contains only the differences: the `dev` overlay sets replicas=1 so one node is enough; the `prod` overlay adds HPAs and resource limits and has the real ECR image tags (which CI updates automatically).
+
+ArgoCD watches `k8s/overlays/prod/` and runs `kustomize build k8s/overlays/prod/` to produce the final set of manifests.
 
 ---
 
@@ -107,11 +129,19 @@ k8s/
 
 ---
 
-### `kustomization.yaml` — The Master List
+### `base/kustomization.yaml` — The Base Resource List
 
-Think of this as the **table of contents**. ArgoCD reads this file first to know which other files to apply.
+Lists all resources that both `dev` and `prod` overlays inherit. Contains no image tags (those live in `overlays/prod/kustomization.yaml`).
 
-It also controls **which Docker image version gets deployed**. When your CI/CD pipeline builds a new Docker image, it updates the image tag here, commits it to git, and ArgoCD automatically rolls out the new version.
+---
+
+### `overlays/prod/kustomization.yaml` — The Production Overlay
+
+This is the file ArgoCD reads. It:
+1. Inherits all resources from `../../base`
+2. Adds the prod-only HPA files
+3. Stores the current ECR image tags (CI updates these via `kustomize edit set image`)
+4. Applies a resource limits patch on the backend Rollout
 
 ```
 images:
@@ -119,24 +149,31 @@ images:
   bookstore-frontend → <account>.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend:<sha8>
 ```
 
-The `<sha8>` tag is the first 8 characters of the git commit SHA. The CI pipeline updates these values automatically via `kustomize edit set image` after every successful build.
+The `<sha8>` tag is the first 8 characters of the git commit SHA. The CI pipeline updates these values automatically via `kustomize edit set image` inside `k8s/overlays/prod/` after every successful build.
 
 ---
 
-### `namespace.yaml` — The Folder Creator
+### `overlays/dev/kustomization.yaml` — The Dev Overlay
+
+Patches the Argo Rollout and frontend Deployment to run 1 replica each. This is the right overlay for local development or a single-node test cluster.
+
+---
+
+### `base/namespace.yaml` — The Folder Creator
 
 Creates a namespace called `bookstore` inside Kubernetes. Everything your app needs lives inside this namespace.
 
-```
-Kind: Namespace
-Name: bookstore
-```
+---
 
-Without this, Kubernetes wouldn't know where to put your app's resources.
+## The `base/storageclass/` Folder
+
+### `storageclass/gp3.yaml`
+
+Declares the **gp3 EBS StorageClass** that MySQL uses for its persistent volume. This used to be applied imperatively by `eks_bootstrap.py`; it now lives in git and is applied by ArgoCD like any other resource. Declaring it as a manifest ensures the StorageClass is recreated automatically if the cluster is rebuilt.
 
 ---
 
-## The `configmaps/` Folder — Non-Secret Configuration
+## The `base/configmaps/` Folder — Non-Secret Configuration
 
 ### `configmaps/backend-config.yaml`
 
@@ -153,7 +190,7 @@ The backend pods read these values as environment variables when they start.
 
 ---
 
-## The `secrets/` Folder — Passwords and Credentials
+## The `base/secrets/` Folder — Passwords and Credentials
 
 ### `secrets/external-secret.yaml` — Production Secret Management
 
@@ -176,13 +213,11 @@ AWS Secrets Manager ──(ESO fetches)──► Kubernetes Secret "db-secret"
                   (DB_USERNAME, DB_PASSWORD env vars)
 ```
 
-### `secrets/db-secret.yaml` — Local Development Only
-
-This is a **placeholder** for running the app on your laptop. It has fake base64-encoded values. **Never put real passwords here and never commit this file with real values.** In production, the `external-secret.yaml` above takes care of creating the `db-secret` automatically.
+There is also a `k8s/secrets/db-secret.yaml` at the root for **local dev only** — a hardcoded placeholder with fake base64 values. **Never put real passwords there and never commit it with real values.**
 
 ---
 
-## The `database/` Folder — MySQL (Dev / Local Only)
+## The `base/database/` Folder — MySQL (Dev / Local Only)
 
 > In **production on AWS**, your app talks to **RDS MySQL** (a managed AWS database), not these pods. These files are for running the full stack locally or for testing.
 
@@ -213,19 +248,34 @@ Key details:
 
 ---
 
-## The `backend/` Folder — Node.js API
+## The `base/backend/` Folder — Node.js API
 
-### `backend/deployment.yaml` — The API Containers
+### `backend/rollout.yaml` — The API Containers (Argo Rollout)
 
-A **Deployment** tells Kubernetes: "keep 2 copies of the backend API running at all times."
+The backend does **not** use a plain Kubernetes `Deployment`. It uses an **Argo Rollout** (`kind: Rollout`), which is a custom resource that gives you progressive delivery.
+
+When you push a new backend image, Argo Rollouts does NOT replace all pods at once. Instead it follows a **canary strategy**:
+
+```
+Step 1: route 10% of traffic → new version    (wait 30 seconds)
+Step 2: route 50% of traffic → new version    (wait 30 seconds)
+Step 3: route 100% of traffic → new version   (rollout complete)
+```
+
+If anything goes wrong (pods crash-loop, errors spike), you can abort the rollout and it instantly reverts to the previous version:
+
+```bash
+kubectl argo rollouts abort backend -n bookstore
+```
 
 Key details:
 
 | Setting | Value | Why |
 |---|---|---|
-| Replicas | 2 | So one can restart without downtime |
-| Image | `bookstore-backend:<sha8>` | The Docker image built by your CI pipeline, tagged with git SHA |
+| Kind | `Rollout` (argoproj.io/v1alpha1) | Progressive delivery instead of rolling update |
+| Image | `bookstore-backend:<sha8>` | The Docker image built by your CI pipeline |
 | Port | 3000 | Node.js Express listens here |
+| Port name | `http` | Named so the ServiceMonitor can find it |
 | User | UID 1001 (non-root) | Security — can't escalate to root |
 | Root filesystem | Read-only | Security — container can't write to its own disk |
 | Capabilities | ALL dropped | Security — container has minimal Linux privileges |
@@ -239,45 +289,43 @@ Key details:
 - **Readiness probe**: hits `GET /` on port 3000. Kubernetes only sends traffic to a pod after this passes.
 - **Liveness probe**: hits `GET /` on port 3000. If this fails 3 times, Kubernetes restarts the pod.
 
+**API endpoints**:
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/` | Health check — returns `"hello"` |
+| GET | `/books` | List all books |
+| POST | `/books` | Add a book |
+| PUT | `/books/:id` | Update a book |
+| DELETE | `/books/:id` | Delete a book |
+| GET | `/metrics` | Prometheus metrics (http_requests_total, http_request_duration_seconds) |
+
 ### `backend/service.yaml` — The API's Internal Phone Number
 
-A **ClusterIP Service** named `backend-service`. It gives the backend pods a stable internal DNS name and load-balances traffic across all 2 backend pods.
+A **ClusterIP Service** named `backend-service`. It gives the backend pods a stable internal DNS name and load-balances traffic across all running backend pods. The service port is named `http`, which is required for the ServiceMonitor to find it.
 
 ```
-frontend pod  →  backend-service:80  →  (one of) backend pod 1 or 2  →  port 3000
+frontend pod  →  backend-service:80  →  (one of the) backend pod(s)  →  port 3000
 ```
 
 The frontend never talks directly to a pod IP. It always goes through the service.
 
-### `backend/hpa.yaml` — Auto-Scaling for the API
-
-A **HorizontalPodAutoscaler** watches CPU and memory usage and automatically adds or removes backend pods:
-
-| Setting | Value |
-|---|---|
-| Minimum pods | 2 |
-| Maximum pods | 10 |
-| Scale up when CPU > | 70% |
-| Scale up when Memory > | 80% |
-
-Example: if Black Friday traffic spikes CPU to 90%, Kubernetes automatically adds more backend pods (up to 10). When traffic drops, it scales back down to 2.
-
 ---
 
-## The `frontend/` Folder — React Website
+## The `base/frontend/` Folder — React Website
 
 ### `frontend/deployment.yaml` — The Website Containers
 
-Same pattern as the backend but for the React app served by Nginx.
+Same pattern as the backend (but uses a plain `Deployment`, not a Rollout — canary only applies to the backend).
 
 | Setting | Value | Why |
 |---|---|---|
-| Replicas | 2 | Redundancy |
+| Replicas | set by overlay (1 dev / HPA prod) | Depends on environment |
 | Image | `bookstore-frontend:<sha8>` | Built by CI pipeline, tagged with git SHA |
 | Port | 8080 | Nginx listens here (not 80 — non-root can't bind port 80) |
 | User | UID 101 (non-root) | Security |
 | Root filesystem | Read-only | Security |
-| `/tmp`, `/var/cache/nginx`, `/var/run` | emptyDir volumes | Nginx needs to write to these paths; emptyDir provides writable scratch space |
+| `/tmp`, `/var/cache/nginx`, `/var/run` | emptyDir volumes | Nginx needs to write to these paths |
 
 **Health check**: hits `GET /health` on port 8080. Nginx serves a simple health endpoint.
 
@@ -289,19 +337,62 @@ A **ClusterIP Service** named `frontend-service`. Routes external traffic (from 
 Ingress (bookstore.b17facebook.xyz:443)  →  frontend-service:80  →  frontend pod:8080
 ```
 
-### `frontend/hpa.yaml` — Auto-Scaling for the Website
+---
 
-| Setting | Value |
-|---|---|
-| Minimum pods | 2 |
-| Maximum pods | 5 |
-| Scale up when CPU > | 70% |
+## The `base/monitoring/` Folder — Prometheus Scrape Config
 
-The frontend is cheaper to run (static files + Nginx), so the max is only 5 (vs 10 for the backend).
+### `monitoring/servicemonitor.yaml` — Backend Metrics
+
+A **ServiceMonitor** is a custom resource understood by the Prometheus Operator (installed as part of `kube-prometheus-stack`). It tells Prometheus: "go scrape the `/metrics` endpoint on any pod that matches the `app: backend` label in the `bookstore` namespace every 30 seconds."
+
+The backend exposes metrics via the `prom-client` library (`backend/app.js`):
+- `http_requests_total` — counter labelled by method, route, and HTTP status code
+- `http_request_duration_seconds` — histogram of response times
+- Default Node.js process metrics (memory, CPU, event loop lag)
+
+This means Prometheus automatically collects backend performance data without any manual configuration. Grafana (also installed by the stack) can visualise these metrics using built-in dashboards.
+
+Access Grafana locally:
+```bash
+kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80
+# Default credentials: admin / prom-operator
+```
 
 ---
 
-## The `ingress/` Folder — The Front Door
+## The `overlays/prod/` Folder — Production-specific Resources
+
+### `overlays/prod/hpa-backend.yaml` — Auto-Scaling for the API
+
+A **HorizontalPodAutoscaler** targets the **Argo Rollout** (not a Deployment):
+
+```yaml
+scaleTargetRef:
+  apiVersion: argoproj.io/v1alpha1
+  kind: Rollout
+  name: backend
+```
+
+| Setting | Value |
+|---|---|
+| Minimum pods | 1 |
+| Maximum pods | 5 |
+| Scale up when CPU > | 70% |
+| Scale up when Memory > | 80% |
+
+### `overlays/prod/hpa-frontend.yaml` — Auto-Scaling for the Website
+
+The frontend HPA targets the `frontend` `Deployment`:
+
+| Setting | Value |
+|---|---|
+| Minimum pods | 1 |
+| Maximum pods | 3 |
+| Scale up when CPU > | 70% |
+
+---
+
+## The `base/ingress/` Folder — The Front Door
 
 ### `ingress/ingress.yaml` — Traffic Routing Rules
 
@@ -319,11 +410,11 @@ The **Ingress** is the only entry point from the internet into your cluster. It 
 - The certificate is stored in a Kubernetes Secret called `bookstore-tls`
 - Any HTTP request is **force-redirected to HTTPS** (the `ssl-redirect: "true"` annotation)
 
-The Ingress is handled by **Nginx Ingress Controller** (installed via Helm in the `ingress-nginx` namespace). It exposes a **Network Load Balancer** on AWS that gets the public IP address you point your DNS to.
+The Ingress is handled by **Nginx Ingress Controller** (installed via Terraform/Helm in the `ingress-nginx` namespace). It exposes a **Network Load Balancer** on AWS that gets the public IP address you point your DNS to.
 
 ---
 
-## The `network-policy/` Folder — Pod Firewall Rules
+## The `base/network-policy/` Folder — Pod Firewall Rules
 
 ### `network-policy/network-policy.yaml`
 
@@ -374,7 +465,7 @@ Nginx Ingress ──► Frontend (8080) ──► Backend (3000) ──► MySQL
 
 ---
 
-## The `pdb/` Folder — Maintenance Protection
+## The `base/pdb/` Folder — Maintenance Protection
 
 ### `pdb/pdb.yaml` — Pod Disruption Budgets
 
@@ -382,7 +473,7 @@ A **PodDisruptionBudget** (PDB) tells Kubernetes: "when you're doing maintenance
 
 | PDB | Protects | Rule |
 |---|---|---|
-| `backend-pdb` | Backend Deployment | At least 1 backend pod must stay running |
+| `backend-pdb` | Backend Rollout pods | At least 1 backend pod must stay running |
 | `frontend-pdb` | Frontend Deployment | At least 1 frontend pod must stay running |
 
 Without PDBs, a node upgrade could briefly take all pods offline. With PDBs, Kubernetes drains nodes one at a time, ensuring zero downtime.
@@ -399,7 +490,7 @@ This file tells ArgoCD what to watch and where to deploy it.
 |---|---|---|
 | Source repo | `https://github.com/YOUR_GITHUB_USERNAME/aws_three_tier_code.git` | Watch this git repo |
 | Branch | `main` | Watch the `main` branch |
-| Path | `k8s/` | Look at the `k8s/` folder specifically |
+| Path | `k8s/overlays/prod` | Look at the prod overlay specifically |
 | Destination | `https://kubernetes.default.svc` | Deploy to this cluster |
 | Namespace | `bookstore` | Deploy into the `bookstore` namespace |
 | Auto-prune | `true` | If you delete a file from git, ArgoCD deletes the resource from the cluster |
@@ -410,15 +501,18 @@ This file tells ArgoCD what to watch and where to deploy it.
 ```
 1. You push code to GitHub
 2. GitHub Actions pipeline runs:
+   - Runs vitest tests (npm test)
    - Builds new Docker images
    - Pushes them to AWS ECR
-   - Updates the image tag in k8s/kustomization.yaml
-   - Commits that change to git
+   - cd k8s/overlays/prod
+   - Updates the image tag via kustomize edit set image
+   - Commits k8s/overlays/prod/kustomization.yaml to git
 3. ArgoCD notices the new commit (polls every 3 minutes)
-4. ArgoCD runs `kustomize build k8s/` to render all manifests
+4. ArgoCD runs `kustomize build k8s/overlays/prod/` to render all manifests
 5. ArgoCD applies the changes to the cluster
-6. Kubernetes does a rolling update — new pods start, old pods stop
-7. Zero downtime
+6. For the backend: Argo Rollouts canary (10% → 50% → 100%)
+7. For the frontend: Kubernetes rolling update
+8. Zero downtime
 ```
 
 ---
@@ -434,15 +528,24 @@ This file tells ArgoCD what to watch and where to deploy it.
 | `ingress-nginx` | Nginx reverse proxy (front door) |
 | `cert-manager` | Automatic HTTPS certificates |
 | `external-secrets` | AWS Secrets Manager sync |
+| `monitoring` | Prometheus + Grafana metrics |
+| `argo-rollouts` | Canary deployment controller |
 
 ---
 
-### Deployments (stateless, auto-replaced on crash)
+### Rollouts (canary progressive delivery)
 
 | Name | Namespace | Pods | Image | Port |
 |---|---|---|---|---|
-| `frontend` | `bookstore` | 2–5 | `bookstore-frontend:<sha8>` | 8080 |
-| `backend` | `bookstore` | 2–10 | `bookstore-backend:<sha8>` | 3000 |
+| `backend` | `bookstore` | 1–5 | `bookstore-backend:<sha8>` | 3000 |
+
+---
+
+### Deployments (stateless, rolling update)
+
+| Name | Namespace | Pods | Image | Port |
+|---|---|---|---|---|
+| `frontend` | `bookstore` | 1–3 | `bookstore-frontend:<sha8>` | 8080 |
 
 ---
 
@@ -491,12 +594,12 @@ This file tells ArgoCD what to watch and where to deploy it.
 
 ---
 
-### HorizontalPodAutoscalers (auto-scaling)
+### HorizontalPodAutoscalers (auto-scaling) — prod overlay only
 
 | Name | Namespace | Target | Min | Max | Scale trigger |
 |---|---|---|---|---|---|
-| `frontend-hpa` | `bookstore` | `frontend` Deployment | 2 | 5 | CPU > 70% |
-| `backend-hpa` | `bookstore` | `backend` Deployment | 2 | 10 | CPU > 70% or Memory > 80% |
+| `frontend-hpa` | `bookstore` | `frontend` Deployment | 1 | 3 | CPU > 70% |
+| `backend-hpa` | `bookstore` | `backend` Rollout | 1 | 5 | CPU > 70% or Memory > 80% |
 
 ---
 
@@ -520,6 +623,14 @@ This file tells ArgoCD what to watch and where to deploy it.
 
 ---
 
+### ServiceMonitors (Prometheus scrape config)
+
+| Name | Namespace | Scrapes | Endpoint |
+|---|---|---|---|
+| `backend-monitor` | `bookstore` | backend pods | `/metrics` (port 3000) |
+
+---
+
 ## How It All Connects — The Full Request Journey
 
 ```
@@ -534,7 +645,7 @@ Nginx Ingress Controller pod  (namespace: ingress-nginx)
     │  terminates TLS using bookstore-tls certificate
     ▼
 frontend-service  (ClusterIP, port 80)
-    │  load balances across 2 frontend pods
+    │  load balances across frontend pod(s)
     ▼
 frontend pod  (React app served by Nginx, port 8080)
     │  browser loads the React SPA (single-page app)
@@ -544,11 +655,12 @@ frontend pod  (React app served by Nginx, port 8080)
 Nginx Ingress Controller  (sees api.bookstore.b17facebook.xyz)
     ▼
 backend-service  (ClusterIP, port 80)
-    │  load balances across 2 backend pods
+    │  load balances across backend pod(s)
     ▼
 backend pod  (Node.js Express API, port 3000)
     │  reads DB_HOST=mysql-service from ConfigMap
     │  reads DB_USERNAME, DB_PASSWORD from db-secret
+    │  increments http_requests_total Prometheus counter
     ▼
 mysql-service  (headless, port 3306)
     ▼
@@ -567,14 +679,24 @@ Returns JSON list of books back up the chain to the browser
 kubectl get all -n bookstore
 
 # See pod logs (live)
-kubectl logs -f deployment/backend -n bookstore
 kubectl logs -f deployment/frontend -n bookstore
+# For backend (Argo Rollout — not a Deployment):
+kubectl logs -f -l app=backend -n bookstore
 
 # See why a pod is not starting
 kubectl describe pod -n bookstore -l app=backend
 
 # Check auto-scaling status
 kubectl get hpa -n bookstore
+
+# Check Argo Rollout canary progress
+kubectl argo rollouts get rollout backend -n bookstore --watch
+
+# Promote canary to 100% immediately
+kubectl argo rollouts promote backend -n bookstore
+
+# Abort canary and roll back
+kubectl argo rollouts abort backend -n bookstore
 
 # Check network policies
 kubectl get networkpolicy -n bookstore
@@ -588,4 +710,12 @@ kubectl get application bookstore -n argocd
 # Port-forward the frontend locally (no ingress needed)
 kubectl port-forward svc/frontend-service 8080:80 -n bookstore
 # Then open http://localhost:8080
+
+# Port-forward Grafana
+kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80
+# Then open http://localhost:3000
+
+# Force ESO to resync the DB secret immediately
+kubectl annotate externalsecret db-secret -n bookstore \
+  "force-sync=$(date +%s)" --overwrite
 ```

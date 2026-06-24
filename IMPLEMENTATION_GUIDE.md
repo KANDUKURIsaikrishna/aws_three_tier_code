@@ -15,15 +15,14 @@ Follow every part in order on a first deployment. After initial setup, only Part
 5. [Part 2 — Bootstrap Terraform Remote State](#part-2--bootstrap-terraform-remote-state)
 6. [Part 3 — Provision Infrastructure with Terraform](#part-3--provision-infrastructure-with-terraform)
 7. [Part 4 — Bootstrap the EKS Cluster](#part-4--bootstrap-the-eks-cluster)
-8. [Part 5 — Install ArgoCD](#part-5--install-argocd)
-9. [Part 6 — Configure Secret Management](#part-6--configure-secret-management)
-10. [Part 7 — GitHub Repository Setup](#part-7--github-repository-setup)
-11. [Part 8 — Apply Configuration and First Deploy](#part-8--apply-configuration-and-first-deploy)
-12. [Part 9 — First Deployment](#part-9--first-deployment)
-13. [Part 10 — DNS and TLS Configuration](#part-10--dns-and-tls-configuration)
-14. [Part 11 — Verify the Application](#part-11--verify-the-application)
-15. [Part 12 — Local Development Setup](#part-12--local-development-setup)
-16. [Troubleshooting](#troubleshooting)
+8. [Part 5 — Configure Secret Management](#part-5--configure-secret-management)
+9. [Part 6 — GitHub Repository Setup](#part-6--github-repository-setup)
+10. [Part 7 — Apply Configuration and First Deploy](#part-7--apply-configuration-and-first-deploy)
+11. [Part 8 — First Deployment](#part-8--first-deployment)
+12. [Part 9 — DNS and TLS Configuration](#part-9--dns-and-tls-configuration)
+13. [Part 10 — Verify the Application](#part-10--verify-the-application)
+14. [Part 11 — Local Development Setup](#part-11--local-development-setup)
+15. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -54,13 +53,13 @@ Follow every part in order on a first deployment. After initial setup, only Part
 │   │  │                                                                  │   │   │
 │   │  │   us-west-1a (170.20.3.0/24)    us-west-1c (170.20.4.0/24)      │   │   │
 │   │  │   ┌──────────────────────────────────────────────────────────┐   │   │   │
-│   │  │   │  EKS Managed Node Group  (t3.medium × 1–4 nodes)         │   │   │   │
+│   │  │   │  EKS Managed Node Group  (t3.medium × 1–2 nodes)         │   │   │   │
 │   │  │   │                                                          │   │   │   │
 │   │  │   │  bookstore namespace                                     │   │   │   │
 │   │  │   │  ┌────────────────┐  ┌─────────────────┐                │   │   │   │
 │   │  │   │  │ Frontend Pods  │  │  Backend Pods    │                │   │   │   │
 │   │  │   │  │ React / Nginx  │  │  Node.js/Express │                │   │   │   │
-│   │  │   │  │ replicas: 2    │  │  replicas: 2     │                │   │   │   │
+│   │  │   │  │ replicas: 1    │  │  Argo Rollout    │                │   │   │   │
 │   │  │   │  └────────────────┘  └─────────────────┘                │   │   │   │
 │   │  │   │         ▲                    │                           │   │   │   │
 │   │  │   │  Nginx Ingress          MySQL StatefulSet                │   │   │   │
@@ -68,7 +67,8 @@ Follow every part in order on a first deployment. After initial setup, only Part
 │   │  │   │                              │ in prod → RDS             │   │   │   │
 │   │  │   └──────────────────────────────────────────────────────────┘   │   │   │
 │   │  │                                  │                                │   │   │
-│   │  │   us-west-1a (170.20.5–6.0/24)  (170.20.6.0/24)                  │   │   │
+│   │  │   monitoring namespace           │                                │   │   │
+│   │  │   Prometheus + Grafana           │                                │   │   │
 │   │  └──────────────────────────────────────────────────────────────────┘   │   │
 │   │                                                                         │   │
 │   │  ┌──────────────────────────────────────────────────────────────────┐   │   │
@@ -102,16 +102,19 @@ Developer pushes code
          ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │  GitHub Actions — DevSecOps Pipeline                                   │
+│  Triggers on push/PR to main OR improvements branches                  │
 │                                                                        │
 │  Stage 0: Secret Scan      Stage 1: SAST              Stage 2: Lint   │
 │  ┌─────────────────────┐   ┌──────────────────────┐   ┌────────────┐  │
-│  │  Gitleaks           │   │  Semgrep (OWASP)     │   │  ESLint    │  │
-│  │  Full git history   │ → │  npm audit (high+)   │   │  kubeval   │  │
-│  └─────────────────────┘   └──────────────────────┘   └────────────┘  │
+│  │  Gitleaks           │   │  npm test (vitest)   │   │  ESLint    │  │
+│  │  Full git history   │ → │  npm audit --omit=dev│   │  kubeval   │  │
+│  └─────────────────────┘   │  Semgrep (OWASP)     │   └────────────┘  │
+│                            └──────────────────────┘         │         │
 │                                    │                         │         │
 │                                    └──────────┬──────────────┘         │
 │                                               ▼                        │
 │                              Stage 3: Build → Scan → Push              │
+│                              (runs on main OR improvements branches)   │
 │                              ┌──────────────────────────────────────┐  │
 │                              │  docker build backend                │  │
 │                              │  Trivy scan → SARIF → GitHub Security│  │
@@ -124,8 +127,10 @@ Developer pushes code
 │                                               │                        │
 │                              Stage 4: Update image tags (GitOps)      │
 │                              ┌──────────────────────────────────────┐  │
+│                              │  cd k8s/overlays/prod                │  │
 │                              │  kustomize edit set image            │  │
-│                              │  git commit k8s/kustomization.yaml   │  │
+│                              │  git commit k8s/overlays/prod/       │  │
+│                              │    kustomization.yaml                │  │
 │                              │  git push (GITHUB_TOKEN)             │  │
 │                              └──────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────────────┘
@@ -134,10 +139,11 @@ Developer pushes code
 ┌────────────────────────────────────────────────────────────────────────┐
 │  ArgoCD (running in EKS, argocd namespace)                             │
 │                                                                        │
-│  Polls GitHub repo → detects new commit in k8s/kustomization.yaml     │
-│  Runs: kustomize build k8s/                                            │
+│  Polls GitHub repo → detects new commit in                            │
+│    k8s/overlays/prod/kustomization.yaml                               │
+│  Runs: kustomize build k8s/overlays/prod/                             │
 │  Applies diff to bookstore namespace                                   │
-│  Pods rolling-restart with new ECR image                               │
+│  Backend: Argo Rollout canary (10% → 50% → 100%)                     │
 │  selfHeal: true → reverts any manual kubectl changes                  │
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -231,9 +237,9 @@ What it does:
 | Target | What gets written |
 |---|---|
 | `terraform.tfvars` | `aws_region`, `domain`, `github_repo` variables (gitignored) |
-| `k8s/ingress/ingress.yaml` | host rules with your real domain |
+| `k8s/base/ingress/ingress.yaml` | host rules with your real domain |
 | `k8s/argocd/application.yaml` | `repoURL` with your real GitHub repo |
-| `k8s/kustomization.yaml` | ECR registry with your real account ID |
+| `k8s/overlays/prod/kustomization.yaml` | ECR registry with your real account ID |
 
 > **Re-run this script** any time you change `config.env` (e.g. domain change, new account). It is idempotent.
 
@@ -448,7 +454,7 @@ backend "s3" {
 
 ## Part 3 — Provision Infrastructure with Terraform
 
-Terraform provisions the entire AWS foundation: VPC, subnets, security groups, ACM certificate, RDS, ECR repositories, EKS cluster, and private DNS for RDS.
+Terraform provisions the entire AWS foundation: VPC, subnets, security groups, ACM certificate, RDS, ECR repositories, EKS cluster, private DNS for RDS, and all cluster add-ons via the `eks-addons` module.
 
 ### Step 3.1 — Initialise Terraform
 
@@ -462,6 +468,7 @@ Initializing the backend...
 Successfully configured the backend "s3"!
 Initializing provider plugins...
 - Installing hashicorp/aws v5.x.x
+- Installing hashicorp/helm v2.x.x
 Terraform has been successfully initialized!
 ```
 
@@ -471,7 +478,7 @@ Terraform has been successfully initialized!
 terraform plan
 ```
 
-Review the plan output. Terraform will create approximately 40–50 resources. Look for any unexpected `destroy` actions — there should be none on a fresh account.
+Review the plan output. Terraform will create approximately 50–60 resources. Look for any unexpected `destroy` actions — there should be none on a fresh account.
 
 ### Step 3.3 — Apply
 
@@ -479,11 +486,28 @@ Review the plan output. Terraform will create approximately 40–50 resources. L
 terraform apply
 ```
 
-Type `yes` when prompted. This takes **15–25 minutes** because:
+Type `yes` when prompted. This takes **20–30 minutes** because:
 - EKS control plane provisioning takes 10–12 minutes
 - RDS Multi-AZ instance takes 5–8 minutes
+- Helm releases (cert-manager, ESO, ingress-nginx, ArgoCD, Prometheus stack, Argo Rollouts) are installed sequentially after the cluster is ready
 
-### Step 3.4 — Capture outputs
+### Step 3.4 — What the eks-addons module installs
+
+The `modules/eks-addons/` module installs all cluster platform components via Terraform-managed Helm releases. You do not need to install these manually.
+
+| Component | Helm chart | Namespace |
+|---|---|---|
+| EBS CSI driver | `aws_eks_addon` (not Helm) | `kube-system` |
+| cert-manager | `jetstack/cert-manager` v1.14.4 | `cert-manager` |
+| External Secrets Operator | `external-secrets/external-secrets` | `external-secrets` |
+| Nginx Ingress | `ingress-nginx/ingress-nginx` v4.9.1 | `ingress-nginx` |
+| ArgoCD | `argo/argo-cd` | `argocd` |
+| Prometheus + Grafana | `prometheus-community/kube-prometheus-stack` | `monitoring` |
+| Argo Rollouts | `argo/argo-rollouts` | `argo-rollouts` |
+
+All components are configured at minimal replica count for the tech demo (1 replica each). AlertManager is disabled.
+
+### Step 3.5 — Capture outputs
 
 After apply completes, save the outputs you will need in later steps:
 
@@ -511,9 +535,9 @@ terraform output eks_oidc_provider_arn
 
 ## Part 4 — Bootstrap the EKS Cluster
 
-All of the steps in this section (kubectl config, EBS CSI driver, gp3 StorageClass, cert-manager, ClusterIssuer, External Secrets Operator, IRSA, Nginx Ingress, MySQL DB init) are automated by `eks_bootstrap.py`. **Run the script** instead of following the manual steps, unless you want full control over each phase.
+After `terraform apply` the cluster add-ons are already running. `eks_bootstrap.py` handles the remaining steps that Terraform cannot do: applying the Let's Encrypt ClusterIssuer, creating the IRSA role for External Secrets, validating Secrets Manager credentials, and configuring the ArgoCD Application.
 
-### Step 4.0 — Run eks_bootstrap.py (recommended)
+### Step 4.1 — Run eks_bootstrap.py
 
 ```bash
 # Source config.env so DOMAIN is available, then run the bootstrap script
@@ -521,265 +545,34 @@ source config.env
 DOMAIN=$DOMAIN python eks_bootstrap.py
 ```
 
-The script runs 10 phases in order and is safe to re-run (all steps are idempotent). Expected output ends with:
+The script runs **8 phases** in order and is safe to re-run (all steps are idempotent):
+
+| Phase | Action |
+|---|---|
+| 1 | Sync kubeconfig (`aws eks update-kubeconfig`) |
+| 2 | Apply ClusterIssuer (cert-manager CRDs already exist from Terraform) |
+| 3 | Create IRSA role + annotate `external-secrets-sa` service account |
+| 4 | Validate / create AWS Secrets Manager secret (`/bookstore/db-credentials`) |
+| 5 | Apply ArgoCD Application manifest + patch ArgoCD secret key |
+| 6 | Clear kubectl discovery cache + force ESO resync |
+| 7 | Wait for mysql-0, run DB schema init + seed data |
+| 8 | Print summary + Route53 NLB hostname reminder |
+
+Expected output ends with:
 
 ```
->>> Phase 10: ArgoCD — cluster registered
 ======================================================================
-Bootstrap complete. Apply the ArgoCD Application manifest:
-  kubectl apply -f k8s/argocd/application.yaml
+>>> Phase 8: Bootstrap Summary
 ======================================================================
+Bootstrap complete! ArgoCD will sync within 3 minutes.
+   Monitor: kubectl get pods -n bookstore -w
 ```
-
-If all phases pass, skip to [Part 5](#part-5--install-argocd).
 
 If a single phase fails, re-run the script — it picks up where it left off. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for phase-specific errors.
 
----
+> **Note:** Unlike earlier versions, `eks_bootstrap.py` no longer installs cert-manager, ESO, ingress-nginx, or ArgoCD — Terraform handles all of that. The script only handles what Terraform cannot: OIDC-cluster-specific IRSA bindings, the ClusterIssuer CRD instance, and the ArgoCD Application manifest.
 
-### Manual steps (reference — skip if you used eks_bootstrap.py)
-
-The steps below document exactly what the script does. Follow them only if you want to run phases individually.
-
-#### Step 4.1 — Configure kubectl
-
-```bash
-aws eks update-kubeconfig \
-  --name bookstore-eks \
-  --region us-west-1
-
-# Verify the cluster is reachable
-kubectl get nodes
-# NAME                          STATUS   ROLES    AGE
-# ip-170-20-3-xx.ec2.internal   Ready    <none>   5m
-```
-
-All nodes should be in `Ready` status before continuing.
-
----
-
-### Step 4.2 — Install the EBS CSI Driver
-
-The EBS CSI driver allows Kubernetes to dynamically provision EBS volumes for the MySQL StatefulSet PVC (`storageClassName: gp3`).
-
-```bash
-aws eks create-addon \
-  --cluster-name bookstore-eks \
-  --addon-name aws-ebs-csi-driver \
-  --region us-west-1
-
-# Wait for the add-on to be Active
-aws eks wait addon-active \
-  --cluster-name bookstore-eks \
-  --addon-name aws-ebs-csi-driver \
-  --region us-west-1
-
-echo "EBS CSI driver is active."
-```
-
-**Create the gp3 StorageClass** (EKS does not create this by default):
-
-```bash
-kubectl apply -f - <<EOF
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: gp3
-  annotations:
-    storageclass.kubernetes.io/is-default-class: "true"
-provisioner: ebs.csi.aws.com
-parameters:
-  type: gp3
-reclaimPolicy: Retain
-volumeBindingMode: WaitForFirstConsumer
-EOF
-
-kubectl get storageclass
-# NAME            PROVISIONER       RECLAIMPOLICY   VOLUMEBINDINGMODE      ...
-# gp3 (default)   ebs.csi.aws.com   Retain          WaitForFirstConsumer   ...
-```
-
----
-
-### Step 4.3 — Install cert-manager
-
-cert-manager issues and renews TLS certificates from Let's Encrypt for `bookstore.<DOMAIN>` and `api.bookstore.<DOMAIN>` (your domain from `config.env`).
-
-```bash
-helm repo add jetstack https://charts.jetstack.io
-helm repo update
-
-helm install cert-manager jetstack/cert-manager \
-  --namespace cert-manager \
-  --create-namespace \
-  --version v1.14.4 \
-  --set installCRDs=true
-
-# Wait for pods to be ready
-kubectl wait pods -n cert-manager \
-  --all --for=condition=Ready --timeout=120s
-```
-
-**Create the Let's Encrypt ClusterIssuer:**
-
-```bash
-kubectl apply -f - <<EOF
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: letsencrypt-prod
-spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: your-email@example.com        # replace with your email
-    privateKeySecretRef:
-      name: letsencrypt-prod-account-key
-    solvers:
-      - http01:
-          ingress:
-            class: nginx
-EOF
-```
-
----
-
-### Step 4.4 — Install External Secrets Operator
-
-ESO syncs the database credentials from AWS Secrets Manager into a native Kubernetes Secret inside the cluster. No credentials ever pass through the pipeline or live in git.
-
-```bash
-helm repo add external-secrets https://charts.external-secrets.io
-helm repo update
-
-helm install external-secrets external-secrets/external-secrets \
-  --namespace external-secrets \
-  --create-namespace \
-  --version 0.9.13
-
-kubectl wait pods -n external-secrets \
-  --all --for=condition=Ready --timeout=120s
-```
-
-**Create the IRSA service account for ESO.** ESO needs an IAM role that can read from Secrets Manager. Replace `OIDC_PROVIDER_ID` with the ID portion of the OIDC provider ARN from `terraform output eks_oidc_provider_arn`:
-
-```bash
-# Get the OIDC provider ID (everything after the last slash)
-OIDC_ID=$(aws eks describe-cluster \
-  --name bookstore-eks \
-  --query "cluster.identity.oidc.issuer" \
-  --output text | sed 's|.*/||')
-
-# Create the trust policy
-cat > /tmp/eso-trust.json << EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {
-      "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/oidc.eks.${AWS_REGION}.amazonaws.com/id/${OIDC_ID}"
-    },
-    "Action": "sts:AssumeRoleWithWebIdentity",
-    "Condition": {
-      "StringEquals": {
-        "oidc.eks.${AWS_REGION}.amazonaws.com/id/${OIDC_ID}:sub":
-          "system:serviceaccount:external-secrets:external-secrets-sa",
-        "oidc.eks.${AWS_REGION}.amazonaws.com/id/${OIDC_ID}:aud":
-          "sts.amazonaws.com"
-      }
-    }
-  }]
-}
-EOF
-
-# Create the IAM role
-aws iam create-role \
-  --role-name bookstore-eso-role \
-  --assume-role-policy-document file:///tmp/eso-trust.json
-
-# Attach Secrets Manager read policy
-aws iam put-role-policy \
-  --role-name bookstore-eso-role \
-  --policy-name bookstore-eso-policy \
-  --policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [{
-      "Effect": "Allow",
-      "Action": [
-        "secretsmanager:GetSecretValue",
-        "secretsmanager:DescribeSecret"
-      ],
-      "Resource": "arn:aws:secretsmanager:us-west-1:'${ACCOUNT_ID}':secret:/bookstore/db-credentials*"
-    }]
-  }'
-
-ESO_ROLE_ARN=$(aws iam get-role \
-  --role-name bookstore-eso-role \
-  --query "Role.Arn" --output text)
-
-# Create the annotated service account in the cluster
-kubectl create namespace bookstore --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl create serviceaccount external-secrets-sa \
-  --namespace external-secrets \
-  --dry-run=client -o yaml \
-  | kubectl annotate --local -f - \
-    eks.amazonaws.com/role-arn=${ESO_ROLE_ARN} \
-    -o yaml \
-  | kubectl apply -f -
-```
-
----
-
-### Step 4.5 — Install Nginx Ingress Controller
-
-```bash
-helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-helm repo update
-
-helm install ingress-nginx ingress-nginx/ingress-nginx \
-  --namespace ingress-nginx \
-  --create-namespace \
-  --version 4.9.1 \
-  --set controller.service.type=LoadBalancer
-
-# Wait for the LoadBalancer to get an external hostname (~2 min)
-kubectl get svc -n ingress-nginx ingress-nginx-controller --watch
-# NAME                       TYPE           CLUSTER-IP    EXTERNAL-IP           PORT(S)
-# ingress-nginx-controller   LoadBalancer   10.100.x.x    abc.elb.amazonaws.com   80:...,443:...
-```
-
-Note the `EXTERNAL-IP` value (an AWS ELB hostname) — you will need it for DNS in Part 10.
-
----
-
-## Part 5 — Install ArgoCD
-
-ArgoCD is the GitOps engine. It watches the `k8s/` directory in your GitHub repository and reconciles the cluster state to match what is in git.
-
-> **If you ran `eks_bootstrap.py` in Part 4**, ArgoCD is already installed. Skip to Step 5.3 to register the Application manifest.
-
-### Step 5.1 — Install ArgoCD
-
-```bash
-kubectl create namespace argocd
-
-kubectl apply -n argocd \
-  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-
-# Wait for all ArgoCD pods to be ready (~3 min)
-kubectl wait pods -n argocd \
-  --all --for=condition=Ready --timeout=300s
-
-kubectl get pods -n argocd
-# NAME                                       READY   STATUS    RESTARTS
-# argocd-application-controller-0            1/1     Running   0
-# argocd-dex-server-xxx                      1/1     Running   0
-# argocd-redis-xxx                           1/1     Running   0
-# argocd-repo-server-xxx                     1/1     Running   0
-# argocd-server-xxx                          1/1     Running   0
-```
-
-### Step 5.2 — Access the ArgoCD UI (optional)
+### Step 4.2 — Access the ArgoCD UI (optional)
 
 ```bash
 # Port-forward to access the UI locally
@@ -794,7 +587,7 @@ kubectl -n argocd get secret argocd-initial-admin-secret \
 # Password: (from command above)
 ```
 
-### Step 5.3 — Connect your GitHub repository to ArgoCD
+### Step 4.3 — Connect your GitHub repository to ArgoCD
 
 If your repository is **public**, skip this step.
 
@@ -822,13 +615,13 @@ argocd repo add https://github.com/$GITHUB_REPO \
 
 ---
 
-## Part 6 — Configure Secret Management
+## Part 5 — Configure Secret Management
 
 Database credentials live only in AWS Secrets Manager. ESO reads them and creates an in-cluster Kubernetes Secret. Nothing touches the pipeline or git.
 
-### Step 6.1 — Store DB credentials in Secrets Manager
+### Step 5.1 — Store DB credentials in Secrets Manager
 
-Choose a strong password. Replace `<strong-password>` below:
+`eks_bootstrap.py` Phase 4 will prompt you for credentials interactively if the secret does not exist. Alternatively, create it manually before running the script:
 
 ```bash
 aws secretsmanager create-secret \
@@ -849,9 +642,9 @@ aws secretsmanager describe-secret \
 
 ---
 
-## Part 7 — GitHub Repository Setup
+## Part 6 — GitHub Repository Setup
 
-### Step 7.1 — Create GitHub Actions secrets
+### Step 6.1 — Create GitHub Actions secrets
 
 Go to your GitHub repository → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**.
 
@@ -864,7 +657,7 @@ Create each secret:
 | `API_URL` | `https://api.bookstore.<YOUR_DOMAIN>` | Backend API URL injected into the React build (use your domain from config.env) |
 | `SEMGREP_APP_TOKEN` | *(optional)* | Semgrep Cloud token. If you don't have one, remove the `SEMGREP_APP_TOKEN` env line from `.github/workflows/ci-cd.yml` |
 
-### Step 7.2 — Create the production GitHub Environment
+### Step 6.2 — Create the production GitHub Environment
 
 The pipeline requires a manual approval gate before deploying. This is enforced through a GitHub Environment.
 
@@ -876,15 +669,18 @@ The pipeline requires a manual approval gate before deploying. This is enforced 
 
 ---
 
-## Part 8 — Apply Configuration and First Deploy
+## Part 7 — Apply Configuration and First Deploy
 
 If you completed Part 0, `scripts/configure.py` already stamped all real values into the k8s files. Verify and commit them now.
 
-### Step 8.1 — Verify configure.py has run
+### Step 7.1 — Verify configure.py has run
 
 ```bash
 # Should show your real values, not placeholders
-grep -E "newName|repoURL|host:" k8s/kustomization.yaml k8s/argocd/application.yaml k8s/ingress/ingress.yaml
+grep -E "newName|repoURL|host:" \
+  k8s/overlays/prod/kustomization.yaml \
+  k8s/argocd/application.yaml \
+  k8s/base/ingress/ingress.yaml
 ```
 
 If you see `ACCOUNT_ID`, `YOUR_GITHUB_USERNAME`, or `YOUR_DOMAIN_HERE`, re-run the configure script:
@@ -893,25 +689,27 @@ If you see `ACCOUNT_ID`, `YOUR_GITHUB_USERNAME`, or `YOUR_DOMAIN_HERE`, re-run t
 python scripts/configure.py
 ```
 
-### Step 8.2 — Commit and push the configured k8s files
+### Step 7.2 — Commit and push the configured k8s files
 
 ```bash
-git add k8s/kustomization.yaml k8s/argocd/application.yaml k8s/ingress/ingress.yaml
+git add k8s/overlays/prod/kustomization.yaml \
+        k8s/argocd/application.yaml \
+        k8s/base/ingress/ingress.yaml
 git commit -m "chore: configure k8s manifests for deployment"
 git push origin main
 ```
 
-This push triggers the CI/CD pipeline (Stage 0→3). After you approve the production gate (Part 9, Step 9.3), Stage 4 will run `kustomize edit set image` and commit the real ECR image reference, overwriting `kustomization.yaml` with the final registry URL and SHA tag.
+This push triggers the CI/CD pipeline (Stage 0→3). After you approve the production gate (Part 8, Step 8.3), Stage 4 will run `kustomize edit set image` inside `k8s/overlays/prod/` and commit the real ECR image reference with the SHA tag.
 
 > **Note:** `terraform.tfvars` is gitignored — do not add it to the commit.
 
 ---
 
-## Part 9 — First Deployment
+## Part 8 — First Deployment
 
-### Step 9.1 — Apply the ArgoCD Application manifest
+### Step 8.1 — Apply the ArgoCD Application manifest
 
-This registers the bookstore application with ArgoCD. Do this once:
+`eks_bootstrap.py` Phase 5 applies this automatically. To apply it manually:
 
 ```bash
 kubectl apply -f k8s/argocd/application.yaml
@@ -928,13 +726,13 @@ It will show `OutOfSync` until ArgoCD performs the first sync, which happens aut
 argocd app sync bookstore --prune
 ```
 
-### Step 9.2 — Trigger the CI/CD pipeline
+### Step 8.2 — Trigger the CI/CD pipeline
 
-Push any change to the `main` branch (the commit from Step 8.3 already did this). The pipeline will now run through all 4 stages:
+Push any change to the `main` branch (the commit from Step 7.2 already did this). The pipeline will now run through all 4 stages:
 
 ```
 Stage 0: Secret Scan     → ~30 seconds
-Stage 1: SAST            → ~3 minutes
+Stage 1: SAST + Tests    → ~3 minutes (runs vitest tests first, then npm audit)
 Stage 2: Validate        → ~2 minutes
 Stage 3: Build→Scan→Push → ~5–8 minutes (parallel with Stage 2)
 Stage 4: Deploy          → awaiting manual approval
@@ -942,7 +740,7 @@ Stage 4: Deploy          → awaiting manual approval
 
 Monitor at: `https://github.com/$GITHUB_REPO/actions` (your repo from `config.env`)
 
-### Step 9.3 — Approve the production deployment
+### Step 8.3 — Approve the production deployment
 
 When Stage 3 finishes, GitHub will pause and send a notification to the required reviewers. To approve:
 
@@ -951,9 +749,9 @@ When Stage 3 finishes, GitHub will pause and send a notification to the required
 3. Check **production**
 4. Click **Approve and deploy**
 
-Stage 4 runs and commits the new image tags to `k8s/kustomization.yaml`.
+Stage 4 runs and commits the new image tags to `k8s/overlays/prod/kustomization.yaml`.
 
-### Step 9.4 — Watch ArgoCD sync
+### Step 8.4 — Watch ArgoCD sync
 
 ```bash
 # Watch the sync status
@@ -974,13 +772,21 @@ kubectl get pods -n bookstore --watch
 # mysql-0                     1/1     Running             0
 ```
 
+The backend uses an Argo Rollout with a canary strategy (10% → 50% → 100%). Watch canary progress:
+
+```bash
+kubectl argo rollouts get rollout backend -n bookstore --watch
+```
+
 All pods should reach `Running` status within 3–5 minutes.
 
 ---
 
-## Part 10 — DNS and TLS Configuration
+## Part 9 — DNS and TLS Configuration
 
-### Step 10.1 — Get the Nginx Ingress LoadBalancer hostname
+### Step 9.1 — Get the Nginx Ingress LoadBalancer hostname
+
+`eks_bootstrap.py` Phase 8 prints this value. To retrieve it manually:
 
 ```bash
 kubectl get svc ingress-nginx-controller -n ingress-nginx \
@@ -988,13 +794,13 @@ kubectl get svc ingress-nginx-controller -n ingress-nginx \
 # abc123.us-west-1.elb.amazonaws.com
 ```
 
-### Step 10.2 — Create DNS records
+### Step 9.2 — Create DNS records
 
-In Route 53 (or your DNS provider), create two **CNAME** records pointing to the NLB hostname from Step 10.1:
+In Route 53 (or your DNS provider), create two **CNAME** records pointing to the NLB hostname from Step 9.1:
 
 | Name | Type | Value |
 |---|---|---|
-| `bookstore.<YOUR_DOMAIN>` | CNAME | NLB hostname from Step 10.1 |
+| `bookstore.<YOUR_DOMAIN>` | CNAME | NLB hostname from Step 9.1 |
 | `api.bookstore.<YOUR_DOMAIN>` | CNAME | same NLB hostname |
 
 With Route 53 you can also use **Alias** records, which are free for AWS resources:
@@ -1008,7 +814,7 @@ ZONE_ID=$(aws route53 list-hosted-zones-by-name \
   --dns-name $DOMAIN \
   --query "HostedZones[0].Id" --output text | sed 's|/hostedzone/||')
 
-# NLB hostname from Step 10.1
+# NLB hostname from Step 9.1
 ELB_HOSTNAME="<nlb-hostname>.us-west-1.elb.amazonaws.com"   # replace with actual value
 
 aws route53 change-resource-record-sets \
@@ -1037,7 +843,7 @@ aws route53 change-resource-record-sets \
   }"
 ```
 
-### Step 10.3 — Verify TLS certificate issuance
+### Step 9.3 — Verify TLS certificate issuance
 
 cert-manager automatically requests a Let's Encrypt certificate when the Ingress is created. This takes 2–5 minutes after DNS propagates.
 
@@ -1052,26 +858,27 @@ kubectl describe challenge -n bookstore
 
 ---
 
-## Part 11 — Verify the Application
+## Part 10 — Verify the Application
 
-### Step 11.1 — Check all pods are healthy
+### Step 10.1 — Check all pods are healthy
 
 ```bash
 kubectl get pods -n bookstore
 # NAME                        READY   STATUS    RESTARTS   AGE
 # frontend-xxx-yyy            1/1     Running   0          10m
-# frontend-xxx-zzz            1/1     Running   0          10m
 # backend-xxx-yyy             1/1     Running   0          10m
-# backend-xxx-zzz             1/1     Running   0          10m
 # mysql-0                     1/1     Running   0          10m
 
+# Backend runs as an Argo Rollout, not a plain Deployment:
+kubectl argo rollouts get rollout backend -n bookstore
+
 kubectl get hpa -n bookstore
-# NAME       REFERENCE             TARGETS         MINPODS   MAXPODS
-# backend    Deployment/backend    cpu: 5%/70%     2         10
-# frontend   Deployment/frontend   cpu: 2%/70%     2         5
+# NAME           REFERENCE                           TARGETS         MINPODS   MAXPODS
+# backend-hpa    Rollout/backend                     cpu: 5%/70%     1         5
+# frontend-hpa   Deployment/frontend                 cpu: 2%/70%     1         3
 ```
 
-### Step 11.2 — Verify secret sync
+### Step 10.2 — Verify secret sync
 
 ```bash
 kubectl get externalsecret -n bookstore
@@ -1084,7 +891,7 @@ kubectl get secret db-secret -n bookstore
 # (Data: 2 keys — DB_USERNAME and DB_PASSWORD, fetched from Secrets Manager)
 ```
 
-### Step 11.3 — Test the application endpoints
+### Step 10.3 — Test the application endpoints
 
 ```bash
 # Source config.env so DOMAIN is available
@@ -1099,13 +906,18 @@ curl -I https://bookstore.$DOMAIN
 curl https://api.bookstore.$DOMAIN/books
 # [{"id":1,"title":"..."},...]
 
+# Metrics endpoint (Prometheus scrapes this)
+curl https://api.bookstore.$DOMAIN/metrics
+# # HELP http_requests_total Total HTTP requests
+# ...
+
 # HTTP redirect (must return 301/302 to HTTPS)
 curl -I http://bookstore.$DOMAIN
 # HTTP/1.1 308 Permanent Redirect
 # location: https://bookstore.$DOMAIN/
 ```
 
-### Step 11.4 — Verify ArgoCD shows healthy
+### Step 10.4 — Verify ArgoCD shows healthy
 
 ```bash
 argocd app get bookstore
@@ -1114,15 +926,25 @@ argocd app get bookstore
 # Health Status:      Healthy
 ```
 
-### Step 11.5 — Verify the security scan results
+### Step 10.5 — Access Grafana dashboards (optional)
+
+```bash
+kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80
+# Open http://localhost:3000
+# Default credentials: admin / prom-operator
+```
+
+Grafana includes pre-built Kubernetes dashboards. The backend exposes `http_requests_total` and `http_request_duration_seconds` metrics that Prometheus scrapes via the `ServiceMonitor` in `k8s/base/monitoring/servicemonitor.yaml`.
+
+### Step 10.6 — Verify the security scan results
 
 In GitHub, go to your repository → **Security** → **Code scanning alerts**. Trivy SARIF results for both images are uploaded here after every build. Any CRITICAL or HIGH CVE that has a fix available will have blocked the push in Stage 3.
 
 ---
 
-## Part 12 — Local Development Setup
+## Part 11 — Local Development Setup
 
-### Step 12.1 — Backend
+### Step 11.1 — Backend
 
 ```bash
 cd backend
@@ -1139,7 +961,7 @@ APP_PORT=3000
 EOF
 
 # Seed the database schema (requires local MySQL running)
-# The init SQL is in k8s/database/mysql-init-configmap.yaml — copy the SQL block and run:
+# The init SQL is in k8s/base/database/mysql-init-configmap.yaml — copy the SQL block and run:
 mysql -u root -p -e "
   CREATE DATABASE IF NOT EXISTS test;
   USE test;
@@ -1154,10 +976,19 @@ mysql -u root -p -e "
 
 # Start the server
 node index.js
-# Server running on port 3000
+# Connected to backend on port 3000.
 ```
 
-### Step 12.2 — Frontend
+### Step 11.2 — Run backend tests
+
+```bash
+cd backend
+npm test
+# Runs 6 vitest tests using a vi.fn() mock db — no real database needed.
+# Tests cover: GET /, GET /books, POST /books, DELETE /books/:id, PUT /books/:id
+```
+
+### Step 11.3 — Frontend
 
 ```bash
 cd client
@@ -1171,7 +1002,7 @@ npm start
 # Local: http://localhost:3001
 ```
 
-### Step 12.3 — Build and push images manually (optional)
+### Step 11.4 — Build and push images manually (optional)
 
 Use this only for hotfixes or pre-release testing. The pipeline does this automatically:
 
@@ -1200,7 +1031,8 @@ kubectl describe pod mysql-0 -n bookstore
 kubectl get pvc -n bookstore
 # If STATUS is Pending, the gp3 StorageClass may not exist:
 kubectl get storageclass
-# Re-run the StorageClass creation from Step 4.2
+# The gp3 StorageClass is deployed by ArgoCD from k8s/base/storageclass/gp3.yaml
+# If it is missing, verify ArgoCD has synced successfully
 ```
 
 ### `ImagePullBackOff` on backend or frontend pods
@@ -1229,9 +1061,9 @@ argocd app sync bookstore --force --prune
 kubectl describe externalsecret db-secret -n bookstore
 # Common causes:
 # 1. Secret /bookstore/db-credentials does not exist in Secrets Manager
-#    → Re-run Step 6.1
+#    → Re-run Step 5.1
 # 2. IRSA role lacks secretsmanager:GetSecretValue permission
-#    → Verify the IAM role policy from Step 4.4
+#    → Verify the IAM role policy (created by eks_bootstrap.py Phase 3)
 # 3. Service account annotation incorrect
 #    → kubectl describe sa external-secrets-sa -n external-secrets
 ```
@@ -1265,6 +1097,16 @@ terraform force-unlock <LOCK_ID>
 # LOCK_ID appears in the error message when you run terraform plan/apply
 ```
 
+### Argo Rollout canary stuck
+
+```bash
+kubectl argo rollouts get rollout backend -n bookstore
+# If the rollout is paused at a step, promote it manually:
+kubectl argo rollouts promote backend -n bookstore
+# Or abort and roll back:
+kubectl argo rollouts abort backend -n bookstore
+```
+
 ---
 
 ## Summary — Component Ownership
@@ -1278,12 +1120,18 @@ terraform force-unlock <LOCK_ID>
 | ECR repositories | Terraform | `modules/ecr/` |
 | EKS cluster + nodes | Terraform | `modules/eks/` |
 | Route 53 (private RDS zone) | Terraform | `modules/route53/` |
-| EBS CSI driver | `aws eks create-addon` | Part 4.2 (one-time) |
-| gp3 StorageClass | `kubectl apply` | Part 4.2 (one-time) |
-| cert-manager | Helm | Part 4.3 (one-time) |
-| External Secrets Operator | Helm | Part 4.4 (one-time) |
-| Nginx Ingress | Helm | Part 4.5 (one-time) |
-| ArgoCD | `kubectl apply` | Part 5 (one-time) |
-| DB credentials | AWS Secrets Manager | Part 6.1 (one-time) |
-| k8s manifests + image tags | ArgoCD + CI/CD | `k8s/` (per release) |
+| EBS CSI driver | Terraform (`aws_eks_addon`) | `modules/eks-addons/` |
+| gp3 StorageClass | ArgoCD (Kustomize base) | `k8s/base/storageclass/gp3.yaml` |
+| cert-manager | Terraform (Helm) | `modules/eks-addons/` |
+| External Secrets Operator | Terraform (Helm) | `modules/eks-addons/` |
+| Nginx Ingress | Terraform (Helm) | `modules/eks-addons/` |
+| ArgoCD | Terraform (Helm) | `modules/eks-addons/` |
+| Prometheus + Grafana | Terraform (Helm) | `modules/eks-addons/` |
+| Argo Rollouts | Terraform (Helm) | `modules/eks-addons/` |
+| ClusterIssuer | `eks_bootstrap.py` Phase 2 | `cluster-issuer.yaml` |
+| IRSA for ESO | `eks_bootstrap.py` Phase 3 | (created via AWS CLI) |
+| DB credentials | AWS Secrets Manager | `eks_bootstrap.py` Phase 4 |
+| ArgoCD Application | `eks_bootstrap.py` Phase 5 | `k8s/argocd/application.yaml` |
+| k8s base manifests | ArgoCD + Kustomize | `k8s/base/` |
+| k8s prod overlay (image tags, HPAs) | ArgoCD + CI/CD | `k8s/overlays/prod/` |
 | Docker images | GitHub Actions | `.github/workflows/ci-cd.yml` |
