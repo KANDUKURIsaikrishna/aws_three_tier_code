@@ -1,17 +1,14 @@
 variable "cluster_name" {
-  type = string
+  description = "Name of the EKS cluster"
+  type        = string
 }
 
 variable "oidc_provider_arn" {
-  type = string
-}
-
-variable "aws_region" {
-  type    = string
-  default = "us-west-1"
+  description = "ARN of the EKS cluster OIDC provider — used for IRSA role creation"
+  type        = string
 }
 
 variable "node_role_name" {
-  type        = string
   description = "IAM role name of the EKS node group — receives the EBS CSI driver policy"
+  type        = string
 }

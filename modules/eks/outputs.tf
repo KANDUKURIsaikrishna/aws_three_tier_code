@@ -1,9 +1,11 @@
 output "cluster_name" {
-  value = aws_eks_cluster.this.name
+  description = "Name of the EKS cluster"
+  value       = aws_eks_cluster.this.name
 }
 
 output "cluster_endpoint" {
-  value = aws_eks_cluster.this.endpoint
+  description = "EKS API server endpoint"
+  value       = aws_eks_cluster.this.endpoint
 }
 
 output "cluster_ca_certificate" {
@@ -18,14 +20,16 @@ output "oidc_provider_arn" {
 }
 
 output "oidc_provider_url" {
-  value = aws_iam_openid_connect_provider.eks.url
+  description = "URL of the OIDC provider"
+  value       = aws_iam_openid_connect_provider.eks.url
 }
 
 output "node_group_role_arn" {
-  value = aws_iam_role.node_group.arn
+  description = "ARN of the node group IAM role"
+  value       = aws_iam_role.node_group.arn
 }
 
 output "node_role_name" {
-  description = "IAM role name of the node group (for policy attachments)"
+  description = "IAM role name of the EKS node group — passed to eks-addons for policy attachment"
   value       = aws_iam_role.node_group.name
 }

@@ -1,4 +1,4 @@
-# ── Cluster IAM Role ─────────────────────────────────────────────────────────
+# ── Cluster IAM Role ──────────────────────────────────────────────────────────
 
 resource "aws_iam_role" "cluster" {
   name = "${var.prefix}-eks-cluster-role"
@@ -46,7 +46,7 @@ resource "aws_eks_cluster" "this" {
   ]
 }
 
-# ── OIDC Provider (enables IRSA for AWS Load Balancer Controller, etc.) ───────
+# ── OIDC Provider (enables IRSA) ──────────────────────────────────────────────
 
 data "tls_certificate" "eks" {
   url = aws_eks_cluster.this.identity[0].oidc[0].issuer
@@ -84,15 +84,8 @@ resource "aws_iam_role_policy_attachment" "node_cni" {
 }
 
 resource "aws_iam_role_policy_attachment" "node_ecr_readonly" {
-  # Nodes need ECR pull access to run bookstore images
   role       = aws_iam_role.node_group.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-}
-
-resource "aws_iam_role_policy_attachment" "node_ebs_csi" {
-  # Required for the aws-ebs-csi-driver add-on to provision EBS volumes
-  role       = aws_iam_role.node_group.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
 }
 
 # ── Managed Node Group ────────────────────────────────────────────────────────

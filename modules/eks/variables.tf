@@ -1,6 +1,7 @@
 variable "cluster_name" {
-  type    = string
-  default = "bookstore-eks"
+  description = "Name of the EKS cluster"
+  type        = string
+  default     = "bookstore-eks"
 }
 
 variable "cluster_version" {
@@ -10,35 +11,41 @@ variable "cluster_version" {
 }
 
 variable "vpc_id" {
-  type = string
+  description = "VPC ID where the cluster is deployed"
+  type        = string
 }
 
 variable "subnet_ids" {
-  description = "Private subnet IDs for control plane and node groups"
+  description = "Private subnet IDs for the control plane and node groups"
   type        = list(string)
 }
 
 variable "node_instance_type" {
-  type    = string
-  default = "t3.medium"
+  description = "EC2 instance type for worker nodes"
+  type        = string
+  default     = "t3.medium"
 }
 
 variable "node_min_size" {
-  type    = number
-  default = 2
+  description = "Minimum number of worker nodes"
+  type        = number
+  default     = 1
 }
 
 variable "node_max_size" {
-  type    = number
-  default = 4
+  description = "Maximum number of worker nodes"
+  type        = number
+  default     = 2
 }
 
 variable "node_desired_size" {
-  type    = number
-  default = 2
+  description = "Desired number of worker nodes at rest"
+  type        = number
+  default     = 1
 }
 
 variable "prefix" {
-  type    = string
-  default = "bookstore"
+  description = "Prefix applied to all IAM and resource names"
+  type        = string
+  default     = "bookstore"
 }
