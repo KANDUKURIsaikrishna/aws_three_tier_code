@@ -24,3 +24,8 @@ output "oidc_provider_url" {
 output "node_group_role_arn" {
   value = aws_iam_role.node_group.arn
 }
+
+output "node_role_name" {
+  description = "IAM role name of the EKS node group — passed to eks-addons for policy attachment"
+  value       = aws_iam_role.node_group.name
+}

@@ -1,68 +1,50 @@
-provider "aws" {
-  region = var.region
-}
-
 # VPC
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags                 = { 
-    Name = "MAIN-3-TIER-VPC" 
-    }
+  tags                 = { Name = "bookstore-vpc" }
 }
 
-# Subnets
+# Public subnets
 # nosemgrep: terraform.aws.security.aws-subnet-has-public-ip-address.aws-subnet-has-public-ip-address
 resource "aws_subnet" "public" {
-  count                   = length(var.public_subnets)  # count value = 2
+  count                   = length(var.public_subnets)
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.public_subnets[count.index].cidr # index starts 0 to count-1
+  cidr_block              = var.public_subnets[count.index].cidr
   availability_zone       = var.public_subnets[count.index].az
   map_public_ip_on_launch = true
   tags                    = { Name = "public-subnet-${count.index + 1}" }
 }
 
+# Private subnets
 resource "aws_subnet" "private" {
   count             = length(var.private_subnets)
-  vpc_id           = aws_vpc.main.id
-  cidr_block       = var.private_subnets[count.index].cidr
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.private_subnets[count.index].cidr
   availability_zone = var.private_subnets[count.index].az
-  tags             = { Name = "private-subnet-${count.index + 3}" }
+  tags              = { Name = "private-subnet-${count.index + 1}" }
 }
-# resource "aws_subnet" "private" {
-#   count             = length(var.private_subnet_cidrs)
-#   vpc_id           = aws_vpc.main.id
-#   cidr_block       = var.private_subnet_cidrs[count.index]
-#   availability_zone = element(var.availability_zones, count.index)
-
-
-#   tags = {
-#     Name = "private-subnet-${count.index + 3}"
-#   }
-# }
-
-
-
 
 # Internet Gateway
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.main.id
-  tags   = { Name = "main-igw" }
+  tags   = { Name = "bookstore-igw" }
 }
 
 # Elastic IP for NAT Gateway
 resource "aws_eip" "nat" {
-  #domain = "vpc"
+  domain = "vpc"
 }
 
-# NAT Gateway
+# NAT Gateway (single AZ — cost optimised for tech demo; add per-AZ for HA)
 resource "aws_nat_gateway" "nat" {
   allocation_id = aws_eip.nat.id
   subnet_id     = aws_subnet.public[0].id
-  tags          = { Name = "nat-gateway" }
-}
+  tags          = { Name = "bookstore-nat" }
 
+  depends_on = [aws_internet_gateway.igw]
+}
 
 # Public Route Table
 resource "aws_route_table" "public" {
@@ -71,17 +53,17 @@ resource "aws_route_table" "public" {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.igw.id
   }
-  tags = { Name = "public-route-table" }
+  tags = { Name = "bookstore-public-rt" }
 }
 
 # Private Route Table
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
   route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_nat_gateway.nat.id
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.nat.id
   }
-  tags = { Name = "private-route-table" }
+  tags = { Name = "bookstore-private-rt" }
 }
 
 # Route Table Associations
@@ -96,5 +78,3 @@ resource "aws_route_table_association" "private" {
   subnet_id      = aws_subnet.private[count.index].id
   route_table_id = aws_route_table.private.id
 }
-
-
