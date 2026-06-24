@@ -1,21 +1,21 @@
 variable "vpc_id" {
-  description = "VPC ID for private hosted zone"
+  description = "VPC ID for the private hosted zone association"
   type        = string
 }
 
 variable "rds_private_zone_name" {
-  description = "The name of the private hosted zone for RDS"
+  description = "Name of the private Route 53 hosted zone for internal RDS DNS"
   type        = string
-  default     = "rds.com"
+  default     = "bookstore.internal"
 }
 
 variable "rds_record_name" {
-  description = "The record name for RDS endpoint"
+  description = "DNS record name for the RDS endpoint within the private zone"
   type        = string
-  default     = "book.rds.com"
+  default     = "db.bookstore.internal"
 }
 
 variable "rds_endpoint" {
-  description = "The RDS endpoint"
+  description = "RDS instance endpoint to create a CNAME record for"
   type        = string
 }
