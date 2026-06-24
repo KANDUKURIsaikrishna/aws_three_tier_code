@@ -1,6 +1,6 @@
 # Bookstore — Complete Project Architecture & Implementation Guide
 
-**Stack:** React · Node.js · MySQL · Kubernetes (EKS) · Terraform · GitHub Actions · ArgoCD  
+**Stack:** React · Node.js · MySQL · Kubernetes (EKS) · Terraform · GitHub Actions · ArgoCD · Argo Rollouts · Prometheus · Grafana  
 **Domain:** `b17facebook.xyz` · **Region:** `us-west-1`
 
 ---
@@ -30,7 +30,7 @@ A full-stack bookstore web application deployed on AWS using a classic three-tie
 | Application | REST API (Express/Node.js) | `backend/` |
 | Data | MySQL 8.0 | Kubernetes StatefulSet |
 
-The infrastructure is fully automated: Terraform provisions AWS resources, `eks_bootstrap.py` installs cluster add-ons, and GitHub Actions builds and deploys every commit automatically via ArgoCD.
+The infrastructure is fully automated: Terraform provisions AWS resources and installs all cluster add-ons (cert-manager, ESO, ingress-nginx, ArgoCD, Prometheus, Argo Rollouts) via the `eks-addons` module. `eks_bootstrap.py` handles the remaining cluster-specific steps (IRSA, ClusterIssuer, ArgoCD Application). GitHub Actions builds and deploys every commit automatically via ArgoCD, with backend releases delivered as Argo Rollouts canaries.
 
 ---
 
@@ -71,13 +71,20 @@ AWS Network Load Balancer (NLB)
 │         │  ┌──────────┐  ┌─────────────┐  │         │      │
 │         │  │ frontend │  │   backend   │  │         │      │
 │         │  │ (nginx)  │  │ (Node.js)   │  │         │      │
-│         │  │ 2 pods   │  │  2 pods     │  │         │      │
+│         │  │ Deploym. │  │ Argo Rollout│  │         │      │
 │         │  └──────────┘  └──────┬──────┘  │         │      │
 │         │                       │ :3306   │         │      │
 │         │              ┌────────▼──────┐  │         │      │
 │         │              │  mysql-0      │  │         │      │
 │         │              │ (StatefulSet) │  │         │      │
 │         │              └───────────────┘  │         │      │
+│         └──────────────────────────────────┘         │      │
+│                                                      │      │
+│         ┌──────────────────────────────────┐         │      │
+│         │  Namespace: monitoring           │         │      │
+│         │  Prometheus (1 replica, 24h ret) │         │      │
+│         │  Grafana    (1 replica)          │         │      │
+│         │  ServiceMonitor → backend /metrics│        │      │
 │         └──────────────────────────────────┘         │      │
 │                                                      │      │
 │  Private Subnets (RDS)                               │      │
@@ -126,7 +133,7 @@ All infrastructure is defined in Terraform (`main.tf` + `modules/`).
 | Cluster name | `bookstore-eks` |
 | Kubernetes version | 1.31 |
 | Node type | `t3.medium` |
-| Nodes | min 1 / desired 2 / max 4 |
+| Nodes | min 1 / desired 1 / max 2 |
 | Node placement | private subnets (3–6) |
 | Control plane logs | api, audit, authenticator, controllerManager, scheduler |
 | OIDC provider | enabled (required for IRSA) |
@@ -135,9 +142,23 @@ All infrastructure is defined in Terraform (`main.tf` + `modules/`).
 - `bookstore-eks-cluster-role` — EKS control plane role
 - `bookstore-eks-node-role` — EC2 node role with `AmazonEKSWorkerNodePolicy`, `AmazonEKS_CNI_Policy`, `AmazonEC2ContainerRegistryReadOnly`, `AmazonEBSCSIDriverPolicy`
 
-**EKS Add-on:** `aws-ebs-csi-driver` — enables EBS persistent volumes (required for MySQL StatefulSet PVC).
+**`modules/eks/output.tf`** exports: `cluster_name`, `cluster_endpoint`, `cluster_ca_certificate` (sensitive), `oidc_provider_arn`, `oidc_provider_url`, `node_group_role_arn`, `node_role_name`.
 
-### 3.3 RDS
+### 3.3 EKS Add-ons (`modules/eks-addons/`)
+
+All cluster platform components are managed by Terraform as `helm_release` resources. A `provider "helm"` block in root `main.tf` authenticates via `aws eks get-token` (exec auth — no static credentials).
+
+| Component | Resource type | Namespace | Key settings |
+|-----------|--------------|-----------|-------------|
+| EBS CSI driver | `aws_eks_addon` | `kube-system` | — |
+| cert-manager | `helm_release` | `cert-manager` | v1.14.4, 1 replica |
+| External Secrets Operator | `helm_release` | `external-secrets` | 1 replica |
+| ingress-nginx | `helm_release` | `ingress-nginx` | v4.9.1, 1 replica |
+| ArgoCD | `helm_release` | `argocd` | 1 replica each component |
+| kube-prometheus-stack | `helm_release` | `monitoring` | 1 Prometheus replica, no AlertManager, 24h retention, no PVC |
+| argo-rollouts | `helm_release` | `argo-rollouts` | 1 replica |
+
+### 3.4 RDS
 
 | Setting | Value |
 |---------|-------|
@@ -151,7 +172,7 @@ All infrastructure is defined in Terraform (`main.tf` + `modules/`).
 
 > **Note:** RDS is provisioned but **not used by the running app**. The in-cluster MySQL StatefulSet (`mysql-0`) is what the backend connects to. RDS is available as a managed alternative.
 
-### 3.4 ECR
+### 3.5 ECR
 
 Two repositories, both `IMMUTABLE` (tags cannot be overwritten — prevents accidental overwrites):
 
@@ -162,7 +183,7 @@ Two repositories, both `IMMUTABLE` (tags cannot be overwritten — prevents acci
 
 Retention policy: keep the 10 most recent images; older ones are automatically deleted.
 
-### 3.5 ACM (TLS Certificate)
+### 3.6 ACM (TLS Certificate)
 
 Certificate provisioned for:
 - `b17facebook.xyz` (primary)
@@ -170,7 +191,7 @@ Certificate provisioned for:
 
 Used by ingress-nginx for HTTPS termination via cert-manager (Let's Encrypt `letsencrypt-prod` ClusterIssuer).
 
-### 3.6 Route 53
+### 3.7 Route 53
 
 **Public hosted zone** (`b17facebook.xyz`) — two A records, both aliased to the same NLB:
 
@@ -183,7 +204,7 @@ Used by ingress-nginx for HTTPS termination via cert-manager (Let's Encrypt `let
 
 > A wildcard `*.b17facebook.xyz` only matches one subdomain level. It covers `bookstore.b17facebook.xyz` but NOT `api.bookstore.b17facebook.xyz` (two levels). Both records must be created explicitly.
 
-### 3.7 IAM — GitHub Actions OIDC (No Static Keys)
+### 3.8 IAM — GitHub Actions OIDC (No Static Keys)
 
 ```
 GitHub Actions runner
@@ -251,30 +272,32 @@ This ensures MySQL is never reachable from the internet, and the frontend cannot
 
 ## 5. Kubernetes Architecture
 
-All application resources live in the `bookstore` namespace. Platform components (cert-manager, ESO, ingress-nginx, ArgoCD) have their own namespaces.
+All application resources live in the `bookstore` namespace, managed by Kustomize with a base + overlays structure. Platform components (cert-manager, ESO, ingress-nginx, ArgoCD, Prometheus, Argo Rollouts) have their own namespaces and are installed by Terraform.
 
 ### 5.1 Frontend
 
 | Resource | Spec |
 |----------|------|
-| Deployment | 2 replicas, image `bookstore-frontend:<sha>` |
+| Deployment | 1 replica (dev) / HPA-managed 1–3 (prod), image `bookstore-frontend:<sha>` |
 | Container | nginx 1.27-alpine, port 8080 |
-| HPA | min 2, max 5 replicas; scales on 70% CPU |
+| HPA | min 1, max 3 replicas; scales on 70% CPU (prod overlay only) |
 | PDB | at least 1 pod always available |
 | Security | `readOnlyRootFilesystem: true`, `runAsNonRoot: true`, capabilities dropped |
-| Volumes | `emptyDir` at `/tmp` (nginx writes temp files here) |
+| Volumes | `emptyDir` at `/tmp`, `/var/cache/nginx`, `/var/run` |
 
 ### 5.2 Backend
 
 | Resource | Spec |
 |----------|------|
-| Deployment | 2 replicas, image `bookstore-backend:<sha>` |
-| Container | Node.js 22-alpine, port 3000 |
-| HPA | min 2, max 10 replicas; scales on 70% CPU or 80% Memory |
+| **Argo Rollout** | 1 replica (dev) / HPA-managed 1–5 (prod), image `bookstore-backend:<sha>` |
+| Container | Node.js 22-alpine, port 3000 (named `http`) |
+| Delivery | Canary: 10% → 30s pause → 50% → 30s pause → 100% |
+| HPA | min 1, max 5 replicas; scales on 70% CPU or 80% Memory (prod overlay only) |
 | PDB | at least 1 pod always available |
 | Security | `readOnlyRootFilesystem: true`, `runAsNonRoot: true`, `runAsUser: 1001` |
 | Config | `backend-config` ConfigMap (`DB_HOST`, `DB_PORT`, `DB_NAME`, `APP_PORT`) |
 | Secrets | `db-secret` (`DB_USERNAME`, `DB_PASSWORD`) — never stored in git |
+| Resource limits (prod) | requests 128m CPU / 128Mi RAM; limits 500m CPU / 256Mi RAM |
 
 **API endpoints:**
 
@@ -285,6 +308,12 @@ All application resources live in the `bookstore` namespace. Platform components
 | POST | `/books` | Add a book |
 | PUT | `/books/:id` | Update a book |
 | DELETE | `/books/:id` | Delete a book |
+| GET | `/metrics` | Prometheus metrics (prom-client) |
+
+**Backend code structure:**
+- `backend/app.js` — `export function createApp(db)` factory; all routes + `/metrics` endpoint; injectable mock db for testing
+- `backend/index.js` — creates real MySQL connection, calls `createApp(db)`, starts server
+- `backend/__tests__/books.test.js` — 6 vitest tests using `vi.fn()` mock db; no real database required
 
 ### 5.3 MySQL (StatefulSet)
 
@@ -292,7 +321,7 @@ All application resources live in the `bookstore` namespace. Platform components
 |----------|------|
 | StatefulSet | 1 replica (`mysql-0`) |
 | Container | `mysql:8.0` |
-| PVC | 10 Gi, `gp3` StorageClass (EBS volume) |
+| PVC | 10 Gi, `gp3` StorageClass (EBS volume, declared in `k8s/base/storageclass/gp3.yaml`) |
 | Init scripts | `/docker-entrypoint-initdb.d/init.sql` from ConfigMap |
 | Root password | from `db-secret.DB_PASSWORD` |
 | Database created | `test` |
@@ -302,7 +331,7 @@ The PVC (`mysql-data`) is not deleted when the pod restarts — data persists ac
 
 ### 5.4 Ingress
 
-Handled by **ingress-nginx** (installed via Helm). A single `Ingress` resource routes by hostname:
+Handled by **ingress-nginx** (installed by Terraform). A single `Ingress` resource routes by hostname:
 
 ```yaml
 bookstore.b17facebook.xyz     → frontend-service:80
@@ -313,9 +342,31 @@ api.bookstore.b17facebook.xyz → backend-service:80
 - TLS certificate managed by **cert-manager** via `letsencrypt-prod` ClusterIssuer
 - Certificate stored in `bookstore-tls` Secret in the `bookstore` namespace
 
-### 5.5 Image Tags
+### 5.5 Observability
 
-Images are tagged with the first 8 characters of the git commit SHA (e.g., `02cf7c88`). `kustomization.yaml` stores the current deployed SHA and is updated by the CI pipeline on every successful deploy. ArgoCD reads this file to know which image version to run.
+Prometheus and Grafana are installed in the `monitoring` namespace by the `kube-prometheus-stack` Helm chart, managed by Terraform.
+
+| Component | Config |
+|-----------|--------|
+| Prometheus | 1 replica, 24h retention, no persistent storage (demo) |
+| Grafana | 1 replica, pre-built k8s dashboards |
+| AlertManager | disabled (demo) |
+| ServiceMonitor | `k8s/base/monitoring/servicemonitor.yaml` — scrapes backend `/metrics` every 30s |
+
+The backend (`backend/app.js`) uses `prom-client` to expose:
+- `http_requests_total` — Counter labelled by method, route, status
+- `http_request_duration_seconds` — Histogram of response times
+- Default Node.js process metrics (memory, CPU, GC, event loop lag)
+
+### 5.6 Image Tags and Kustomize Overlays
+
+The `k8s/` directory uses Kustomize base + overlays:
+
+- `k8s/base/` — all shared manifests (no image tags, no HPAs)
+- `k8s/overlays/dev/` — patches replicas=1 on Rollout and Deployment
+- `k8s/overlays/prod/` — adds HPAs, backend resource limits, and image tags (CI updates these)
+
+ArgoCD watches `k8s/overlays/prod/`. Images are tagged with the first 8 characters of the git commit SHA. The CI pipeline runs `kustomize edit set image` inside `k8s/overlays/prod/` and commits `k8s/overlays/prod/kustomization.yaml`.
 
 ---
 
@@ -356,16 +407,16 @@ IRSA allows a Kubernetes service account to assume an AWS IAM role without any s
 3. The trust policy is scoped to `system:serviceaccount:external-secrets:external-secrets-sa`
 4. When the ESO pod starts, it gets a signed OIDC token → exchanges it for temporary AWS credentials → reads Secrets Manager
 
-This is **re-configured on every `eks_bootstrap.py` run** because the OIDC provider URL changes every time the cluster is destroyed and recreated.
+This is **re-configured on every `eks_bootstrap.py` run** (Phase 3) because the OIDC provider URL changes every time the cluster is destroyed and recreated.
 
 ---
 
 ## 7. CI/CD Pipeline
 
-Defined in `.github/workflows/ci-cd.yml`. Triggers on every push to `main`.
+Defined in `.github/workflows/ci-cd.yml`. Triggers on every push or pull request to `main` or `improvements` branches.
 
 ```
-Push to main
+Push/PR to main or improvements
     │
     ▼
 Stage 0: Secret Scan (Gitleaks)
@@ -373,7 +424,8 @@ Stage 0: Secret Scan (Gitleaks)
     │  ✗ Fails immediately if any secret found
     ▼
 Stage 1: SAST & Dependency Audit
-    │  npm audit --audit-level=high (backend)
+    │  npm test (vitest — 6 tests, vi.fn() mock db)   ← runs FIRST
+    │  npm audit --omit=dev --audit-level=high (backend)
     │  npm audit --audit-level=critical (frontend)
     │  Semgrep: p/nodejs + p/owasp-top-ten + p/secrets
     ▼
@@ -382,6 +434,7 @@ Stage 2: Lint & Manifest Validation
     │  kubeconform — validates all k8s YAML against k8s 1.31 schema
     ▼
 Stage 3: Build → Trivy Scan → Push
+    │  (runs on main OR improvements branches)
     │  Build backend Docker image (node:22-alpine)
     │  Trivy scan — CRITICAL + HIGH CVEs = hard fail
     │  Push bookstore-backend:<sha8> to ECR
@@ -392,18 +445,22 @@ Stage 3: Build → Trivy Scan → Push
     ▼
 Stage 4: GitOps Deploy (requires manual approval)
     │  environment: production → reviewer must approve in GitHub UI
+    │  cd k8s/overlays/prod
     │  kustomize edit set image bookstore-backend=...:<sha8>
     │  kustomize edit set image bookstore-frontend=...:<sha8>
-    │  git commit k8s/kustomization.yaml
+    │  git commit k8s/overlays/prod/kustomization.yaml
     │  git push (with GITHUB_TOKEN — does NOT re-trigger pipeline)
     ▼
 ArgoCD detects commit → syncs cluster within 3 min
+  Backend: Argo Rollout canary (10% → 50% → 100%)
+  Frontend: Kubernetes rolling update
 ```
 
 **Key security properties:**
 - No AWS credentials stored in GitHub Secrets — only `AWS_ACCOUNT_ID` (not secret) and `AWS_ROLE_ARN`
 - Images never pushed with the `latest` tag (ECR repos are IMMUTABLE — `latest` cannot be overwritten)
 - All images scanned by Trivy before push — dirty images never reach ECR
+- Tests run before audit — catching application bugs before security checks
 - Secrets never in code, never in CI env, never in logs
 
 ---
@@ -416,19 +473,26 @@ ArgoCD runs in the cluster and is the **only thing that runs `kubectl apply`**. 
 git push to main
     │
     ▼
-CI Pipeline commits kustomization.yaml with new image SHA
+CI Pipeline commits k8s/overlays/prod/kustomization.yaml
+  with new image SHA
     │
     ▼
 ArgoCD polls GitHub repo every 3 minutes
     │ Detects kustomization.yaml changed
     ▼
-ArgoCD runs: kustomize build k8s/
+ArgoCD runs: kustomize build k8s/overlays/prod/
     │ Renders all manifests with new image tags
     ▼
 ArgoCD applies diff to cluster
     │ Only changed resources are updated
     ▼
-Kubernetes rolling update
+Backend: Argo Rollout canary
+    │ 10% traffic → new version (30s)
+    │ 50% traffic → new version (30s)
+    │ 100% traffic → new version
+    │ Auto-rollback on pod failures
+    ▼
+Frontend: Kubernetes rolling update
     │ New pods start (new image)
     │ Readiness probe passes
     │ Old pods terminate
@@ -446,10 +510,9 @@ Zero-downtime deployment complete
 
 ```
 aws_three_tier_code-main/
-├── main.tf                         # Root Terraform — wires all modules together
-├── eks_bootstrap.py                # One-time cluster setup after terraform apply
-├── gp3-storageclass.yaml           # EBS gp3 StorageClass for MySQL PVC
-├── cluster-issuer.yaml             # Let's Encrypt ClusterIssuer for cert-manager
+├── main.tf                         # Root Terraform — wires all modules + helm provider
+├── eks_bootstrap.py                # 8-phase cluster setup after terraform apply
+├── cluster-issuer.yaml             # Let's Encrypt ClusterIssuer (applied by bootstrap Phase 2)
 ├── TROUBLESHOOTING.md              # Running log of every error hit + exact fix
 ├── PROJECT_ARCHITECTURE.md         # This file
 │
@@ -465,7 +528,14 @@ aws_three_tier_code-main/
 │   ├── eks/
 │   │   ├── main.tf                 # EKS cluster, OIDC provider, node group + IAM roles
 │   │   ├── variables.tf
-│   │   └── output.tf               # cluster_name, cluster_endpoint, oidc_provider_arn
+│   │   └── output.tf               # cluster_name, cluster_endpoint, cluster_ca_certificate,
+│   │                               #   oidc_provider_arn, oidc_provider_url,
+│   │                               #   node_group_role_arn, node_role_name
+│   ├── eks-addons/
+│   │   ├── main.tf                 # aws_eks_addon (EBS CSI) + helm_release for:
+│   │   │                           #   cert-manager, external-secrets, ingress-nginx,
+│   │   │                           #   argo-cd, kube-prometheus-stack, argo-rollouts
+│   │   └── variables.tf            # cluster_name, oidc_provider_arn, region
 │   ├── ecr/
 │   │   ├── main.tf                 # ECR repos (bookstore-backend, bookstore-frontend), IMMUTABLE tags
 │   │   ├── variables.tf
@@ -480,65 +550,77 @@ aws_three_tier_code-main/
 │   │   ├── main.tf                 # Private hosted zone for internal RDS DNS resolution
 │   │   ├── variables.tf
 │   │   └── output.tf
+│   └── security/
+│       ├── main.tf
+│       ├── variables.tf
+│       └── output.tf
 │
 ├── k8s/                            # All Kubernetes manifests (managed by ArgoCD + Kustomize)
-│   ├── kustomization.yaml          # Kustomize root: lists all resources + image tags (CI updates this)
-│   ├── namespace.yaml              # Creates the "bookstore" namespace
+│   ├── base/                       # Shared across all environments — no image tags, no HPAs
+│   │   ├── kustomization.yaml      # Lists all base resources
+│   │   ├── namespace.yaml          # Creates the "bookstore" namespace
+│   │   ├── storageclass/
+│   │   │   └── gp3.yaml            # EBS gp3 StorageClass for MySQL PVC
+│   │   ├── configmaps/
+│   │   │   └── backend-config.yaml # Non-secret config: DB_HOST, DB_PORT, DB_NAME, APP_PORT
+│   │   ├── secrets/
+│   │   │   └── external-secret.yaml # ESO ClusterSecretStore + ExternalSecret
+│   │   ├── database/
+│   │   │   ├── mysql-statefulset.yaml
+│   │   │   ├── mysql-service.yaml
+│   │   │   └── mysql-init-configmap.yaml
+│   │   ├── backend/
+│   │   │   ├── rollout.yaml        # Argo Rollout (canary — replaces deployment.yaml)
+│   │   │   └── service.yaml        # ClusterIP :80 → :3000, port named "http"
+│   │   ├── frontend/
+│   │   │   ├── deployment.yaml     # Deployment (rolling update)
+│   │   │   └── service.yaml        # ClusterIP :80 → :8080
+│   │   ├── ingress/
+│   │   │   └── ingress.yaml        # Routes by hostname; TLS via cert-manager
+│   │   ├── monitoring/
+│   │   │   └── servicemonitor.yaml # Prometheus scrapes backend /metrics every 30s
+│   │   ├── network-policy/
+│   │   │   └── network-policy.yaml # Default deny-all + explicit allow rules
+│   │   └── pdb/
+│   │       └── pdb.yaml            # PodDisruptionBudget: ≥1 pod always available
 │   │
-│   ├── configmaps/
-│   │   └── backend-config.yaml     # Non-secret config: DB_HOST, DB_PORT, DB_NAME, APP_PORT
+│   ├── overlays/
+│   │   ├── dev/
+│   │   │   └── kustomization.yaml  # Patches replicas=1 on Rollout + Deployment
+│   │   └── prod/
+│   │       ├── kustomization.yaml  # Image tags (CI updates) + backend resource limits patch
+│   │       ├── hpa-backend.yaml    # HPA targets Rollout/backend: min 1, max 5
+│   │       └── hpa-frontend.yaml   # HPA targets Deployment/frontend: min 1, max 3
 │   │
-│   ├── secrets/
-│   │   ├── external-secret.yaml    # ESO ClusterSecretStore + ExternalSecret — syncs db-secret from AWS
-│   │   └── db-secret.yaml          # Placeholder (actual secret created by ESO, not this file)
+│   ├── argocd/
+│   │   └── application.yaml        # ArgoCD Application: watches k8s/overlays/prod/
 │   │
-│   ├── database/
-│   │   ├── mysql-statefulset.yaml  # MySQL StatefulSet: 1 replica, 10Gi PVC, init scripts mounted
-│   │   ├── mysql-service.yaml      # ClusterIP Service :3306 → mysql pods
-│   │   └── mysql-init-configmap.yaml # init.sql: CREATE DATABASE test; CREATE TABLE books; seed data
-│   │
-│   ├── backend/
-│   │   ├── deployment.yaml         # 2 replicas, reads DB creds from db-secret, hardened securityContext
-│   │   ├── service.yaml            # ClusterIP Service :80 → backend pods :3000
-│   │   └── hpa.yaml                # HorizontalPodAutoscaler: scale 2–5 pods at 70% CPU
-│   │
-│   ├── frontend/
-│   │   ├── deployment.yaml         # 2 replicas, nginx serving React build, readOnlyRootFilesystem
-│   │   ├── service.yaml            # ClusterIP Service :80 → frontend pods :8080
-│   │   └── hpa.yaml                # HorizontalPodAutoscaler: scale 2–5 pods at 70% CPU
-│   │
-│   ├── ingress/
-│   │   └── ingress.yaml            # Routes bookstore.* → frontend, api.bookstore.* → backend; TLS via cert-manager
-│   │
-│   ├── network-policy/
-│   │   └── network-policy.yaml     # Default deny-all + explicit allow: nginx→frontend→backend→mysql only
-│   │
-│   ├── pdb/
-│   │   └── pdb.yaml                # PodDisruptionBudget: frontend + backend always keep ≥1 pod up
-│   │
-│   └── argocd/
-│       └── application.yaml        # ArgoCD Application: watches this repo's k8s/ dir, auto-sync enabled
+│   └── secrets/
+│       └── db-secret.yaml          # LOCAL DEV ONLY — placeholder, never real values
 │
 ├── backend/
-│   ├── index.js                    # Express API: GET/POST/PUT/DELETE /books, connects to MySQL
-│   ├── package.json
+│   ├── app.js                      # createApp(db) factory: all routes + /metrics (prom-client)
+│   ├── index.js                    # Creates MySQL connection, calls createApp(db), starts server
+│   ├── package.json                # "test": "vitest run"
 │   ├── package-lock.json
-│   └── Dockerfile                  # node:22-alpine, npm ci --omit=dev, non-root user, delete lock file
+│   ├── Dockerfile                  # node:22-alpine, npm ci --omit=dev, non-root user
+│   └── __tests__/
+│       └── books.test.js           # 6 vitest tests, vi.fn() mock db, no real DB needed
 │
 ├── client/
 │   ├── src/
 │   │   ├── App.js                  # Root React component
 │   │   └── ...                     # React components for book list, add/edit/delete
 │   ├── public/
-│   ├── nginx.conf                  # nginx config: serve React build, proxy /api → backend, temp paths in /tmp
+│   ├── nginx.conf                  # nginx config: serve React build, temp paths in /tmp
 │   ├── package.json
 │   ├── package-lock.json
-│   └── Dockerfile                  # Build stage: node:22-alpine npm build; Runner stage: nginx:1.27-alpine
+│   └── Dockerfile                  # Build stage: node:22-alpine npm build; Runner: nginx:1.27-alpine
 │
 └── .github/
     └── workflows/
-        ├── ci-cd.yml               # Main pipeline: secret scan → SAST → lint → build+scan+push → deploy
-        └── terraform.yml           # Terraform pipeline: fmt check → validate → plan → apply (with Trivy IaC scan)
+        ├── ci-cd.yml               # Main pipeline: secret scan → SAST+tests → lint → build+scan+push → deploy
+        └── terraform.yml           # Terraform pipeline: fmt check → validate → plan → apply
 ```
 
 ---
@@ -553,7 +635,7 @@ Install these tools locally:
 
 ```
 aws CLI          >= 2.x       aws --version
-terraform        >= 1.10      terraform version
+terraform        >= 1.7       terraform version
 kubectl          >= 1.28      kubectl version
 helm             >= 3.x       helm version
 python           >= 3.8       python --version
@@ -573,40 +655,17 @@ aws configure
 Before running Terraform, create the S3 bucket and DynamoDB table for remote state:
 
 ```bash
-# Create S3 bucket (bucket name must be globally unique)
-aws s3api create-bucket \
-  --bucket bookstore-tf-state-<your-account-id> \
-  --region us-west-1 \
-  --create-bucket-configuration LocationConstraint=us-west-1
-
-# Enable versioning
-aws s3api put-bucket-versioning \
-  --bucket bookstore-tf-state-<your-account-id> \
-  --versioning-configuration Status=Enabled
-
-# Enable encryption
-aws s3api put-bucket-encryption \
-  --bucket bookstore-tf-state-<your-account-id> \
-  --server-side-encryption-configuration '{
-    "Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
-
-# Create DynamoDB table for state locking
-aws dynamodb create-table \
-  --table-name bookstore-tf-lock \
-  --attribute-definitions AttributeName=LockID,AttributeType=S \
-  --key-schema AttributeName=LockID,KeyType=HASH \
-  --billing-mode PAY_PER_REQUEST \
-  --region us-west-1
+./scripts/bootstrap-tf-state.sh us-west-1
 ```
 
-Then fill in `main.tf` backend block:
+Then fill in `main.tf` backend block with the printed values:
 
 ```hcl
 backend "s3" {
-  bucket         = "bookstore-tf-state-<your-account-id>"
+  bucket         = "bookstore-terraform-state-<your-account-id>"
   key            = "prod/terraform.tfstate"
   region         = "us-west-1"
-  dynamodb_table = "bookstore-tf-lock"
+  dynamodb_table = "terraform-state-lock"
   encrypt        = true
 }
 ```
@@ -635,7 +694,7 @@ terraform plan
 terraform apply
 ```
 
-This creates: VPC, subnets, NAT gateway, EKS cluster, ECR repos, RDS, ACM certificate, GitHub OIDC role, Route53 private zone.
+This creates: VPC, subnets, NAT gateway, EKS cluster, ECR repos, RDS, ACM certificate, GitHub OIDC role, Route53 private zone, and all cluster add-ons (cert-manager, ESO, ingress-nginx, ArgoCD, Prometheus, Argo Rollouts) via `modules/eks-addons/`.
 
 After apply, note the outputs:
 ```bash
@@ -669,32 +728,31 @@ aws secretsmanager create-secret \
   --secret-string '{"DB_USERNAME":"admin","DB_PASSWORD":"<strong-password-here>"}'
 ```
 
-Choose a strong password. Note: if the password contains single quotes, they are fine — the JSON encoding handles them.
+(Alternatively, `eks_bootstrap.py` Phase 4 prompts you interactively if the secret does not exist.)
 
 ---
 
 ### Step 6 — Run eks_bootstrap.py
 
-This script installs all cluster components in order:
+This script handles the remaining 8 phases that Terraform cannot do:
 
 ```bash
-python eks_bootstrap.py
+source config.env
+DOMAIN=$DOMAIN python eks_bootstrap.py
 ```
 
-**What it does (10 phases):**
+**What it does (8 phases):**
 
 | Phase | Action |
 |-------|--------|
 | 1 | Update kubeconfig (`aws eks update-kubeconfig`) |
-| 2 | Install EBS CSI add-on + attach IAM policy to node role |
-| 3 | Scale node group to 2 (prevents "too many pods") |
-| 4 | Install cert-manager, External Secrets Operator, ingress-nginx via Helm |
-| 5 | Create IRSA role + service account for ESO |
-| 6 | Validate/create AWS Secrets Manager secret |
-| 7 | Install ArgoCD, apply ArgoCD Application manifest |
-| 8 | Clear kubectl cache, force ESO resync |
-| 9 | Wait for mysql-0, create DB schema + seed data |
-| 10 | Print summary + Route53 instructions |
+| 2 | Apply ClusterIssuer (cert-manager CRDs exist from Terraform) |
+| 3 | Create IRSA role + annotate `external-secrets-sa` service account |
+| 4 | Validate/create AWS Secrets Manager secret |
+| 5 | Apply ArgoCD Application manifest + patch ArgoCD secret key |
+| 6 | Clear kubectl cache, force ESO resync |
+| 7 | Wait for mysql-0, create DB schema + seed data |
+| 8 | Print summary + Route53 NLB hostname reminder |
 
 The script is **idempotent** — safe to re-run after failures.
 
@@ -710,15 +768,15 @@ git commit -m "feat: initial deployment"
 git push origin main
 ```
 
-In GitHub Actions, watch the pipeline. When it reaches the `deploy` stage, it pauses for approval. Go to **Actions → DevSecOps Pipeline → approve** to allow the deploy stage to update `kustomization.yaml`.
+In GitHub Actions, watch the pipeline. When it reaches the `deploy` stage, it pauses for approval. Go to **Actions → DevSecOps Pipeline → approve** to allow the deploy stage to update `k8s/overlays/prod/kustomization.yaml`.
 
-After approval, the pipeline commits the new image SHA to `k8s/kustomization.yaml`. ArgoCD detects this within 3 minutes and rolls out the new pods.
+After approval, the pipeline commits the new image SHA. ArgoCD detects this within 3 minutes and rolls out the new pods — backend via Argo Rollout canary, frontend via rolling update.
 
 ---
 
 ### Step 8 — Update Route53 DNS
 
-After `eks_bootstrap.py` completes Phase 10, it prints the NLB hostname. Go to:
+After `eks_bootstrap.py` completes Phase 8, it prints the NLB hostname. Go to:
 
 **AWS Console → Route 53 → Hosted zones → b17facebook.xyz**
 
@@ -726,7 +784,7 @@ Create (or update) two A records:
 
 | Record | Type | Routing | Target |
 |--------|------|---------|--------|
-| `bookstore.b17facebook.xyz` | A | Alias | NLB hostname from Phase 10 |
+| `bookstore.b17facebook.xyz` | A | Alias | NLB hostname from Phase 8 |
 | `api.bookstore.b17facebook.xyz` | A | Alias | Same NLB hostname |
 
 DNS propagates within 60 seconds for Route53 alias records.
@@ -741,9 +799,7 @@ kubectl get pods -n bookstore
 
 # Expected:
 # frontend-xxx   1/1   Running
-# frontend-xxx   1/1   Running
-# backend-xxx    1/1   Running
-# backend-xxx    1/1   Running
+# backend-xxx    1/1   Running   (canary rollout completes)
 # mysql-0        1/1   Running
 
 # TLS certificate issued
@@ -753,16 +809,20 @@ kubectl describe certificate bookstore-tls -n bookstore
 # ArgoCD sync status
 kubectl get application bookstore -n argocd
 # STATUS: Synced, HEALTH: Healthy
+
+# Argo Rollout status
+kubectl argo rollouts get rollout backend -n bookstore
 ```
 
 Open `https://bookstore.b17facebook.xyz` — the bookstore UI loads.  
-Open `https://api.bookstore.b17facebook.xyz` — returns `"hello"` (JSON).
+Open `https://api.bookstore.b17facebook.xyz` — returns `"hello"` (JSON).  
+Open `https://api.bookstore.b17facebook.xyz/metrics` — returns Prometheus metrics.
 
 ---
 
 ### Ongoing Operations
 
-**Deploy a new version:** Push to `main` → approve deploy stage in GitHub Actions → ArgoCD auto-deploys.
+**Deploy a new version:** Push to `main` → approve deploy stage in GitHub Actions → ArgoCD auto-deploys (backend canary, frontend rolling).
 
 **Destroy everything:**
 ```bash
@@ -779,7 +839,9 @@ kubectl annotate externalsecret db-secret -n bookstore \
 ```
 Then restart backend pods to pick up the new env var:
 ```bash
-kubectl rollout restart deployment/backend -n bookstore
+kubectl rollout restart deployment/frontend -n bookstore
+# Backend uses Argo Rollout — restart via:
+kubectl argo rollouts restart backend -n bookstore
 ```
 
 ---
