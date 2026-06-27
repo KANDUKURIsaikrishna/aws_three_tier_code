@@ -49,3 +49,9 @@ variable "prefix" {
   type        = string
   default     = "bookstore"
 }
+
+variable "public_access_cidrs" {
+  description = "CIDR blocks allowed to reach the public EKS API endpoint. Restrict to admin IP ranges in production (e.g. [\"203.0.113.0/24\"]). Default allows all — narrow before go-live."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}

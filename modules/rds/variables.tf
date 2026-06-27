@@ -92,3 +92,9 @@ variable "rotation_days" {
   type        = number
   default     = 30
 }
+
+variable "skip_final_snapshot" {
+  description = "Skip final DB snapshot on destroy. Set false in production to preserve a recovery point before deletion."
+  type        = bool
+  default     = false
+}

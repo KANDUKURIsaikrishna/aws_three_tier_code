@@ -6,7 +6,7 @@ resource "random_password" "db_password" {
 
 resource "aws_secretsmanager_secret" "db_credentials" {
   name                    = "/bookstore/db-credentials"
-  recovery_window_in_days = 0
+  recovery_window_in_days = 7
 
   dynamic "replica" {
     for_each = var.secondary_region != "" ? [var.secondary_region] : []
@@ -59,7 +59,8 @@ resource "aws_db_instance" "db" {
   # skip_final_snapshot=true avoids "snapshot already exists" errors on
   # repeated destroy/apply cycles. RDS automated backups (retention=7d)
   # already provide point-in-time recovery for production use.
-  skip_final_snapshot = true
+  skip_final_snapshot       = var.skip_final_snapshot
+  final_snapshot_identifier = var.skip_final_snapshot ? null : "${var.db_identifier}-final-snapshot"
   deletion_protection = var.deletion_protection
 
   # ── Performance & Monitoring ──────────────────────────────────────

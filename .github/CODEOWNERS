@@ -1,0 +1,18 @@
+# CODEOWNERS — every PR must be approved by at least one owner of the changed area.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default: all changes require review from the project owner
+*                               @KANDUKURIsaikrishna
+
+# Terraform — infra changes need explicit sign-off
+*.tf                            @KANDUKURIsaikrishna
+modules/                        @KANDUKURIsaikrishna
+
+# CI/CD pipelines — high blast-radius changes
+.github/                        @KANDUKURIsaikrishna
+
+# Kubernetes manifests
+k8s/                            @KANDUKURIsaikrishna
+
+# IAM — security-sensitive, always needs owner approval
+iam.tf                          @KANDUKURIsaikrishna
