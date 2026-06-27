@@ -317,7 +317,7 @@ Each overlay is a separate ArgoCD Application pointing to a different namespace 
 **Improvement:** Enable AWS Secrets Manager automatic rotation:
 ```hcl
 resource "aws_secretsmanager_secret_rotation" "db" {
-  secret_id           = module.rds.master_user_secret_arn
+  secret_id           = module.rds.db_credentials_secret_arn   # was master_user_secret_arn (pre-phase2)
   rotation_rules {
     automatically_after_days = 30
   }
@@ -330,20 +330,288 @@ ESO will pick up the new value within 1h. Backend doesn't restart — connection
 
 ---
 
+## 15. Alertmanager — Slack / Email Routing
+
+**File:** `modules/eks-addons/main.tf` → `helm_release.kube_prometheus_stack`
+
+**Problem:** Prometheus fires alerts (PrometheusRule defined) but Alertmanager has no receivers configured. Alerts fire silently — nobody is paged.
+
+**Fix:** Add receiver config via helm values:
+```hcl
+set_sensitive {
+  name  = "alertmanager.config.receivers[0].name"
+  value = "slack"
+}
+set_sensitive {
+  name  = "alertmanager.config.receivers[0].slack_configs[0].api_url"
+  value = var.slack_webhook_url
+}
+set {
+  name  = "alertmanager.config.receivers[0].slack_configs[0].channel"
+  value = "#bookstore-alerts"
+}
+set {
+  name  = "alertmanager.config.route.receiver"
+  value = "slack"
+}
+```
+
+Store `slack_webhook_url` in Secrets Manager, inject via Terraform variable marked `sensitive = true`.
+
+**Impact:** On-call gets paged when error rate > 1% or pod crash loops. Zero-value monitoring without this.
+
+---
+
+## 16. PodDisruptionBudget for Frontend
+
+**File:** New `k8s/base/frontend/pdb.yaml`
+
+**Problem:** Frontend runs as a `Deployment` with default replica count. During node drain (maintenance, Karpenter consolidation), all frontend pods can be evicted simultaneously → 100% downtime.
+
+**Fix:**
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend-pdb
+  namespace: bookstore
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: frontend
+```
+
+Add to `k8s/base/kustomization.yaml` resources list.
+
+**Impact:** Node drain keeps at least 1 frontend pod running. Zero-downtime maintenance.
+
+---
+
+## 17. ECR Lifecycle Policies
+
+**File:** `modules/ecr/main.tf`
+
+**Problem:** Every CI push creates a new image tag. No cleanup → ECR storage grows unbounded. 1000 images × 200MB = 200GB = ~$9/month wasted.
+
+**Fix:** Add lifecycle policy to each ECR repo:
+```hcl
+resource "aws_ecr_lifecycle_policy" "backend" {
+  repository = aws_ecr_repository.backend.name
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 20 tagged images"
+      selection = {
+        tagStatus   = "tagged"
+        tagPrefixList = ["v"]
+        countType   = "imageCountMoreThan"
+        countNumber = 20
+      }
+      action = { type = "expire" }
+    }, {
+      rulePriority = 2
+      description  = "Expire untagged after 7 days"
+      selection = {
+        tagStatus  = "untagged"
+        countType  = "sinceImagePushed"
+        countUnit  = "days"
+        countNumber = 7
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
+```
+
+Apply same policy to `bookstore-frontend` repo.
+
+**Impact:** Bounded storage cost, no manual cleanup needed.
+
+---
+
+## 18. Terraform Drift Detection (Scheduled Plan in CI)
+
+**File:** `.github/workflows/terraform-drift.yml` — new file
+
+**Problem:** Manual changes in AWS Console (security group edits, scaling changes) diverge from Terraform state silently. Drift found only when someone runs `terraform apply` — sometimes weeks later.
+
+**Fix:** Scheduled GitHub Actions workflow:
+```yaml
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 06:00 UTC daily
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-west-1
+      - run: terraform init
+      - run: terraform plan -detailed-exitcode
+        id: plan
+      - name: Notify on drift
+        if: steps.plan.outputs.exitcode == '2'
+        run: |
+          curl -X POST $SLACK_WEBHOOK -d '{"text":"⚠️ Terraform drift detected — run terraform plan"}'
+```
+
+Exit code `2` = plan has changes (drift). Exit code `0` = no drift.
+
+**Impact:** Drift caught within 24h. No surprise diffs during next `terraform apply`.
+
+---
+
+## 19. Secrets Manager Cross-Region Replication for DR
+
+**File:** `modules/rds/main.tf`
+
+**Problem:** DR runbook (Step 4) says "update `/bookstore/db-credentials` in us-east-1 with secondary RDS endpoint." But the secret only exists in us-west-1 — manual creation needed during an outage.
+
+**Fix:** Enable automatic replication:
+```hcl
+resource "aws_secretsmanager_secret" "db_credentials" {
+  name                    = "/bookstore/db-credentials"
+  recovery_window_in_days = 0
+
+  replica {
+    region = "us-east-1"
+  }
+}
+```
+
+During failover: update the replicated secret's `DB_HOST` field in us-east-1, ESO in the DR cluster picks it up within 1h.
+
+**Impact:** DR secret pre-exists in us-east-1. Eliminates one manual step during an already-stressful outage.
+
+---
+
+## 20. Container Image Signing (Cosign)
+
+**File:** `.github/workflows/ci.yml` — add step after ECR push
+
+**Problem:** ECR has IMMUTABLE tags and Trivy scanning, but nothing proves a given image was built by CI. A compromised registry credential could push a malicious image that passes tag checks.
+
+**Fix:** Sign images after push using Sigstore Cosign (keyless, OIDC-based):
+```yaml
+- name: Sign image with Cosign
+  uses: sigstore/cosign-installer@v3
+- run: |
+    cosign sign --yes \
+      $ECR_REGISTRY/bookstore-backend:$IMAGE_TAG
+```
+
+Add Kyverno policy to verify signature before admission:
+```yaml
+rules:
+- name: verify-image-signature
+  match:
+    resources: { kinds: [Pod] }
+  verifyImages:
+  - imageReferences: ["*.dkr.ecr.us-west-1.amazonaws.com/*"]
+    attestors:
+    - entries:
+      - keyless:
+          issuer: https://token.actions.githubusercontent.com
+          subject: "https://github.com/KANDUKURIsaikrishna/aws_three_tier_code/*"
+```
+
+**Impact:** Only images signed by GitHub Actions CI can run in the cluster. Supply chain attack requires both ECR credential AND GitHub OIDC token compromise.
+
+---
+
+## 21. ResourceQuota on bookstore Namespace
+
+**File:** New `k8s/base/quota.yaml`
+
+**Problem:** No CPU/memory quota on `bookstore` namespace. A misconfigured rollout (e.g., canary with `requests.cpu: "4"`) can starve other namespaces on the single `t3.medium` node.
+
+**Fix:**
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: bookstore-quota
+  namespace: bookstore
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 2Gi
+    limits.cpu: "4"
+    limits.memory: 4Gi
+    pods: "20"
+```
+
+Add to `k8s/base/kustomization.yaml` resources.
+
+**Impact:** Prevents one bad deploy from taking down cert-manager, ESO, or monitoring.
+
+---
+
+## 22. EKS Cluster Upgrade Runbook
+
+**File:** `docs/eks-upgrade-runbook.md` — new file
+
+**Problem:** EKS 1.31 support ends ~2026-11. No documented process for upgrades. Skipping minor versions is blocked by EKS (must go 1.31 → 1.32 → 1.33). Last-minute upgrades under deadline = mistakes.
+
+**Fix:** Document and automate the upgrade sequence:
+
+```bash
+# Step 1 — upgrade control plane
+aws eks update-cluster-version \
+  --name bookstore-eks \
+  --kubernetes-version 1.32
+
+# Step 2 — wait for control plane
+aws eks wait cluster-active --name bookstore-eks
+
+# Step 3 — update managed node group
+aws eks update-nodegroup-version \
+  --cluster-name bookstore-eks \
+  --nodegroup-name bookstore-nodes
+
+# Step 4 — update add-ons (each must match new k8s version)
+terraform apply   # helm_release versions pinned in eks-addons/main.tf
+```
+
+In Terraform, update:
+```hcl
+# modules/eks/main.tf
+cluster_version = "1.32"   # was 1.31
+```
+
+**Impact:** Controlled upgrade with known steps. Add a calendar reminder 3 months before EKS EOL.
+
+---
+
 ## Priority Order (Suggested)
 
-| Priority | Item | Effort | Risk |
+| Priority | Item | Effort | Impact |
 |---|---|---|---|
 | P0 | Fix AnalysisTemplate division-by-zero (#1) | 5 min | Blocks safe canary |
 | P0 | Enable RDS deletion protection (#2) | 1 min | Data loss risk |
 | P0 | Enable S3 Terraform state (#3) | 15 min | Team blocker |
-| P1 | Graceful shutdown (#4) | 1 hour | User-visible 502s |
+| P0 | Alertmanager Slack/email routing (#15) | 1 hour | Silent alerts = blind ops |
+| P1 | Graceful shutdown (#4) | 1 hour | User-visible 502s on deploy |
+| P1 | PodDisruptionBudget frontend (#16) | 15 min | Zero-downtime node drain |
+| P1 | ResourceQuota bookstore namespace (#21) | 10 min | Noisy-neighbour protection |
 | P1 | Grafana Loki data source auto (#5) | 30 min | Ops friction |
 | P1 | Backend integration tests (#8) | 2 hours | Quality gate |
+| P1 | ECR lifecycle policies (#17) | 30 min | Unbounded storage cost |
+| P2 | Terraform drift detection (#18) | 1 hour | Catch console changes daily |
+| P2 | Secrets Manager cross-region replication (#19) | 15 min | DR secret missing in us-east-1 |
 | P2 | Grafana admin password (#6) | 30 min | Security hygiene |
 | P2 | RDS Performance Insights (#7) | 5 min | Observability |
 | P2 | Secret rotation (#14) | 30 min | Compliance |
 | P3 | Kyverno policies (#10) | 2 hours | Platform maturity |
+| P3 | Image signing with Cosign (#20) | 2 hours | Supply chain security |
+| P3 | EKS upgrade runbook (#22) | 2 hours | Ops readiness before EOL |
 | P3 | CloudFront CDN (#9) | 3 hours | Performance |
 | P3 | Velero backup (#12) | 2 hours | DR completeness |
 | P4 | Karpenter (#11) | 1 day | Cost optimization |
