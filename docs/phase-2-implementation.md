@@ -46,7 +46,7 @@ Internet
   │    └── MySQL 8.0 (Multi-AZ, encrypted)          │
   └─────────────────────────────────────────────────┘
         │
-  ECR (bookstore-frontend, bookstore-backend) ─► us-east-1 replica
+  ECR (bookstore-frontend, bookstore-backend) ─► us-west-2 (Oregon) replica
   Secrets Manager (/bookstore/db-credentials)
 ```
 
@@ -133,7 +133,7 @@ terraform apply tfplan
 - VPC `170.20.0.0/16` with public + private subnets across 2 AZs
 - EKS 1.31 cluster (`bookstore-eks`), 1 node (`t3.medium`), max 2
 - RDS MySQL 8.0 (`db.t3.micro`, Multi-AZ, 25GB → auto-scales to 100GB)
-- ECR repos (`bookstore-frontend`, `bookstore-backend`) + replication to `us-east-1`
+- ECR repos (`bookstore-frontend`, `bookstore-backend`) + replication to `us-west-2` (Oregon)
 - ACM TLS certificate for `*.b17facebook.xyz`
 - Route53 public hosted zone for `b17facebook.xyz`
 - Route53 private zone `bookstore.internal` → RDS CNAME
@@ -456,13 +456,13 @@ Refreshed every 1h — no pod restart required
 ### Multi-Region Failover
 
 **Normal:** Route53 → `b17facebook.xyz` CNAME → nginx NLB (us-west-1) ✅ PRIMARY
-**Failover:** Health check fails 3 consecutive times → Route53 routes to `secondary_alb_dns` (us-east-1)
+**Failover:** Health check fails 3 consecutive times → Route53 routes to `secondary_alb_dns` (us-west-2 Oregon)
 
 **DR steps when primary fails:**
 1. Route53 auto-switches to secondary (if `secondary_alb_dns` is set)
-2. Restore RDS from replicated backup in us-east-1
-3. Deploy EKS in us-east-1 (same manifests, same ArgoCD app)
-4. Update `/bookstore/db-credentials` secret in us-east-1 with secondary RDS endpoint as `DB_HOST`
+2. Restore RDS from replicated backup in us-west-2
+3. Deploy EKS in us-west-2 (same manifests, same ArgoCD app)
+4. Update `/bookstore/db-credentials` secret in us-west-2 with secondary RDS endpoint as `DB_HOST`
 5. Set `secondary_alb_dns` in `terraform.tfvars` → `terraform apply`
 
 ---

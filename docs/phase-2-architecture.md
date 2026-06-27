@@ -151,7 +151,7 @@ All roles use least-privilege managed policies. No inline wildcard permissions.
 Terraform apply
   → random_password (32 chars, special chars)
   → aws_secretsmanager_secret (/bookstore/db-credentials)
-       │  replica → us-east-1  (for DR)
+       │  replica → us-west-2  (Oregon, for DR)
        └─ rotation ready (set rotation_lambda_arn to activate)
 
 In-cluster:
@@ -166,7 +166,7 @@ Credentials never touch git. ESO pulls from AWS. Rotation activates within 1h wi
 
 ### RDS Backup Replication (DR)
 
-`aws_db_instance_automated_backups_replication` replicates automated backups to us-east-1. In a DR event: restore from backup in us-east-1, promote to standalone, update `DB_HOST` in Secrets Manager replica, ESO picks up within 1h.
+`aws_db_instance_automated_backups_replication` replicates automated backups to us-west-2 (Oregon). In a DR event: restore from backup in us-west-2, promote to standalone, update `DB_HOST` in Secrets Manager replica, ESO picks up within 1h.
 
 ---
 
@@ -179,7 +179,7 @@ Two repositories: `bookstore-backend`, `bookstore-frontend`.
 | Image mutability | IMMUTABLE — tags cannot be overwritten |
 | Lifecycle policy | Keep last 10 images per repo (configurable via `image_retention_count`) |
 | Encryption | AES-256 (AWS-managed) |
-| Cross-region replication | All `bookstore-*` repos replicated to us-east-1 (for DR secondary cluster) |
+| Cross-region replication | All `bookstore-*` repos replicated to us-west-2 Oregon (for DR secondary cluster) |
 
 Image tag format: `<ACCOUNT>.dkr.ecr.us-west-1.amazonaws.com/bookstore-<app>:<git-sha-8>`. Never `latest` in prod.
 
@@ -278,7 +278,7 @@ ClusterIssuer: `letsencrypt-prod`. ACME email: `kandukurisaikrishna778@gmail.com
 CloudFront (optional, `enable_cloudfront = true`):
 - Static assets (`/static/*`) cached at edge, TTL 7 days
 - Dynamic API requests: TTL 0 (pass-through)
-- ACM cert provisioned in us-east-1 (CloudFront requirement, uses `aws.secondary` provider alias)
+- ACM cert provisioned in us-east-1 (CloudFront hard requirement — uses dedicated `aws.us_east_1` provider alias, independent of DR secondary region)
 - Route53 CNAME flips from NLB hostname to CloudFront domain when enabled
 
 ---
@@ -566,7 +566,7 @@ Primary health check failure triggers automatic DNS failover to secondary record
 ```
 .
 # ── Root module (one concern per file) ──────────────────────────────────────
-├── providers.tf             # aws (primary + secondary alias), helm providers
+├── providers.tf             # aws primary (us-west-1), aws.secondary (us-west-2 Oregon), aws.us_east_1 (CloudFront ACM), helm
 ├── versions.tf              # required_providers versions, S3 backend config
 ├── variables.tf             # all input variables (domain, github_repo, enable_cloudfront, …)
 ├── locals.tf                # VPC CIDR + subnet list — shared across multiple modules
@@ -577,8 +577,8 @@ Primary health check failure triggers automatic DNS failover to secondary record
 │
 # ── Root-level concern files (NOT in modules — see rationale below) ──────────
 ├── cloudfront.tf            # ACM cert (us-east-1) + CloudFront distribution
-│                            #   → uses provider = aws.secondary (alias); cannot cleanly
-│                            #     move into child module without providers{} boilerplate
+│                            #   → uses provider = aws.us_east_1 (hardcoded — CloudFront
+│                            #     requires ACM in us-east-1 regardless of DR region)
 ├── dr.tf                    # RDS automated-backup cross-region replication
 │                            #   → uses provider = aws.secondary (same reason)
 ├── cloudtrail.tf            # S3 bucket + policy + CloudTrail trail
@@ -658,10 +658,10 @@ Three distinct reasons:
 
 #### 1. Provider alias constraint (`cloudfront.tf`, `dr.tf`)
 
-Both files contain resources that target a secondary AWS region via `provider = aws.secondary`:
+Both files contain resources that target non-primary regions via provider aliases:
 
-- `cloudfront.tf` — ACM certificate in `us-east-1` (CloudFront requirement) + CloudFront distribution
-- `dr.tf` — RDS automated-backup cross-region replication to secondary region
+- `cloudfront.tf` — ACM certificate in `us-east-1` (CloudFront hard requirement — uses `aws.us_east_1` alias, NOT `aws.secondary`) + CloudFront distribution
+- `dr.tf` — RDS automated-backup cross-region replication to `us-west-2` (Oregon), uses `aws.secondary` alias
 
 Terraform does **not** transparently pass provider aliases into child modules. To move these into a module you would need:
 1. `providers = { aws.secondary = aws.secondary }` block in every module call
