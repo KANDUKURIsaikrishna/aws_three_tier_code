@@ -21,9 +21,9 @@ variable "github_repo" {
 }
 
 variable "secondary_region" {
-  description = "Secondary AWS region for active-passive failover"
+  description = "Secondary AWS region for DR failover: ECR replication + RDS backup replication. Default: us-west-2 (Oregon). CloudFront ACM always uses us-east-1 regardless of this value."
   type        = string
-  default     = "us-east-1"
+  default     = "us-west-2"
 }
 
 variable "primary_alb_dns" {

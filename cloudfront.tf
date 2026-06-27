@@ -1,9 +1,8 @@
-# CloudFront ACM cert must be in us-east-1 — uses secondary provider alias.
-# Cross-region provider aliases cannot be passed into child modules without
-# explicit provider configuration blocks, so these resources live at root.
+# CloudFront ACM cert MUST be in us-east-1 — AWS hard requirement.
+# Uses aws.us_east_1 alias, NOT aws.secondary, so DR region can be freely changed.
 resource "aws_acm_certificate" "cloudfront" {
   count             = var.enable_cloudfront && var.primary_alb_dns != "" ? 1 : 0
-  provider          = aws.secondary
+  provider          = aws.us_east_1
   domain_name       = var.domain
   validation_method = "DNS"
 

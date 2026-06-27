@@ -23,6 +23,20 @@ provider "aws" {
   }
 }
 
+# CloudFront ACM certs must be in us-east-1 — AWS hard requirement, regardless of secondary DR region.
+provider "aws" {
+  alias  = "us_east_1"
+  region = "us-east-1"
+
+  default_tags {
+    tags = {
+      Project     = "bookstore"
+      Environment = var.environment
+      ManagedBy   = "terraform"
+    }
+  }
+}
+
 provider "helm" {
   kubernetes {
     host                   = module.eks.cluster_endpoint
