@@ -462,14 +462,139 @@ cluster_version = "1.32"   # was 1.31
 
 ---
 
+---
+
+## 23. VPC Flow Logs ✅ Implemented
+
+**File:** `modules/network/main.tf`
+
+All VPC traffic (ACCEPT + REJECT) logged to CloudWatch Logs `/aws/vpc/flowlogs/bookstore`. 90-day retention. Dedicated IAM role with least-privilege. Enables post-incident network forensics and GuardDuty data enrichment.
+
+---
+
+## 24. GuardDuty Threat Detection ✅ Implemented
+
+**File:** `main.tf`
+
+`aws_guardduty_detector` enabled with:
+- S3 data event monitoring
+- EKS audit log analysis (detects privilege escalation, crypto-mining, lateral movement)
+- EC2 malware scanning on EBS volumes
+
+Findings surface in AWS Security Hub and can be routed to SNS/Slack via EventBridge.
+
+---
+
+## 25. CloudTrail Audit Logging ✅ Implemented
+
+**File:** `main.tf`
+
+`aws_cloudtrail.main` — multi-region trail with:
+- Log file validation (SHA-256 digest chain, tamper detection)
+- Encrypted S3 bucket (`AES256`, versioning enabled, public access blocked)
+- Global service events (IAM, STS, CloudFront)
+- Dedicated S3 bucket with scoped bucket policy (CloudTrail service principal only)
+
+Required for compliance (SOC2, PCI-DSS, ISO27001) and forensic investigation.
+
+---
+
+## 26. RDS Final Snapshot + SM Recovery Window ✅ Implemented
+
+**Files:** `modules/rds/main.tf`, `modules/rds/variables.tf`, `main.tf`
+
+- `skip_final_snapshot = false` in prod — RDS creates a snapshot before any destroy. Snapshot identifier: `<db-identifier>-final-snapshot`.
+- `recovery_window_in_days = 7` on Secrets Manager secret (was `0` — immediate permanent deletion).
+
+`skip_final_snapshot` exposed as module variable; defaults to `false` for safety.
+
+---
+
+## 27. GitHub OIDC Trust Policy — Branch Restriction ✅ Implemented
+
+**File:** `iam.tf`
+
+`StringLike` condition changed from `"repo:KANDUKURIsaikrishna/aws_three_tier_code:*"` (all refs, including PRs from forks) to:
+```
+["repo:KANDUKURIsaikrishna/aws_three_tier_code:ref:refs/heads/main",
+ "repo:KANDUKURIsaikrishna/aws_three_tier_code:ref:refs/heads/improvements"]
+```
+
+Fork PRs and arbitrary branch pushes can no longer assume the AWS role.
+
+---
+
+## 28. CODEOWNERS ✅ Implemented
+
+**File:** `.github/CODEOWNERS`
+
+All paths default to `@KANDUKURIsaikrishna`. Specific paths (`.github/`, `*.tf`, `k8s/`, `iam.tf`) listed explicitly so GitHub enforces review on high-blast-radius changes regardless of PR author.
+
+---
+
+## 29. CI Action Version Pinning ✅ Implemented
+
+**Files:** `.github/workflows/ci-cd.yml`, `.github/workflows/terraform.yml`
+
+`aquasecurity/trivy-action@master` (floating, supply-chain risk) pinned to `@v0.28.0`. `timeout-minutes: 30` added to `deploy` job to prevent approval accumulation.
+
+> **Next step:** Pin all remaining actions to commit SHAs (e.g., `actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683`) for full supply-chain hardening. Dependabot can automate SHA bump PRs.
+
+---
+
+## 30. Backend /health Endpoint + Probe Fix ✅ Implemented
+
+**Files:** `backend/app.js`, `k8s/base/backend/rollout.yaml`
+
+Added `GET /health → 200 { status: "ok" }` to Express app. Rollout readiness and liveness probes updated from `/` to `/health`. Isolates health signal from application routing — `/` could return 4xx without making the pod unready.
+
+---
+
+## 31. MySQL Image Pin + Capability Hardening ✅ Implemented
+
+**File:** `k8s/base/database/mysql-statefulset.yaml`
+
+Image pinned `mysql:8.0` → `mysql:8.0.39` (deterministic builds). Container securityContext extended: drop ALL capabilities, re-add only `CHOWN SETUID SETGID DAC_OVERRIDE` (minimum MySQL init requires). `allowPrivilegeEscalation: false` already present.
+
+---
+
+## 32. EKS API Endpoint CIDR Restriction ✅ Implemented
+
+**Files:** `modules/eks/main.tf`, `modules/eks/variables.tf`
+
+`public_access_cidrs` variable added (default `["0.0.0.0/0"]` — backwards compatible). Set to your admin IP range in `terraform.tfvars` before production go-live:
+```hcl
+# terraform.tfvars
+eks_public_access_cidrs = ["203.0.113.0/32"]  # your office/VPN egress IP
+```
+
+---
+
+## 33. .gitignore Hardening ✅ Implemented
+
+- `.terraform.lock.hcl` removed from ignore list — now tracked (like `package-lock.json`). Ensures reproducible `terraform init` across team and CI.
+- Added: `.env.prod`, `.env.staging`, `.env.production`, `*.env.*`
+- SSH key wildcard broadened: explicit `id_rsa`, `id_ed25519` → `id_*` (catches all key types)
+- Added: `*.tfstate.backup`, `*.p12`, `*.pfx`
+
+---
+
 ## Priority Order (Suggested)
 
 | Priority | Item | Effort | Impact |
 |---|---|---|---|
 | P0 | ~~Fix AnalysisTemplate division-by-zero (#1)~~ | ✅ done | Blocks safe canary |
 | P0 | ~~Enable RDS deletion protection (#2)~~ | ✅ done | Data loss risk |
+| P0 | ~~VPC Flow Logs (#23)~~ | ✅ done | Network forensics + GuardDuty feed |
+| P0 | ~~GuardDuty threat detection (#24)~~ | ✅ done | Runtime threat detection |
+| P0 | ~~CloudTrail audit logging (#25)~~ | ✅ done | Compliance + forensics |
 | P0 | Enable S3 Terraform state (#3) | 15 min | Team blocker |
 | P0 | Alertmanager Slack/email routing (#15) | 1 hour | Silent alerts = blind ops |
+| P1 | ~~OIDC branch restriction (#27)~~ | ✅ done | Fork PRs can't assume AWS role |
+| P1 | ~~RDS final snapshot + SM recovery window (#26)~~ | ✅ done | Data recovery safety |
+| P1 | ~~CODEOWNERS (#28)~~ | ✅ done | Enforced code review |
+| P1 | ~~Backend /health endpoint (#30)~~ | ✅ done | Accurate readiness signal |
+| P1 | ~~MySQL image pin + caps (#31)~~ | ✅ done | Deterministic builds |
 | P1 | Graceful shutdown (#4) | 1 hour | User-visible 502s on deploy |
 | P1 | ~~PodDisruptionBudget frontend (#16)~~ | ✅ done | Zero-downtime node drain |
 | P1 | ~~ResourceQuota bookstore namespace (#21)~~ | ✅ done | Noisy-neighbour protection |
@@ -481,6 +606,9 @@ cluster_version = "1.32"   # was 1.31
 | P2 | ~~Grafana admin password (#6)~~ | ✅ done | Security hygiene |
 | P2 | ~~RDS Performance Insights (#7)~~ | ✅ done | Observability |
 | P2 | ~~Secret rotation (#14)~~ | ✅ done | Compliance |
+| P2 | ~~CI action version pinning (#29)~~ | ✅ done | Supply-chain hardening |
+| P2 | ~~EKS public_access_cidrs (#32)~~ | ✅ done | Narrow attack surface |
+| P2 | ~~.gitignore hardening (#33)~~ | ✅ done | Prevent accidental secret commit |
 | P3 | Kyverno policies (#10) | 2 hours | Platform maturity |
 | P3 | Image signing with Cosign (#20) | 2 hours | Supply chain security |
 | P3 | ~~EKS upgrade runbook (#22)~~ | ✅ done | Ops readiness before EOL |

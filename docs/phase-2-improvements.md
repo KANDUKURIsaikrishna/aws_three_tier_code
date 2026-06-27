@@ -127,6 +127,30 @@ Phase 1 was a functional but basic 3-tier deploy: EKS + RDS + ECR, with raw Kube
 
 ---
 
+## 12. Security Hardening Layer
+
+**Phase 1:** No threat detection, no audit logging, no network visibility, no CIDR restrictions on EKS API.
+
+**Phase 2 (security pass):** Full observability of infrastructure activity:
+
+| Control | Implementation | Purpose |
+|---|---|---|
+| VPC Flow Logs | CloudWatch `/aws/vpc/flowlogs/bookstore` | Network forensics, GuardDuty enrichment |
+| GuardDuty | EKS audit + S3 + malware scan enabled | Runtime threat detection |
+| CloudTrail | Multi-region, log-file validation, encrypted S3 | Immutable API audit trail |
+| OIDC branch restriction | Trust only `main` + `improvements` (not `*`) | Fork PRs can't assume AWS role |
+| RDS final snapshot | `skip_final_snapshot = false` | Recovery point before destroy |
+| SM recovery window | `recovery_window_in_days = 7` | 7-day grace before permanent delete |
+| CODEOWNERS | All paths → `@KANDUKURIsaikrishna` | Enforced PR review on blast-radius paths |
+| Action pinning | `trivy-action@master` → `@v0.28.0` | Supply-chain hardening |
+| Backend /health | Dedicated health endpoint, not `/` | Accurate pod readiness signal |
+| MySQL caps | Drop ALL, re-add CHOWN/SETUID/SETGID/DAC_OVERRIDE | Minimal capability surface |
+| .gitignore | Track `.terraform.lock.hcl`, block env/key patterns | Provider version reproducibility + secret hygiene |
+
+**Why better:** Meets minimum bar for SOC2 Type I audit. Without CloudTrail/GuardDuty, an AWS account compromise goes undetected indefinitely.
+
+---
+
 ## What's Next: Phase 3 Targets
 
 | Item | Reason |
