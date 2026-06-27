@@ -340,9 +340,14 @@ kubectl argo rollouts get rollout backend -n bookstore --watch
 kubectl port-forward svc/kube-prometheus-stack-prometheus -n monitoring 9090:9090
 # Open http://localhost:9090/targets — backend should be UP
 
-# Grafana
+# Grafana — retrieve auto-generated password from Secrets Manager
+GRAFANA_PASS=$(aws secretsmanager get-secret-value \
+  --secret-id /bookstore/grafana-admin \
+  --region us-west-1 \
+  --query SecretString --output text)
+echo "Grafana password: $GRAFANA_PASS"
 kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80
-# Open http://localhost:3000 — login: admin / prom-operator
+# Open http://localhost:3000 — login: admin / <password printed above>
 ```
 
 Open the app:
