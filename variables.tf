@@ -37,3 +37,9 @@ variable "secondary_alb_dns" {
   type        = string
   default     = ""
 }
+
+variable "enable_cloudfront" {
+  description = "Set to true to put CloudFront in front of the frontend. Requires primary_alb_dns to be set. CloudFront ACM cert is created in us-east-1 automatically."
+  type        = bool
+  default     = false
+}

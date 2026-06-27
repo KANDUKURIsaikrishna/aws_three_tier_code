@@ -17,3 +17,8 @@ output "loki_service" {
   description = "Loki service URL for Grafana data source config"
   value       = "http://loki.${helm_release.loki.namespace}.svc.cluster.local:3100"
 }
+
+output "grafana_admin_secret_arn" {
+  description = "ARN of Secrets Manager secret holding Grafana admin password (/bookstore/grafana-admin)"
+  value       = aws_secretsmanager_secret.grafana_admin.arn
+}

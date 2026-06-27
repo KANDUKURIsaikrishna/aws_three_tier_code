@@ -6,42 +6,19 @@
 
 ---
 
-## 1. Fix Division-by-Zero in AnalysisTemplate
+## 1. Fix Division-by-Zero in AnalysisTemplate ✅ Implemented
 
 **File:** `k8s/base/monitoring/analysis-template.yaml`
 
-**Problem:** When ingress traffic is zero, `sum(...) / sum(...)` returns `NaN`. Argo Rollouts treats `NaN` as a failed measurement — rollout aborts even with a healthy new image.
-
-**Fix:**
-```yaml
-query: |
-  (
-    sum(rate(nginx_ingress_controller_requests{status=~"5..",ingress="{{args.ingress-name}}"}[2m]))
-    or vector(0)
-  )
-  /
-  (
-    sum(rate(nginx_ingress_controller_requests{ingress="{{args.ingress-name}}"}[2m]))
-    or vector(1)
-  )
-```
-
-**Impact:** Low risk, high value. Fix before first production canary rollout.
+Fixed. Numerator guards with `or vector(0)`, denominator with `or vector(1)`. Zero-traffic canary no longer aborts.
 
 ---
 
-## 2. Enable RDS Deletion Protection
+## 2. Enable RDS Deletion Protection ✅ Implemented
 
 **File:** `main.tf` → `module "rds"` block
 
-**Current:** `deletion_protection = false` (intentional for demo destroy/apply cycles)
-
-**Fix:**
-```hcl
-deletion_protection = true
-```
-
-**Impact:** Prevents `terraform destroy` from dropping the production database. One-line change; enable before going live.
+`deletion_protection = true` set. `terraform destroy` now requires manual disable first.
 
 ---
 
@@ -104,78 +81,29 @@ lifecycle:
 
 ---
 
-## 5. Grafana Loki Data Source — Automated Provisioning
+## 5. Grafana Loki Data Source — Automated Provisioning ✅ Implemented
 
-**File:** `modules/eks-addons/main.tf` → `helm_release.kube_prometheus_stack`
+**File:** `modules/eks-addons/main.tf`
 
-**Problem:** Loki is deployed but Grafana doesn't know about it. Currently requires a manual Grafana UI step to add the data source.
-
-**Fix:** Add Grafana datasource via helm values:
-```hcl
-set {
-  name  = "grafana.additionalDataSources[0].name"
-  value = "Loki"
-}
-set {
-  name  = "grafana.additionalDataSources[0].type"
-  value = "loki"
-}
-set {
-  name  = "grafana.additionalDataSources[0].url"
-  value = "http://loki.monitoring.svc.cluster.local:3100"
-}
-set {
-  name  = "grafana.additionalDataSources[0].access"
-  value = "proxy"
-}
-```
-
-**Impact:** Logs queryable in Grafana immediately after deploy, no manual config.
+Loki datasource (`additionalDataSources[0]`) auto-provisioned in kube_prometheus_stack helm values. Logs visible in Grafana on first login, no manual step.
 
 ---
 
-## 6. Grafana Admin Password via Secrets Manager
+## 6. Grafana Admin Password via Secrets Manager ✅ Implemented
 
-**File:** `modules/eks-addons/main.tf` → `helm_release.kube_prometheus_stack`
+**File:** `modules/eks-addons/main.tf`
 
-**Problem:** Default Grafana admin password is `prom-operator` (well-known default). No rotation.
+`random_password.grafana_admin` (24 chars, no specials) created. Stored at `/bookstore/grafana-admin` in Secrets Manager. Injected via `set_sensitive { grafana.adminPassword }`. ARN in `grafana_admin_secret_arn` output.
 
-**Fix:** Create a random password in Terraform, store in Secrets Manager, inject via helm:
-```hcl
-resource "random_password" "grafana_admin" {
-  length  = 24
-  special = false
-}
-
-resource "aws_secretsmanager_secret_version" "grafana_admin" {
-  secret_id     = aws_secretsmanager_secret.grafana_admin.id
-  secret_string = random_password.grafana_admin.result
-}
-
-# In helm_release.kube_prometheus_stack:
-set_sensitive {
-  name  = "grafana.adminPassword"
-  value = random_password.grafana_admin.result
-}
-```
-
-**Impact:** No default credentials. Password in Secrets Manager, rotatable.
+Retrieve password: `aws secretsmanager get-secret-value --secret-id /bookstore/grafana-admin --query SecretString --output text`
 
 ---
 
-## 7. RDS Enhanced Monitoring → Performance Insights
+## 7. RDS Enhanced Monitoring → Performance Insights ✅ Implemented
 
 **File:** `modules/rds/main.tf`
 
-**Current:** `performance_insights_enabled = false`
-
-**Fix:**
-```hcl
-performance_insights_enabled          = true
-performance_insights_retention_period = 7   # days; free tier
-```
-
-**Impact:** Query-level DB metrics visible in RDS console. Diagnose slow queries, connection spikes, lock waits without third-party tooling. `db.t3.micro` supports Performance Insights.
+`performance_insights_enabled = true`, `performance_insights_retention_period = 7` (free tier, 7-day window).
 
 ---
 
@@ -210,19 +138,19 @@ In CI (`.github/workflows/`), add a `services.mysql` block to run the test conta
 
 ---
 
-## 9. CloudFront CDN for Frontend
+## 9. CloudFront CDN for Frontend ✅ Implemented
 
-**Current:** Frontend served directly from Nginx Ingress → EKS pod. Every request hits the cluster.
+**Files:** `main.tf`, `variables.tf`, `outputs.tf`
 
-**Improvement:** Put AWS CloudFront in front of the frontend service:
-- Static assets (`/static/*`, `/assets/*`) cached at edge globally
-- Cache-Control headers set in React build
-- WAF rules attached to CloudFront distribution
-- Origin: `bookstore.b17facebook.xyz`
+`aws_cloudfront_distribution.frontend` created (gated on `enable_cloudfront = true`). ACM cert auto-created in us-east-1 via `aws.secondary` provider (CloudFront requirement). Static assets cached at edge (`/static/*` TTL 7d). `cloudfront_domain` Terraform output added.
 
-**Terraform:** Add `aws_cloudfront_distribution` resource pointing to the domain. Route53 primary record points to CloudFront instead of nginx NLB.
-
-**Impact:** Faster page loads globally, reduced EKS pod traffic, WAF protection with no code changes.
+**Enable:**
+```hcl
+# terraform.tfvars
+enable_cloudfront = true
+primary_alb_dns   = "<nginx-nlb-hostname>"
+```
+Then `terraform apply`.
 
 ---
 
@@ -310,23 +238,19 @@ Each overlay is a separate ArgoCD Application pointing to a different namespace 
 
 ---
 
-## 14. Secret Rotation Automation
+## 14. Secret Rotation Automation ✅ Implemented
 
-**Current:** ESO refreshes DB credentials every 1h, but there's no mechanism to rotate the actual RDS password in Secrets Manager.
+**Files:** `modules/rds/main.tf`, `modules/rds/variables.tf`
 
-**Improvement:** Enable AWS Secrets Manager automatic rotation:
+`aws_secretsmanager_secret_rotation.db_credentials` added (count=0 when `rotation_lambda_arn=""`, count=1 when ARN provided). Variables `rotation_lambda_arn` (default `""`) and `rotation_days` (default `30`) added.
+
+**To activate:** Deploy the [AWS single-user MySQL rotation Lambda](https://github.com/aws-samples/aws-secrets-manager-rotation-lambdas) then:
 ```hcl
-resource "aws_secretsmanager_secret_rotation" "db" {
-  secret_id           = module.rds.db_credentials_secret_arn   # was master_user_secret_arn (pre-phase2)
-  rotation_rules {
-    automatically_after_days = 30
-  }
-}
+# terraform.tfvars
+rotation_lambda_arn = "arn:aws:lambda:us-west-1:<ACCOUNT_ID>:function:SecretsManagerMySQLRotation"
 ```
 
-ESO will pick up the new value within 1h. Backend doesn't restart — connection pool re-establishes on next connect.
-
-**Impact:** Credentials rotate automatically, no manual intervention, meets compliance rotation requirements.
+ESO picks up rotated value within 1h — no pod restart needed.
 
 ---
 
@@ -542,25 +466,25 @@ cluster_version = "1.32"   # was 1.31
 
 | Priority | Item | Effort | Impact |
 |---|---|---|---|
-| P0 | Fix AnalysisTemplate division-by-zero (#1) | 5 min | Blocks safe canary |
-| P0 | Enable RDS deletion protection (#2) | 1 min | Data loss risk |
+| P0 | ~~Fix AnalysisTemplate division-by-zero (#1)~~ | ✅ done | Blocks safe canary |
+| P0 | ~~Enable RDS deletion protection (#2)~~ | ✅ done | Data loss risk |
 | P0 | Enable S3 Terraform state (#3) | 15 min | Team blocker |
 | P0 | Alertmanager Slack/email routing (#15) | 1 hour | Silent alerts = blind ops |
 | P1 | Graceful shutdown (#4) | 1 hour | User-visible 502s on deploy |
 | P1 | ~~PodDisruptionBudget frontend (#16)~~ | ✅ done | Zero-downtime node drain |
 | P1 | ~~ResourceQuota bookstore namespace (#21)~~ | ✅ done | Noisy-neighbour protection |
-| P1 | Grafana Loki data source auto (#5) | 30 min | Ops friction |
+| P1 | ~~Grafana Loki data source auto (#5)~~ | ✅ done | Ops friction |
 | P1 | Backend integration tests (#8) | 2 hours | Quality gate |
 | P1 | ~~ECR lifecycle policies (#17)~~ | ✅ done | Unbounded storage cost |
 | P2 | ~~Terraform drift detection (#18)~~ | ✅ done | Catch console changes daily |
 | P2 | ~~Secrets Manager cross-region replication (#19)~~ | ✅ done | DR secret missing in us-east-1 |
-| P2 | Grafana admin password (#6) | 30 min | Security hygiene |
-| P2 | RDS Performance Insights (#7) | 5 min | Observability |
-| P2 | Secret rotation (#14) | 30 min | Compliance |
+| P2 | ~~Grafana admin password (#6)~~ | ✅ done | Security hygiene |
+| P2 | ~~RDS Performance Insights (#7)~~ | ✅ done | Observability |
+| P2 | ~~Secret rotation (#14)~~ | ✅ done | Compliance |
 | P3 | Kyverno policies (#10) | 2 hours | Platform maturity |
 | P3 | Image signing with Cosign (#20) | 2 hours | Supply chain security |
 | P3 | ~~EKS upgrade runbook (#22)~~ | ✅ done | Ops readiness before EOL |
-| P3 | CloudFront CDN (#9) | 3 hours | Performance |
+| P3 | ~~CloudFront CDN (#9)~~ | ✅ done | Performance |
 | P3 | Velero backup (#12) | 2 hours | DR completeness |
 | P4 | Karpenter (#11) | 1 day | Cost optimization |
 | P4 | GitOps promotion pipeline (#13) | 1 day | Process maturity |

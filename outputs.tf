@@ -58,3 +58,13 @@ output "loki_service_url" {
   description = "Loki service URL — add as data source in Grafana"
   value       = module.eks_addons.loki_service
 }
+
+output "grafana_admin_secret_arn" {
+  description = "Secrets Manager secret ARN for Grafana admin password — retrieve: aws secretsmanager get-secret-value --secret-id /bookstore/grafana-admin"
+  value       = module.eks_addons.grafana_admin_secret_arn
+}
+
+output "cloudfront_domain" {
+  description = "CloudFront distribution domain (null when enable_cloudfront=false)"
+  value       = var.enable_cloudfront && var.primary_alb_dns != "" ? aws_cloudfront_distribution.frontend[0].domain_name : null
+}
