@@ -4,7 +4,6 @@ metadata:
   name: backend-config
   namespace: bookstore
 data:
-  DB_HOST: "mysql-service"
   DB_PORT: "3306"
   DB_NAME: "test"
   APP_PORT: "3000"

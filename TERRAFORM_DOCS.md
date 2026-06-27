@@ -94,8 +94,8 @@ Outputs expose values that are useful after `terraform apply` without requiring 
 | Output | Sensitive | What to use it for |
 |--------|-----------|-------------------|
 | `vpc_id` | No | Pass to other tools, verify in AWS console |
-| `rds_endpoint` | No | Connect to RDS manually, configure DB_HOST |
-| `rds_secret_arn` | **Yes** | Pass to ESO configuration, retrieve password |
+| `rds_endpoint` | No | Connect to RDS manually for debugging |
+| `rds_secret_arn` | **Yes** | ARN of `/bookstore/db-credentials` — contains DB_USERNAME, DB_PASSWORD, DB_HOST |
 | `frontend_repo_url` | No | Build and push Docker images manually |
 | `backend_repo_url` | No | Build and push Docker images manually |
 | `eks_cluster_name` | No | Run `aws eks update-kubeconfig` |
@@ -103,7 +103,7 @@ Outputs expose values that are useful after `terraform apply` without requiring 
 | `eks_oidc_provider_arn` | No | Create IRSA roles for service accounts |
 | `github_oidc_role_arn` | No | Paste into `AWS_ROLE_ARN` GitHub Secret |
 
-**Why `sensitive = true` on `rds_secret_arn`?** The ARN itself isn't secret, but marking it sensitive prevents Terraform from printing it in plan/apply output. Since the ARN reveals your account ID and secret name, it's reasonable to hide it from CI logs.
+**Why `sensitive = true` on `rds_secret_arn`?** The ARN reveals your account ID and secret name. Marking it sensitive prevents Terraform from printing it in plan/apply output and CI logs.
 
 ---
 
@@ -252,12 +252,34 @@ resource "aws_acm_certificate" "this" {
 ### `modules/rds/` — MySQL Database
 
 ```hcl
+resource "random_password" "db_password" {
+  length           = 32
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}?"
+}
+
+resource "aws_secretsmanager_secret" "db_credentials" {
+  name                    = "/bookstore/db-credentials"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "db_credentials" {
+  secret_id = aws_secretsmanager_secret.db_credentials.id
+  secret_string = jsonencode({
+    DB_USERNAME = var.db_username
+    DB_PASSWORD = random_password.db_password.result
+    DB_HOST     = aws_db_instance.db.endpoint
+  })
+}
+
 resource "aws_db_instance" "db" {
   engine         = "mysql"
   engine_version = "8.0"
   instance_class = "db.t3.micro"
 
-  manage_master_user_password = true   # password in Secrets Manager, never in code
+  username = var.db_username
+  password = random_password.db_password.result
+
   multi_az                    = true   # standby replica in second AZ
   storage_encrypted           = true   # AES-256 via KMS
 
@@ -271,11 +293,16 @@ resource "aws_db_instance" "db" {
 }
 ```
 
-**`manage_master_user_password = true`** — This is the key security feature. AWS automatically generates a strong random password and stores it in AWS Secrets Manager at `/bookstore/db-credentials`. The password is never in Terraform code, never in `terraform.tfstate`, and never in any log. To retrieve it:
+**`random_password`** — Generates a 32-char cryptographically random password at `terraform apply` time. Stored in TF state (encrypted at rest in S3). For higher security, swap for Vault or AWS Secrets Manager rotation — but for this demo level the trade-off is acceptable.
+
+**`aws_secretsmanager_secret` at `/bookstore/db-credentials`** — Created by Terraform in the same apply as RDS. Holds all three connection values: `DB_USERNAME`, `DB_PASSWORD`, and `DB_HOST` (the RDS endpoint). ESO reads this path directly — no manual secret creation needed.
+
+To inspect after apply:
 ```bash
 aws secretsmanager get-secret-value \
-  --secret-id $(terraform output -raw rds_secret_arn) \
-  --query SecretString --output text
+  --secret-id /bookstore/db-credentials \
+  --region us-west-1 \
+  --query SecretString --output text | jq
 ```
 
 **`multi_az = true`** — RDS maintains a synchronous standby replica in a different AZ. If the primary fails (AZ outage, hardware failure), RDS automatically promotes the standby. Failover typically takes 60–120 seconds. The endpoint DNS name stays the same — your application reconnects automatically.
@@ -516,7 +543,7 @@ main.tf
     ├── module.acm (independent)
     │
     ├── module.rds (needs rds_sg_id, private_subnet_ids[4,5])
-    │       └─── outputs: rds_endpoint, master_user_secret_arn
+    │       └─── outputs: rds_endpoint, db_credentials_secret_arn
     │
     ├── module.route53 (needs vpc_id, rds_endpoint)
     │
