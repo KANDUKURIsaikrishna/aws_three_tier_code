@@ -1,8 +1,24 @@
 terraform {
   required_providers {
-    aws  = { source = "hashicorp/aws",  version = "~> 5.0" }
-    helm = { source = "hashicorp/helm", version = "~> 2.0" }
+    aws    = { source = "hashicorp/aws",    version = "~> 5.0" }
+    helm   = { source = "hashicorp/helm",   version = "~> 2.0" }
+    random = { source = "hashicorp/random", version = "~> 3.0" }
   }
+}
+
+resource "random_password" "grafana_admin" {
+  length  = 24
+  special = false   # Grafana helm value rejects some special chars in JSON
+}
+
+resource "aws_secretsmanager_secret" "grafana_admin" {
+  name                    = "/bookstore/grafana-admin"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "grafana_admin" {
+  secret_id     = aws_secretsmanager_secret.grafana_admin.id
+  secret_string = random_password.grafana_admin.result
 }
 
 # ── EBS CSI driver — policy must exist before the addon or pods stay stuck ─────
@@ -116,6 +132,35 @@ resource "helm_release" "kube_prometheus_stack" {
     name  = "prometheus.prometheusSpec.retention"
     value = "24h"
   }
+
+  set_sensitive {
+    name  = "grafana.adminPassword"
+    value = random_password.grafana_admin.result
+  }
+
+  # Loki data source — auto-provisioned so logs appear in Grafana on first login
+  set {
+    name  = "grafana.additionalDataSources[0].name"
+    value = "Loki"
+  }
+  set {
+    name  = "grafana.additionalDataSources[0].type"
+    value = "loki"
+  }
+  set {
+    name  = "grafana.additionalDataSources[0].url"
+    value = "http://loki.monitoring.svc.cluster.local:3100"
+  }
+  set {
+    name  = "grafana.additionalDataSources[0].access"
+    value = "proxy"
+  }
+  set {
+    name  = "grafana.additionalDataSources[0].isDefault"
+    value = "false"
+  }
+
+  depends_on = [aws_secretsmanager_secret_version.grafana_admin]
 }
 
 # ── Loki (log aggregation) ────────────────────────────────────────────────────

@@ -63,8 +63,9 @@ resource "aws_db_instance" "db" {
   deletion_protection = var.deletion_protection
 
   # ── Performance & Monitoring ──────────────────────────────────────
-  performance_insights_enabled = false
-  monitoring_interval          = 60
+  performance_insights_enabled          = true
+  performance_insights_retention_period = 7
+  monitoring_interval                   = 60
   monitoring_role_arn                   = aws_iam_role.rds_monitoring.arn
   enabled_cloudwatch_logs_exports       = ["error", "general", "slowquery"]
 
@@ -91,4 +92,19 @@ resource "aws_iam_role" "rds_monitoring" {
 resource "aws_iam_role_policy_attachment" "rds_monitoring" {
   role       = aws_iam_role.rds_monitoring.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"
+}
+
+# ── Secret Rotation ───────────────────────────────────────────────────────────
+# Requires a rotation Lambda ARN. Deploy the AWS-provided single-user rotation
+# Lambda (SecretsManager-RDSMySQLRotationSingleUser) and pass its ARN via
+# var.rotation_lambda_arn. Leave empty to skip rotation (demo/dev default).
+
+resource "aws_secretsmanager_secret_rotation" "db_credentials" {
+  count               = var.rotation_lambda_arn != "" ? 1 : 0
+  secret_id           = aws_secretsmanager_secret.db_credentials.id
+  rotation_lambda_arn = var.rotation_lambda_arn
+
+  rotation_rules {
+    automatically_after_days = var.rotation_days
+  }
 }

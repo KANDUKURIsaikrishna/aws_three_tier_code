@@ -80,3 +80,15 @@ variable "secondary_region" {
   type        = string
   default     = ""
 }
+
+variable "rotation_lambda_arn" {
+  description = "ARN of the Secrets Manager rotation Lambda. Empty string disables automatic rotation. Deploy aws-samples/aws-secrets-manager-rotation-lambdas (single-user MySQL) to get the ARN."
+  type        = string
+  default     = ""
+}
+
+variable "rotation_days" {
+  description = "Number of days between automatic secret rotations."
+  type        = number
+  default     = 30
+}

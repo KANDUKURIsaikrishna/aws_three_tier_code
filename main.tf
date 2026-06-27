@@ -91,7 +91,7 @@ module "rds" {
   ]
   multi_az                = true
   backup_retention_period = 7
-  deletion_protection     = false
+  deletion_protection     = true
   secondary_region        = var.secondary_region
 }
 
@@ -224,4 +224,104 @@ module "eks_addons" {
   node_role_name    = module.eks.node_role_name
 
   depends_on = [module.eks]
+}
+
+# ── CloudFront CDN (optional — set enable_cloudfront=true after first apply) ──
+# CloudFront ACM cert MUST be in us-east-1 — uses the secondary provider alias.
+
+resource "aws_acm_certificate" "cloudfront" {
+  count             = var.enable_cloudfront && var.primary_alb_dns != "" ? 1 : 0
+  provider          = aws.secondary
+  domain_name       = var.domain
+  validation_method = "DNS"
+
+  subject_alternative_names = ["*.${var.domain}"]
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_cloudfront_distribution" "frontend" {
+  count   = var.enable_cloudfront && var.primary_alb_dns != "" ? 1 : 0
+  enabled = true
+  aliases = [var.domain, "www.${var.domain}"]
+  comment = "bookstore frontend CDN"
+
+  origin {
+    domain_name = var.primary_alb_dns
+    origin_id   = "nginx-nlb"
+
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
+  default_cache_behavior {
+    target_origin_id       = "nginx-nlb"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+
+    forwarded_values {
+      query_string = true
+      headers      = ["Host", "Authorization"]
+      cookies { forward = "none" }
+    }
+
+    min_ttl     = 0
+    default_ttl = 0
+    max_ttl     = 0
+  }
+
+  # Cache static assets at edge
+  ordered_cache_behavior {
+    path_pattern           = "/static/*"
+    target_origin_id       = "nginx-nlb"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+
+    forwarded_values {
+      query_string = false
+      cookies { forward = "none" }
+    }
+
+    min_ttl     = 86400
+    default_ttl = 604800
+    max_ttl     = 31536000
+  }
+
+  restrictions {
+    geo_restriction { restriction_type = "none" }
+  }
+
+  viewer_certificate {
+    acm_certificate_arn      = aws_acm_certificate.cloudfront[0].arn
+    ssl_support_method       = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2021"
+  }
+
+  tags = { Name = "bookstore-cdn" }
+
+  depends_on = [aws_acm_certificate.cloudfront]
+}
+
+# When CloudFront is enabled, Route53 primary record points to CF distribution
+resource "aws_route53_record" "primary_cf" {
+  count   = var.enable_cloudfront && var.primary_alb_dns != "" ? 1 : 0
+  zone_id = aws_route53_zone.public.zone_id
+  name    = var.domain
+  type    = "CNAME"
+  ttl     = 60
+  records = [aws_cloudfront_distribution.frontend[0].domain_name]
+
+  failover_routing_policy { type = "PRIMARY" }
+  set_identifier  = "primary-cf"
+  health_check_id = aws_route53_health_check.primary.id
 }
