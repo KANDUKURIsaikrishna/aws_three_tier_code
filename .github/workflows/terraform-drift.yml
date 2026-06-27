@@ -1,0 +1,60 @@
+name: Terraform Drift Detection
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 06:00 UTC daily
+  workflow_dispatch:       # allow manual trigger
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_VERSION: "1.10.0"
+  AWS_REGION: us-west-1
+
+jobs:
+  drift:
+    name: Detect Terraform Drift
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Terraform Plan (drift check)
+        id: plan
+        run: |
+          terraform plan -detailed-exitcode -input=false -no-color 2>&1 | tee plan_output.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: No drift
+        if: steps.plan.outputs.exitcode == '0'
+        run: echo "No drift detected. Infrastructure matches Terraform state."
+
+      - name: Drift detected — notify
+        if: steps.plan.outputs.exitcode == '2'
+        run: |
+          echo "DRIFT DETECTED — infrastructure diverged from Terraform state."
+          cat plan_output.txt
+          exit 1
+
+      - name: Plan error
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "Terraform plan failed (not a drift — check auth or state)."
+          cat plan_output.txt
+          exit 1

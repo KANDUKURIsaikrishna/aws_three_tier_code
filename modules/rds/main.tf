@@ -7,6 +7,13 @@ resource "random_password" "db_password" {
 resource "aws_secretsmanager_secret" "db_credentials" {
   name                    = "/bookstore/db-credentials"
   recovery_window_in_days = 0
+
+  dynamic "replica" {
+    for_each = var.secondary_region != "" ? [var.secondary_region] : []
+    content {
+      region = replica.value
+    }
+  }
 }
 
 resource "aws_secretsmanager_secret_version" "db_credentials" {
