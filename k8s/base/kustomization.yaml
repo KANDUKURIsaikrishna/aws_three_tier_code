@@ -16,6 +16,7 @@ resources:
 - ingress/ingress.yaml
 - network-policy/network-policy.yaml
 - pdb/pdb.yaml
+- quota.yaml
 - monitoring/servicemonitor.yaml
 - monitoring/prometheus-rules.yaml
 - monitoring/analysis-template.yaml

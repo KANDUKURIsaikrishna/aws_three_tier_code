@@ -92,6 +92,7 @@ module "rds" {
   multi_az                = true
   backup_retention_period = 7
   deletion_protection     = false
+  secondary_region        = var.secondary_region
 }
 
 # ── RDS Cross-Region Backup Replication ───────────────────────────────────────

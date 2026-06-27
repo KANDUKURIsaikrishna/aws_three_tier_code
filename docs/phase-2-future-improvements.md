@@ -362,71 +362,19 @@ Store `slack_webhook_url` in Secrets Manager, inject via Terraform variable mark
 
 ---
 
-## 16. PodDisruptionBudget for Frontend
+## 16. PodDisruptionBudget for Frontend ✅ Already Implemented
 
-**File:** New `k8s/base/frontend/pdb.yaml`
+**File:** `k8s/base/pdb/pdb.yaml`
 
-**Problem:** Frontend runs as a `Deployment` with default replica count. During node drain (maintenance, Karpenter consolidation), all frontend pods can be evicted simultaneously → 100% downtime.
-
-**Fix:**
-```yaml
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: frontend-pdb
-  namespace: bookstore
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app: frontend
-```
-
-Add to `k8s/base/kustomization.yaml` resources list.
-
-**Impact:** Node drain keeps at least 1 frontend pod running. Zero-downtime maintenance.
+Both `backend-pdb` and `frontend-pdb` (`minAvailable: 1`) are present and included in `k8s/base/kustomization.yaml`. No action needed.
 
 ---
 
-## 17. ECR Lifecycle Policies
+## 17. ECR Lifecycle Policies ✅ Already Implemented
 
 **File:** `modules/ecr/main.tf`
 
-**Problem:** Every CI push creates a new image tag. No cleanup → ECR storage grows unbounded. 1000 images × 200MB = 200GB = ~$9/month wasted.
-
-**Fix:** Add lifecycle policy to each ECR repo:
-```hcl
-resource "aws_ecr_lifecycle_policy" "backend" {
-  repository = aws_ecr_repository.backend.name
-  policy = jsonencode({
-    rules = [{
-      rulePriority = 1
-      description  = "Keep last 20 tagged images"
-      selection = {
-        tagStatus   = "tagged"
-        tagPrefixList = ["v"]
-        countType   = "imageCountMoreThan"
-        countNumber = 20
-      }
-      action = { type = "expire" }
-    }, {
-      rulePriority = 2
-      description  = "Expire untagged after 7 days"
-      selection = {
-        tagStatus  = "untagged"
-        countType  = "sinceImagePushed"
-        countUnit  = "days"
-        countNumber = 7
-      }
-      action = { type = "expire" }
-    }]
-  })
-}
-```
-
-Apply same policy to `bookstore-frontend` repo.
-
-**Impact:** Bounded storage cost, no manual cleanup needed.
+`aws_ecr_lifecycle_policy` resource exists, applied to all repos via `for_each`. Retains last `var.image_retention_count` images (default 10). No action needed.
 
 ---
 
@@ -599,19 +547,19 @@ cluster_version = "1.32"   # was 1.31
 | P0 | Enable S3 Terraform state (#3) | 15 min | Team blocker |
 | P0 | Alertmanager Slack/email routing (#15) | 1 hour | Silent alerts = blind ops |
 | P1 | Graceful shutdown (#4) | 1 hour | User-visible 502s on deploy |
-| P1 | PodDisruptionBudget frontend (#16) | 15 min | Zero-downtime node drain |
-| P1 | ResourceQuota bookstore namespace (#21) | 10 min | Noisy-neighbour protection |
+| P1 | ~~PodDisruptionBudget frontend (#16)~~ | ✅ done | Zero-downtime node drain |
+| P1 | ~~ResourceQuota bookstore namespace (#21)~~ | ✅ done | Noisy-neighbour protection |
 | P1 | Grafana Loki data source auto (#5) | 30 min | Ops friction |
 | P1 | Backend integration tests (#8) | 2 hours | Quality gate |
-| P1 | ECR lifecycle policies (#17) | 30 min | Unbounded storage cost |
-| P2 | Terraform drift detection (#18) | 1 hour | Catch console changes daily |
-| P2 | Secrets Manager cross-region replication (#19) | 15 min | DR secret missing in us-east-1 |
+| P1 | ~~ECR lifecycle policies (#17)~~ | ✅ done | Unbounded storage cost |
+| P2 | ~~Terraform drift detection (#18)~~ | ✅ done | Catch console changes daily |
+| P2 | ~~Secrets Manager cross-region replication (#19)~~ | ✅ done | DR secret missing in us-east-1 |
 | P2 | Grafana admin password (#6) | 30 min | Security hygiene |
 | P2 | RDS Performance Insights (#7) | 5 min | Observability |
 | P2 | Secret rotation (#14) | 30 min | Compliance |
 | P3 | Kyverno policies (#10) | 2 hours | Platform maturity |
 | P3 | Image signing with Cosign (#20) | 2 hours | Supply chain security |
-| P3 | EKS upgrade runbook (#22) | 2 hours | Ops readiness before EOL |
+| P3 | ~~EKS upgrade runbook (#22)~~ | ✅ done | Ops readiness before EOL |
 | P3 | CloudFront CDN (#9) | 3 hours | Performance |
 | P3 | Velero backup (#12) | 2 hours | DR completeness |
 | P4 | Karpenter (#11) | 1 day | Cost optimization |

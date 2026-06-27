@@ -74,3 +74,9 @@ variable "max_allocated_storage" {
   type        = number
   default     = 100
 }
+
+variable "secondary_region" {
+  description = "Secondary AWS region for Secrets Manager replication. Empty string disables replication."
+  type        = string
+  default     = ""
+}
