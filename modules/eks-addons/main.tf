@@ -98,7 +98,11 @@ resource "helm_release" "kube_prometheus_stack" {
   }
   set {
     name  = "alertmanager.enabled"
-    value = "false"
+    value = "true"
+  }
+  set {
+    name  = "alertmanager.alertmanagerSpec.replicas"
+    value = "1"
   }
   set {
     name  = "grafana.replicas"
@@ -112,6 +116,33 @@ resource "helm_release" "kube_prometheus_stack" {
     name  = "prometheus.prometheusSpec.retention"
     value = "24h"
   }
+}
+
+# ── Loki (log aggregation) ────────────────────────────────────────────────────
+
+resource "helm_release" "loki" {
+  name             = "loki"
+  repository       = "https://grafana.github.io/helm-charts"
+  chart            = "loki-stack"
+  namespace        = "monitoring"
+  create_namespace = false   # monitoring namespace created by kube-prometheus-stack
+  wait             = true
+  timeout          = 300
+
+  set {
+    name  = "loki.persistence.enabled"
+    value = "false"   # demo: no PVC for Loki
+  }
+  set {
+    name  = "promtail.enabled"
+    value = "true"
+  }
+  set {
+    name  = "grafana.enabled"
+    value = "false"   # use Grafana from kube-prometheus-stack
+  }
+
+  depends_on = [helm_release.kube_prometheus_stack]
 }
 
 # ── Argo Rollouts ─────────────────────────────────────────────────────────────

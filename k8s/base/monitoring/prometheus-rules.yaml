@@ -1,0 +1,46 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bookstore-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+  - name: bookstore.pods
+    rules:
+    - alert: PodCrashLooping
+      expr: |
+        rate(kube_pod_container_status_restarts_total{namespace="bookstore"}[5m]) * 60 > 1
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Pod {{ $labels.pod }} crash-looping"
+        description: "Container {{ $labels.container }} in pod {{ $labels.pod }} restarting >1/min for 5m."
+
+  - name: bookstore.http
+    rules:
+    - alert: HighErrorRate
+      expr: |
+        sum(rate(nginx_ingress_controller_requests{status=~"5..",ingress="bookstore-ingress"}[2m]))
+        /
+        sum(rate(nginx_ingress_controller_requests{ingress="bookstore-ingress"}[2m])) > 0.05
+      for: 2m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High 5xx error rate on bookstore ingress"
+        description: "Error rate >5% for 2m. Current: {{ $value | humanizePercentage }}."
+
+  - name: bookstore.database
+    rules:
+    - alert: DBConnectionExhaustion
+      expr: |
+        sum(nodejs_active_handles_total{job="backend"}) > 90
+      for: 1m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Backend approaching DB connection limit"
+        description: "Active handles {{ $value }} — possible connection pool exhaustion."

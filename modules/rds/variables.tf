@@ -68,3 +68,9 @@ variable "kms_key_arn" {
   type        = string
   default     = null
 }
+
+variable "max_allocated_storage" {
+  description = "Upper limit for RDS storage autoscaling in GB. 0 = disabled."
+  type        = number
+  default     = 100
+}
