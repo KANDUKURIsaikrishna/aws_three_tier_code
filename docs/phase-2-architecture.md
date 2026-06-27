@@ -499,10 +499,10 @@ terraform plan -detailed-exitcode
 
 ### Region Failover Runbook (Manual)
 
-1. Restore RDS backup in us-east-1 (automated backup replication configured)
-2. Update `/bookstore/db-credentials` replica in us-east-1 with new `DB_HOST`
-3. Deploy secondary EKS cluster in us-east-1 (Terraform secondary-region module — Phase 3)
-4. ECR images already replicated to us-east-1 registry
+1. Restore RDS backup in us-west-2 (automated backup replication configured)
+2. Update `/bookstore/db-credentials` replica in us-west-2 with new `DB_HOST`
+3. Deploy secondary EKS cluster in us-west-2 (Terraform secondary-region module — Phase 3)
+4. ECR images already replicated to us-west-2 registry
 5. Route53 health check detects primary failure → SECONDARY record activates
 6. ESO in secondary cluster reads SM replica → credentials available
 
