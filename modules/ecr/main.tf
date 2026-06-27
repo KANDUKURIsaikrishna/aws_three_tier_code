@@ -35,3 +35,23 @@ resource "aws_ecr_lifecycle_policy" "this" {
     }]
   })
 }
+
+# Cross-region replication — secondary EKS can pull images during DR failover.
+resource "aws_ecr_replication_configuration" "secondary" {
+  count = var.secondary_region != "" ? 1 : 0
+
+  replication_configuration {
+    rule {
+      destination {
+        region      = var.secondary_region
+        registry_id = aws_ecr_repository.this["${var.prefix}-frontend"].registry_id
+      }
+      repository_filter {
+        filter      = var.prefix
+        filter_type = "PREFIX_MATCH"
+      }
+    }
+  }
+
+  depends_on = [aws_ecr_repository.this]
+}

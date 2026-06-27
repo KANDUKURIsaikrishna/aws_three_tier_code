@@ -46,12 +46,12 @@ output "github_oidc_role_arn" {
 
 output "route53_public_zone_id" {
   description = "Route53 public hosted zone ID — add NS records at registrar after first apply"
-  value       = aws_route53_zone.public.zone_id
+  value       = module.route53.public_zone_id
 }
 
 output "route53_public_name_servers" {
   description = "NS records to set at your domain registrar for Route53 to take authority"
-  value       = aws_route53_zone.public.name_servers
+  value       = module.route53.public_name_servers
 }
 
 output "loki_service_url" {
@@ -66,5 +66,5 @@ output "grafana_admin_secret_arn" {
 
 output "cloudfront_domain" {
   description = "CloudFront distribution domain (null when enable_cloudfront=false)"
-  value       = var.enable_cloudfront && var.primary_alb_dns != "" ? aws_cloudfront_distribution.frontend[0].domain_name : null
+  value       = try(aws_cloudfront_distribution.frontend[0].domain_name, null)
 }

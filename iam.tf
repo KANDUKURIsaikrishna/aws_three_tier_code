@@ -7,7 +7,7 @@
 #     --client-id-list sts.amazonaws.com \
 #     --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
 
-data "aws_caller_identity" "current" {}
+# data.aws_caller_identity.current is defined in data.tf
 
 resource "aws_iam_role" "github_oidc" {
   name = "bookstore-github-oidc-role"
