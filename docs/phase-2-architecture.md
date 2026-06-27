@@ -565,20 +565,47 @@ Primary health check failure triggers automatic DNS failover to secondary record
 
 ```
 .
-├── main.tf                  # root module: all AWS resources + module calls
-├── variables.tf             # input variables (domain, github_repo, enable_cloudfront, ...)
-├── outputs.tf               # VPC ID, ECR URLs, EKS endpoint, Grafana secret ARN, ...
-├── versions.tf              # provider versions, S3 backend config (populate before team use)
-├── iam.tf                   # GitHub OIDC role + ECR push policy
+# ── Root module (one concern per file) ──────────────────────────────────────
+├── providers.tf             # aws (primary + secondary alias), helm providers
+├── versions.tf              # required_providers versions, S3 backend config
+├── variables.tf             # all input variables (domain, github_repo, enable_cloudfront, …)
+├── locals.tf                # VPC CIDR + subnet list — shared across multiple modules
+├── data.tf                  # data "aws_caller_identity" — consumed by IAM + CloudTrail
+├── main.tf                  # module calls only (network, security, acm, rds, ecr, eks, eks-addons, route53)
+├── outputs.tf               # VPC ID, ECR URLs, EKS endpoint, Route53 zone, CloudFront domain, …
+├── iam.tf                   # GitHub OIDC role + ECR push policy (root-level IAM)
+│
+# ── Root-level concern files (NOT in modules — see rationale below) ──────────
+├── cloudfront.tf            # ACM cert (us-east-1) + CloudFront distribution
+│                            #   → uses provider = aws.secondary (alias); cannot cleanly
+│                            #     move into child module without providers{} boilerplate
+├── dr.tf                    # RDS automated-backup cross-region replication
+│                            #   → uses provider = aws.secondary (same reason)
+├── cloudtrail.tf            # S3 bucket + policy + CloudTrail trail
+│                            #   → account-level audit control; no single module owns it
+├── guardduty.tf             # GuardDuty detector
+│                            #   → account-level threat detection; same reason
+│
+# ── Child modules ────────────────────────────────────────────────────────────
 ├── modules/
-│   ├── network/             # VPC, subnets, IGW, NAT, route tables, VPC flow logs
-│   ├── security/            # Security groups (EKS, RDS, Nginx)
+│   ├── network/             # VPC, subnets, IGW, NAT GW, route tables, VPC flow logs
+│   ├── security/            # Security groups (EKS nodes, RDS, Nginx)
 │   ├── acm/                 # ACM cert for us-west-1 (EKS ingress TLS)
-│   ├── rds/                 # RDS instance, SM secret, rotation, backup replication
-│   ├── ecr/                 # ECR repos, lifecycle policies, cross-region replication
-│   ├── eks/                 # EKS cluster, OIDC, node group, IAM roles
-│   ├── eks-addons/          # helm_releases: cert-manager, ESO, nginx, ArgoCD, Prometheus, Rollouts, Loki
-│   └── route53/             # Private hosted zone, RDS internal DNS
+│   ├── rds/                 # RDS MySQL, Secrets Manager secret + rotation
+│   ├── ecr/                 # ECR repos, lifecycle policies, cross-region replication config
+│   ├── eks/
+│   │   ├── main.tf          # EKS cluster, OIDC provider, managed node group
+│   │   └── iam.tf           # Cluster IAM role + node group IAM role + policy attachments
+│   ├── eks-addons/
+│   │   ├── main.tf          # required_providers block only
+│   │   ├── ebs-csi.tf       # EBS CSI driver addon
+│   │   ├── cert-manager.tf  # cert-manager Helm release
+│   │   ├── external-secrets.tf  # ESO Helm release
+│   │   ├── ingress.tf       # ingress-nginx Helm release
+│   │   ├── observability.tf # kube-prometheus-stack + Loki Helm releases
+│   │   ├── gitops.tf        # Argo Rollouts + ArgoCD Helm releases
+│   │   └── grafana-secret.tf    # Grafana admin SM secret (recovery_window=7d)
+│   └── route53/             # Public zone, health check, active/passive failover records
 │
 ├── k8s/
 │   ├── base/                # Kustomize base manifests
@@ -620,3 +647,45 @@ Primary health check failure triggers automatic DNS failover to secondary record
     ├── phase-2-future-improvements.md  # backlog + implementation notes
     └── eks-upgrade-runbook.md       # EKS version upgrade procedure
 ```
+
+---
+
+## Terraform Module Design Rationale
+
+### Why are some `.tf` files at root instead of in `modules/`?
+
+Three distinct reasons:
+
+#### 1. Provider alias constraint (`cloudfront.tf`, `dr.tf`)
+
+Both files contain resources that target a secondary AWS region via `provider = aws.secondary`:
+
+- `cloudfront.tf` — ACM certificate in `us-east-1` (CloudFront requirement) + CloudFront distribution
+- `dr.tf` — RDS automated-backup cross-region replication to secondary region
+
+Terraform does **not** transparently pass provider aliases into child modules. To move these into a module you would need:
+1. `providers = { aws.secondary = aws.secondary }` block in every module call
+2. Explicit alias declaration inside the child module's `required_providers`
+
+For 8–84 line files this is pure boilerplate with no benefit. HashiCorp's own guidance: keep resources with provider aliases at root when they don't justify a dedicated module.
+
+#### 2. Account-level cross-cutting concerns (`cloudtrail.tf`, `guardduty.tf`)
+
+- **CloudTrail** — audits the entire AWS account (S3 bucket + bucket policy + trail). Not owned by network, EKS, or RDS — it spans all of them.
+- **GuardDuty** — account-level threat detection; one detector per account.
+
+No child module "owns" account-level resources. Standard Terraform community pattern: account-scope security controls live at root in dedicated files.
+
+#### 3. Shared data sources and locals (`data.tf`, `locals.tf`)
+
+- `data "aws_caller_identity"` is consumed by both the root IAM module (GitHub OIDC trust) and `cloudtrail.tf` (S3 bucket policy). Data sources don't cross module boundaries — if placed inside one module, other modules can't access them.
+- `locals.tf` defines VPC CIDRs and all subnet CIDR/AZ pairs. These are passed as arguments to `module.network`, `module.security`, and `module.eks`. Must be at root to be available everywhere.
+
+### Rule of thumb
+
+| Put at root | Put in module |
+|---|---|
+| Uses `provider = aws.secondary` (alias) | Logically cohesive group of resources (VPC, EKS, RDS) |
+| Account-wide service (CloudTrail, GuardDuty, Config) | Can be reused or independently versioned |
+| Data source consumed by 2+ modules | Single-concern infra with clear ownership |
+| Locals shared across 2+ module calls | — |
