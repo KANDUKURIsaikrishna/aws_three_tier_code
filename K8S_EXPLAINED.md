@@ -181,10 +181,11 @@ A **ConfigMap** is like a `.env` file but stored inside Kubernetes. It holds con
 
 | Setting | Value | What it means |
 |---|---|---|
-| `DB_HOST` | `mysql-service` | The DNS name of the MySQL pod inside the cluster |
 | `DB_PORT` | `3306` | MySQL's standard port number |
 | `DB_NAME` | `test` | The database name |
 | `APP_PORT` | `3000` | The port the Node.js API listens on |
+
+> **Note:** `DB_HOST` is no longer in the ConfigMap. It is injected from `db-secret` via ESO — alongside `DB_USERNAME` and `DB_PASSWORD` — so the RDS endpoint never needs to be hardcoded in git.
 
 The backend pods read these values as environment variables when they start.
 
@@ -200,7 +201,7 @@ It has two parts:
 
 **Part 1 — ClusterSecretStore**: Tells ESO "connect to AWS Secrets Manager in us-west-1 using this service account."
 
-**Part 2 — ExternalSecret**: Says "go to `/bookstore/db-credentials` in Secrets Manager, pull `DB_USERNAME` and `DB_PASSWORD`, and create a Kubernetes Secret called `db-secret` in the `bookstore` namespace."
+**Part 2 — ExternalSecret**: Says "go to `/bookstore/db-credentials` in Secrets Manager, pull `DB_USERNAME`, `DB_PASSWORD`, and `DB_HOST`, and create a Kubernetes Secret called `db-secret` in the `bookstore` namespace." All three values are written to that path by Terraform when RDS is created.
 
 The result is a native Kubernetes Secret that gets **refreshed every hour** automatically. No password ever touches git or the CI pipeline.
 
@@ -282,8 +283,8 @@ Key details:
 | `/tmp` volume | emptyDir | Writable scratch space (needed because root FS is read-only) |
 
 **Environment variables** injected from two places:
-- Non-secret config (`DB_HOST`, `DB_PORT`, `DB_NAME`, `APP_PORT`) → from `backend-config` ConfigMap
-- Secrets (`DB_USERNAME`, `DB_PASSWORD`) → from `db-secret` Kubernetes Secret
+- Non-secret config (`DB_PORT`, `DB_NAME`, `APP_PORT`) → from `backend-config` ConfigMap
+- Secrets (`DB_HOST`, `DB_USERNAME`, `DB_PASSWORD`) → from `db-secret` Kubernetes Secret (populated by ESO from `/bookstore/db-credentials` in Secrets Manager)
 
 **Health checks**:
 - **Readiness probe**: hits `GET /` on port 3000. Kubernetes only sends traffic to a pod after this passes.
@@ -580,7 +581,7 @@ This file tells ArgoCD what to watch and where to deploy it.
 
 | Name | Namespace | Contents |
 |---|---|---|
-| `backend-config` | `bookstore` | DB_HOST, DB_PORT, DB_NAME, APP_PORT |
+| `backend-config` | `bookstore` | DB_PORT, DB_NAME, APP_PORT |
 | `mysql-init` | `bookstore` | SQL script to create schema + seed data |
 
 ---
@@ -589,7 +590,7 @@ This file tells ArgoCD what to watch and where to deploy it.
 
 | Name | Namespace | How created | Contains |
 |---|---|---|---|
-| `db-secret` | `bookstore` | By ESO from AWS Secrets Manager (prod) or manually (dev) | DB_USERNAME, DB_PASSWORD |
+| `db-secret` | `bookstore` | By ESO from AWS Secrets Manager (prod) or manually (dev) | DB_HOST, DB_USERNAME, DB_PASSWORD |
 | `bookstore-tls` | `bookstore` | By cert-manager automatically | TLS certificate + private key |
 
 ---
@@ -658,8 +659,8 @@ backend-service  (ClusterIP, port 80)
     │  load balances across backend pod(s)
     ▼
 backend pod  (Node.js Express API, port 3000)
-    │  reads DB_HOST=mysql-service from ConfigMap
-    │  reads DB_USERNAME, DB_PASSWORD from db-secret
+    │  reads DB_PORT, DB_NAME, APP_PORT from backend-config ConfigMap
+    │  reads DB_HOST, DB_USERNAME, DB_PASSWORD from db-secret (via ESO)
     │  increments http_requests_total Prometheus counter
     ▼
 mysql-service  (headless, port 3306)

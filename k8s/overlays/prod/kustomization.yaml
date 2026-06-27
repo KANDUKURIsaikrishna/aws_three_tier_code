@@ -34,3 +34,12 @@ patches:
         limits:
           cpu: "500m"
           memory: "256Mi"
+- target:
+    group: cert-manager.io
+    version: v1
+    kind: ClusterIssuer
+    name: letsencrypt-prod
+  patch: |-
+    - op: replace
+      path: /spec/acme/email
+      value: kandukurisaikrishna778@gmail.com

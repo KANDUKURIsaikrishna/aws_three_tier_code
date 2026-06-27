@@ -558,7 +558,7 @@ terraform output eks_oidc_provider_arn
 
 ## Part 4 — Bootstrap the EKS Cluster
 
-After `terraform apply` the cluster add-ons are already running. `eks_bootstrap.py` handles the remaining steps that Terraform cannot do: applying the Let's Encrypt ClusterIssuer, creating the IRSA role for External Secrets, validating Secrets Manager credentials, and configuring the ArgoCD Application.
+After `terraform apply` the cluster add-ons are already running. `eks_bootstrap.py` handles the remaining steps that Terraform cannot do: creating the IRSA role for External Secrets and configuring the ArgoCD Application. The ClusterIssuer and DB credentials secret are now managed automatically (by ArgoCD/Kustomize and Terraform respectively).
 
 ### Step 4.1 — Run eks_bootstrap.py
 
@@ -573,9 +573,9 @@ The script runs **8 phases** in order and is safe to re-run (all steps are idemp
 | Phase | Action |
 |---|---|
 | 1 | Sync kubeconfig (`aws eks update-kubeconfig`) |
-| 2 | Apply ClusterIssuer (cert-manager CRDs already exist from Terraform) |
+| 2 | ~~Apply ClusterIssuer~~ — now applied by ArgoCD from `k8s/base/cert-manager/cluster-issuer.yaml` |
 | 3 | Create IRSA role + annotate `external-secrets-sa` service account |
-| 4 | Validate / create AWS Secrets Manager secret (`/bookstore/db-credentials`) |
+| 4 | ~~Create Secrets Manager secret~~ — now created by Terraform at `/bookstore/db-credentials` with DB_USERNAME, DB_PASSWORD, DB_HOST |
 | 5 | Apply ArgoCD Application manifest + patch ArgoCD secret key |
 | 6 | Clear kubectl discovery cache + force ESO resync |
 | 7 | Wait for mysql-0, run DB schema init + seed data |
@@ -593,7 +593,7 @@ Bootstrap complete! ArgoCD will sync within 3 minutes.
 
 If a single phase fails, re-run the script — it picks up where it left off. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for phase-specific errors.
 
-> **Note:** Unlike earlier versions, `eks_bootstrap.py` no longer installs cert-manager, ESO, ingress-nginx, or ArgoCD — Terraform handles all of that. The script only handles what Terraform cannot: OIDC-cluster-specific IRSA bindings, the ClusterIssuer CRD instance, and the ArgoCD Application manifest.
+> **Note:** `eks_bootstrap.py` no longer installs cert-manager, ESO, ingress-nginx, ArgoCD, or manages the ClusterIssuer/DB secret — Terraform and ArgoCD handle all of that. The script only handles what neither can automate: OIDC-cluster-specific IRSA bindings and the ArgoCD Application manifest.
 
 ### Step 4.2 — Access the ArgoCD UI (optional)
 
@@ -1151,9 +1151,9 @@ kubectl argo rollouts abort backend -n bookstore
 | ArgoCD | Terraform (Helm) | `modules/eks-addons/` |
 | Prometheus + Grafana | Terraform (Helm) | `modules/eks-addons/` |
 | Argo Rollouts | Terraform (Helm) | `modules/eks-addons/` |
-| ClusterIssuer | `eks_bootstrap.py` Phase 2 | `cluster-issuer.yaml` |
+| ClusterIssuer | ArgoCD (Kustomize base) | `k8s/base/cert-manager/cluster-issuer.yaml` |
 | IRSA for ESO | `eks_bootstrap.py` Phase 3 | (created via AWS CLI) |
-| DB credentials | AWS Secrets Manager | `eks_bootstrap.py` Phase 4 |
+| DB credentials (`/bookstore/db-credentials`) | Terraform | `modules/rds/main.tf` |
 | ArgoCD Application | `eks_bootstrap.py` Phase 5 | `k8s/argocd/application.yaml` |
 | k8s base manifests | ArgoCD + Kustomize | `k8s/base/` |
 | k8s prod overlay (image tags, HPAs) | ArgoCD + CI/CD | `k8s/overlays/prod/` |

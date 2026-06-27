@@ -6,11 +6,9 @@ namespace: bookstore
 resources:
 - storageclass/gp3.yaml
 - namespace.yaml
+- cert-manager/cluster-issuer.yaml
 - configmaps/backend-config.yaml
 - secrets/external-secret.yaml
-- database/mysql-init-configmap.yaml
-- database/mysql-service.yaml
-- database/mysql-statefulset.yaml
 - backend/rollout.yaml
 - backend/service.yaml
 - frontend/deployment.yaml
@@ -19,3 +17,5 @@ resources:
 - network-policy/network-policy.yaml
 - pdb/pdb.yaml
 - monitoring/servicemonitor.yaml
+- monitoring/prometheus-rules.yaml
+- monitoring/analysis-template.yaml

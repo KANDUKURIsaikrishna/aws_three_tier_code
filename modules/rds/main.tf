@@ -1,3 +1,23 @@
+resource "random_password" "db_password" {
+  length           = 32
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}?"
+}
+
+resource "aws_secretsmanager_secret" "db_credentials" {
+  name                    = "/bookstore/db-credentials"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "db_credentials" {
+  secret_id = aws_secretsmanager_secret.db_credentials.id
+  secret_string = jsonencode({
+    DB_USERNAME = var.db_username
+    DB_PASSWORD = random_password.db_password.result
+    DB_HOST     = aws_db_instance.db.endpoint
+  })
+}
+
 resource "aws_db_subnet_group" "rds_subnet_group" {
   name       = "rds-subnet-group"
   subnet_ids = var.db_subnet_ids
@@ -9,14 +29,12 @@ resource "aws_db_instance" "db" {
   engine            = var.db_engine
   engine_version    = var.db_engine_version
   instance_class    = var.db_instance_class
-  allocated_storage = var.db_allocated_storage
+  allocated_storage     = var.db_allocated_storage
+  max_allocated_storage = var.max_allocated_storage == 0 ? null : var.max_allocated_storage
 
   db_name  = var.db_name
   username = var.db_username
-
-  # AWS manages the master password in Secrets Manager automatically.
-  # No plaintext password in code or TF state.
-  manage_master_user_password = true
+  password = random_password.db_password.result
 
   # ── High Availability ─────────────────────────────────────────────
   multi_az = var.multi_az
