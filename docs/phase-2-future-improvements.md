@@ -1,0 +1,350 @@
+# Phase 2 — Future Improvements
+
+> These are targeted, incremental improvements to the existing Phase 2 architecture.
+> Each item is self-contained — implement in any order based on priority.
+> Phase 3 (second region EKS, full active-active) is tracked separately.
+
+---
+
+## 1. Fix Division-by-Zero in AnalysisTemplate
+
+**File:** `k8s/base/monitoring/analysis-template.yaml`
+
+**Problem:** When ingress traffic is zero, `sum(...) / sum(...)` returns `NaN`. Argo Rollouts treats `NaN` as a failed measurement — rollout aborts even with a healthy new image.
+
+**Fix:**
+```yaml
+query: |
+  (
+    sum(rate(nginx_ingress_controller_requests{status=~"5..",ingress="{{args.ingress-name}}"}[2m]))
+    or vector(0)
+  )
+  /
+  (
+    sum(rate(nginx_ingress_controller_requests{ingress="{{args.ingress-name}}"}[2m]))
+    or vector(1)
+  )
+```
+
+**Impact:** Low risk, high value. Fix before first production canary rollout.
+
+---
+
+## 2. Enable RDS Deletion Protection
+
+**File:** `main.tf` → `module "rds"` block
+
+**Current:** `deletion_protection = false` (intentional for demo destroy/apply cycles)
+
+**Fix:**
+```hcl
+deletion_protection = true
+```
+
+**Impact:** Prevents `terraform destroy` from dropping the production database. One-line change; enable before going live.
+
+---
+
+## 3. Enable S3 Terraform Remote State
+
+**File:** `versions.tf` → `backend "s3"` block
+
+**Current:** Bucket and DynamoDB table names are empty strings — state is stored locally.
+
+**Fix:** Run once, then fill in:
+```bash
+./scripts/bootstrap-tf-state.sh us-west-1
+terraform init -migrate-state
+```
+
+Fill printed values into `versions.tf`:
+```hcl
+backend "s3" {
+  bucket         = "bookstore-terraform-state-<ACCOUNT_ID>"
+  dynamodb_table = "terraform-state-lock"
+  key            = "prod/terraform.tfstate"
+  region         = "us-west-1"
+  encrypt        = true
+}
+```
+
+**Impact:** Required for team use and CI-triggered `terraform apply`. Without this, two people running `apply` concurrently corrupt state.
+
+---
+
+## 4. Graceful Shutdown in Node.js Backend
+
+**File:** `backend/app.js`
+
+**Problem:** When a pod is terminated (rolling update, scale-in), Kubernetes sends `SIGTERM`. Without a handler, Node.js exits immediately — in-flight HTTP requests return 502.
+
+**Fix:** Add before `app.listen(...)`:
+```javascript
+const server = app.listen(PORT, () => console.log(`Listening on ${PORT}`));
+
+process.on('SIGTERM', () => {
+  server.close(() => {
+    db.end();        // close DB connection pool
+    process.exit(0);
+  });
+  // Force-exit after 10s if connections don't drain
+  setTimeout(() => process.exit(1), 10000);
+});
+```
+
+Also add `preStop` hook to the container spec in `rollout.yaml` to delay `SIGTERM` until nginx upstream is removed:
+```yaml
+lifecycle:
+  preStop:
+    exec:
+      command: ["/bin/sh", "-c", "sleep 5"]
+```
+
+**Impact:** Zero dropped requests during canary rollouts and pod restarts.
+
+---
+
+## 5. Grafana Loki Data Source — Automated Provisioning
+
+**File:** `modules/eks-addons/main.tf` → `helm_release.kube_prometheus_stack`
+
+**Problem:** Loki is deployed but Grafana doesn't know about it. Currently requires a manual Grafana UI step to add the data source.
+
+**Fix:** Add Grafana datasource via helm values:
+```hcl
+set {
+  name  = "grafana.additionalDataSources[0].name"
+  value = "Loki"
+}
+set {
+  name  = "grafana.additionalDataSources[0].type"
+  value = "loki"
+}
+set {
+  name  = "grafana.additionalDataSources[0].url"
+  value = "http://loki.monitoring.svc.cluster.local:3100"
+}
+set {
+  name  = "grafana.additionalDataSources[0].access"
+  value = "proxy"
+}
+```
+
+**Impact:** Logs queryable in Grafana immediately after deploy, no manual config.
+
+---
+
+## 6. Grafana Admin Password via Secrets Manager
+
+**File:** `modules/eks-addons/main.tf` → `helm_release.kube_prometheus_stack`
+
+**Problem:** Default Grafana admin password is `prom-operator` (well-known default). No rotation.
+
+**Fix:** Create a random password in Terraform, store in Secrets Manager, inject via helm:
+```hcl
+resource "random_password" "grafana_admin" {
+  length  = 24
+  special = false
+}
+
+resource "aws_secretsmanager_secret_version" "grafana_admin" {
+  secret_id     = aws_secretsmanager_secret.grafana_admin.id
+  secret_string = random_password.grafana_admin.result
+}
+
+# In helm_release.kube_prometheus_stack:
+set_sensitive {
+  name  = "grafana.adminPassword"
+  value = random_password.grafana_admin.result
+}
+```
+
+**Impact:** No default credentials. Password in Secrets Manager, rotatable.
+
+---
+
+## 7. RDS Enhanced Monitoring → Performance Insights
+
+**File:** `modules/rds/main.tf`
+
+**Current:** `performance_insights_enabled = false`
+
+**Fix:**
+```hcl
+performance_insights_enabled          = true
+performance_insights_retention_period = 7   # days; free tier
+```
+
+**Impact:** Query-level DB metrics visible in RDS console. Diagnose slow queries, connection spikes, lock waits without third-party tooling. `db.t3.micro` supports Performance Insights.
+
+---
+
+## 8. Backend Integration Tests Against Real RDS
+
+**File:** `backend/__tests__/` — new file `integration.test.js`
+
+**Problem:** Current vitest tests mock the DB. Schema changes, migration bugs, connection pool exhaustion — none caught by unit tests.
+
+**Fix:** Add a CI job that spins up an RDS-compatible MySQL container and runs real queries:
+```javascript
+// backend/__tests__/integration.test.js
+import { createPool } from '../db.js';
+
+describe('books API — real DB', () => {
+  let pool;
+  beforeAll(async () => {
+    pool = await createPool();
+    await pool.query('CREATE TABLE IF NOT EXISTS books ...');
+  });
+  afterAll(() => pool.end());
+
+  test('POST /books inserts and returns id', async () => { ... });
+  test('GET /books returns list', async () => { ... });
+  test('DELETE /books/:id removes row', async () => { ... });
+});
+```
+
+In CI (`.github/workflows/`), add a `services.mysql` block to run the test container.
+
+**Impact:** Catches real DB bugs before canary ships them.
+
+---
+
+## 9. CloudFront CDN for Frontend
+
+**Current:** Frontend served directly from Nginx Ingress → EKS pod. Every request hits the cluster.
+
+**Improvement:** Put AWS CloudFront in front of the frontend service:
+- Static assets (`/static/*`, `/assets/*`) cached at edge globally
+- Cache-Control headers set in React build
+- WAF rules attached to CloudFront distribution
+- Origin: `bookstore.b17facebook.xyz`
+
+**Terraform:** Add `aws_cloudfront_distribution` resource pointing to the domain. Route53 primary record points to CloudFront instead of nginx NLB.
+
+**Impact:** Faster page loads globally, reduced EKS pod traffic, WAF protection with no code changes.
+
+---
+
+## 10. OPA / Kyverno Policy Enforcement
+
+**Problem:** Any valid YAML can be deployed — no cluster-level guardrails. A developer could deploy a privileged pod or skip resource limits.
+
+**Improvement:** Add Kyverno (simpler than OPA Gatekeeper):
+```bash
+helm install kyverno kyverno/kyverno -n kyverno --create-namespace
+```
+
+Policies to enforce:
+- Require `requests`/`limits` on all containers
+- Disallow `privileged: true`
+- Require `readOnlyRootFilesystem: true`
+- Require image from ECR registry only (no `image: ubuntu:latest`)
+- Require `runAsNonRoot: true`
+
+**Impact:** Policy violations blocked at admission — bad manifests never reach scheduler.
+
+---
+
+## 11. Horizontal Cluster Autoscaler → Karpenter
+
+**Current:** HPA scales pods. Node scaling uses `aws_autoscaling_group` via managed node group — slow (2-3 min per node).
+
+**Improvement:** Replace cluster autoscaler with Karpenter:
+- Provisions nodes in <60 seconds
+- Selects cheapest available instance type automatically
+- Consolidates underutilized nodes (cost saving)
+- Spot + On-Demand mixed fleet
+
+**Terraform:** Add Karpenter IRSA role + helm_release in `modules/eks-addons/main.tf`. Add `NodePool` and `EC2NodeClass` manifests.
+
+**Impact:** Faster scale-out under load spikes. 30-60% cost reduction with spot instances.
+
+---
+
+## 12. Velero Cluster Backup
+
+**Problem:** No backup of Kubernetes resources or PVC data (Prometheus TSDB). Cluster disaster = full rebuild.
+
+**Improvement:** Add Velero with S3 backend:
+```bash
+helm install velero vmware-tanzu/velero \
+  --namespace velero --create-namespace \
+  --set configuration.backupStorageLocation[0].bucket=<S3_BUCKET> \
+  --set configuration.backupStorageLocation[0].provider=aws
+```
+
+Schedule daily backup:
+```yaml
+apiVersion: velero.io/v1
+kind: Schedule
+spec:
+  schedule: "0 2 * * *"
+  template:
+    includedNamespaces: [bookstore, monitoring, argocd]
+    ttl: 720h   # 30 days
+```
+
+**Impact:** 30-day recovery point objective. Restore full cluster state in <30 minutes.
+
+---
+
+## 13. GitOps Promotion: dev → prod Pipeline
+
+**Current:** Direct push to `k8s/overlays/prod` by CI. No staging gate.
+
+**Improvement:** Three-stage GitOps promotion:
+
+```
+feature branch push
+  → CI builds image, pushes to ECR
+  → Updates k8s/overlays/dev (auto-deploy to dev namespace)
+  → Dev tests pass → PR auto-created to update k8s/overlays/staging
+  → Staging smoke tests pass → PR auto-created for prod
+  → Manual approval → merge → ArgoCD deploys to prod
+```
+
+Each overlay is a separate ArgoCD Application pointing to a different namespace (`bookstore-dev`, `bookstore-staging`, `bookstore`).
+
+**Impact:** No untested image ever reaches prod. Rollback = revert the overlay PR.
+
+---
+
+## 14. Secret Rotation Automation
+
+**Current:** ESO refreshes DB credentials every 1h, but there's no mechanism to rotate the actual RDS password in Secrets Manager.
+
+**Improvement:** Enable AWS Secrets Manager automatic rotation:
+```hcl
+resource "aws_secretsmanager_secret_rotation" "db" {
+  secret_id           = module.rds.master_user_secret_arn
+  rotation_rules {
+    automatically_after_days = 30
+  }
+}
+```
+
+ESO will pick up the new value within 1h. Backend doesn't restart — connection pool re-establishes on next connect.
+
+**Impact:** Credentials rotate automatically, no manual intervention, meets compliance rotation requirements.
+
+---
+
+## Priority Order (Suggested)
+
+| Priority | Item | Effort | Risk |
+|---|---|---|---|
+| P0 | Fix AnalysisTemplate division-by-zero (#1) | 5 min | Blocks safe canary |
+| P0 | Enable RDS deletion protection (#2) | 1 min | Data loss risk |
+| P0 | Enable S3 Terraform state (#3) | 15 min | Team blocker |
+| P1 | Graceful shutdown (#4) | 1 hour | User-visible 502s |
+| P1 | Grafana Loki data source auto (#5) | 30 min | Ops friction |
+| P1 | Backend integration tests (#8) | 2 hours | Quality gate |
+| P2 | Grafana admin password (#6) | 30 min | Security hygiene |
+| P2 | RDS Performance Insights (#7) | 5 min | Observability |
+| P2 | Secret rotation (#14) | 30 min | Compliance |
+| P3 | Kyverno policies (#10) | 2 hours | Platform maturity |
+| P3 | CloudFront CDN (#9) | 3 hours | Performance |
+| P3 | Velero backup (#12) | 2 hours | DR completeness |
+| P4 | Karpenter (#11) | 1 day | Cost optimization |
+| P4 | GitOps promotion pipeline (#13) | 1 day | Process maturity |

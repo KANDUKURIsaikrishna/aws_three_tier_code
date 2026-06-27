@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: error-rate
+  namespace: bookstore
+spec:
+  args:
+  - name: ingress-name
+    value: bookstore-ingress
+  metrics:
+  - name: error-rate
+    interval: 30s
+    # Fail rollout if 5xx rate exceeds 1% over 2-minute window
+    failureLimit: 2
+    successCondition: result[0] < 0.01
+    provider:
+      prometheus:
+        address: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+        query: |
+          sum(rate(nginx_ingress_controller_requests{status=~"5..",ingress="{{args.ingress-name}}"}[2m]))
+          /
+          sum(rate(nginx_ingress_controller_requests{ingress="{{args.ingress-name}}"}[2m]))

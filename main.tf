@@ -10,6 +10,19 @@ provider "aws" {
   }
 }
 
+provider "aws" {
+  alias  = "secondary"
+  region = var.secondary_region
+
+  default_tags {
+    tags = {
+      Project     = "bookstore"
+      Environment = var.environment
+      ManagedBy   = "terraform"
+    }
+  }
+}
+
 provider "helm" {
   kubernetes {
     host                   = module.eks.cluster_endpoint
@@ -68,6 +81,7 @@ module "rds" {
   db_engine_version    = "8.0"
   db_instance_class    = "db.t3.micro"
   db_allocated_storage = 25
+  max_allocated_storage = 100
   db_name              = "test"
   db_username          = "admin"
   db_security_group_id = module.security_groups.rds_sg_id
@@ -78,6 +92,16 @@ module "rds" {
   multi_az                = true
   backup_retention_period = 7
   deletion_protection     = false
+}
+
+# ── RDS Cross-Region Backup Replication ───────────────────────────────────────
+# Replicates automated backups to secondary region.
+# In a DR event: restore from backup in secondary region, promote, update DB_HOST.
+
+resource "aws_db_instance_automated_backups_replication" "secondary" {
+  provider                    = aws.secondary
+  source_db_instance_arn      = module.rds.rds_instance_arn
+  retention_period            = 7
 }
 
 # ── Route 53 (private zone for RDS internal DNS resolution) ───────────────────
@@ -94,6 +118,77 @@ module "ecr" {
   source                = "./modules/ecr"
   prefix                = "bookstore"
   image_retention_count = 10
+}
+
+# ── ECR Cross-Region Replication ──────────────────────────────────────────────
+# Replicates all ECR images to secondary region so secondary EKS can pull them.
+
+resource "aws_ecr_replication_configuration" "secondary" {
+  replication_configuration {
+    rule {
+      destination {
+        region      = var.secondary_region
+        registry_id = module.ecr.registry_id
+      }
+      repository_filter {
+        filter      = "bookstore"
+        filter_type = "PREFIX_MATCH"
+      }
+    }
+  }
+
+  depends_on = [module.ecr]
+}
+
+# ── Route53 Public Zone + Active-Passive Failover ─────────────────────────────
+
+resource "aws_route53_zone" "public" {
+  name = var.domain
+}
+
+resource "aws_route53_health_check" "primary" {
+  fqdn              = var.domain
+  port              = 443
+  type              = "HTTPS"
+  resource_path     = "/"
+  failure_threshold = 3
+  request_interval  = 30
+
+  tags = { Name = "bookstore-primary-health" }
+}
+
+# primary_alb_dns: get after first apply via:
+#   kubectl get svc -n ingress-nginx ingress-nginx-controller \
+#     -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+resource "aws_route53_record" "primary" {
+  count   = var.primary_alb_dns != "" ? 1 : 0
+  zone_id = aws_route53_zone.public.zone_id
+  name    = var.domain
+  type    = "CNAME"
+  ttl     = 60
+  records = [var.primary_alb_dns]
+
+  failover_routing_policy {
+    type = "PRIMARY"
+  }
+
+  set_identifier  = "primary"
+  health_check_id = aws_route53_health_check.primary.id
+}
+
+resource "aws_route53_record" "secondary" {
+  count   = var.secondary_alb_dns != "" ? 1 : 0
+  zone_id = aws_route53_zone.public.zone_id
+  name    = var.domain
+  type    = "CNAME"
+  ttl     = 60
+  records = [var.secondary_alb_dns]
+
+  failover_routing_policy {
+    type = "SECONDARY"
+  }
+
+  set_identifier = "secondary"
 }
 
 # ── EKS ────────────────────────────────────────────────────────────────────────
