@@ -175,7 +175,7 @@ jobs:
           cache-to:   type=gha,mode=max
 
       - name: Trivy — scan backend (CRITICAL + HIGH = hard fail)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref:      ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:${{ steps.tag.outputs.tag }}
           format:         sarif
@@ -218,7 +218,7 @@ jobs:
           cache-to:   type=gha,mode=max
 
       - name: Trivy — scan frontend (CRITICAL + HIGH = hard fail)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref:      ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:${{ steps.tag.outputs.tag }}
           format:         sarif
@@ -264,6 +264,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-and-push
     if: github.ref == 'refs/heads/main'
+    timeout-minutes: 30
     environment: production     # ← requires a reviewer to approve in GitHub
     permissions:
       id-token: write
