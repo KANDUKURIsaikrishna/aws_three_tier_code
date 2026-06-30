@@ -67,16 +67,18 @@ set { name = "server.replicas", value = "1" }
 set { name = "repoServer.replicas", value = "1" }
 
 # kube-prometheus-stack
-set { name = "prometheus.prometheusSpec.replicas", value = "1" }
-set { name = "alertmanager.enabled", value = "false" }
-set { name = "grafana.replicas", value = "1" }
-set { name = "prometheus.prometheusSpec.retention", value = "24h" }
+set { name = "prometheus.prometheusSpec.replicas",        value = "1" }
+set { name = "alertmanager.enabled",                      value = "true" }
+set { name = "alertmanager.alertmanagerSpec.replicas",    value = "1" }
+set { name = "grafana.replicas",                          value = "1" }
+set { name = "prometheus.prometheusSpec.retention",       value = "24h" }
+# grafana admin password injected via set_sensitive from grafana-secret.tf
 
 # argo-rollouts
 set { name = "controller.replicas", value = "1" }
 ```
 
-**Files:** `modules/eks-addons/main.tf`, `modules/eks-addons/variables.tf`, `main.tf`, `eks_bootstrap.py`
+**Files:** `modules/eks-addons/main.tf`, `modules/eks-addons/cert-manager.tf`, `modules/eks-addons/ebs-csi.tf`, `modules/eks-addons/external-secrets.tf`, `modules/eks-addons/ingress.tf`, `modules/eks-addons/gitops.tf`, `modules/eks-addons/observability.tf`, `modules/eks-addons/grafana-secret.tf`, `modules/eks-addons/variables.tf`, `main.tf`, `eks_bootstrap.py`
 
 **Effort:** half day
 
@@ -139,7 +141,7 @@ k8s/
 
 **What was done:**
 
-Added to `modules/eks-addons/main.tf`:
+Added to `modules/eks-addons/observability.tf`:
 
 ```hcl
 resource "helm_release" "kube_prometheus_stack" {
@@ -150,12 +152,29 @@ resource "helm_release" "kube_prometheus_stack" {
   create_namespace = true
 
   set { name = "prometheus.prometheusSpec.replicas",  value = "1" }
-  set { name = "alertmanager.enabled",                value = "false" }
+  set { name = "alertmanager.enabled",                value = "true" }
+  set { name = "alertmanager.alertmanagerSpec.replicas", value = "1" }
   set { name = "grafana.replicas",                    value = "1" }
   set { name = "grafana.persistence.enabled",         value = "false" }
   set { name = "prometheus.prometheusSpec.retention", value = "24h" }
+  set_sensitive { name = "grafana.adminPassword",     value = random_password.grafana_admin.result }
+}
+
+resource "helm_release" "loki" {
+  name       = "loki"
+  repository = "https://grafana.github.io/helm-charts"
+  chart      = "loki-stack"
+  namespace  = "monitoring"
+  set { name = "loki.persistence.enabled", value = "false" }
+  set { name = "promtail.enabled",         value = "true" }
+  set { name = "grafana.enabled",          value = "false" }
 }
 ```
+
+Also added:
+- `modules/eks-addons/grafana-secret.tf` — Grafana admin password (`random_password`, 24 chars, no specials) stored in Secrets Manager at `/bookstore/grafana-admin`
+- Grafana auto-configured with Loki as an additional data source (no manual setup)
+- Prometheus storage: ephemeral (no PVC), 24h retention — sufficient for demo
 
 Added `prom-client` to the Node.js backend:
 - `backend/app.js` exposes `/metrics` endpoint using `prom-client`
@@ -164,11 +183,17 @@ Added `prom-client` to the Node.js backend:
 
 Added `k8s/base/monitoring/servicemonitor.yaml` so Prometheus scrapes the backend automatically.
 
-Access Grafana: `kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80`
+Access Grafana:
+```bash
+GRAFANA_PASS=$(aws secretsmanager get-secret-value --secret-id /bookstore/grafana-admin \
+  --region us-west-1 --query SecretString --output text)
+kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80
+# Open http://localhost:3000 — login: admin / <password above>
+```
 
-**Skipped:** Loki, persistent storage for metrics, AlertManager, PagerDuty
+**Skipped:** persistent storage for metrics (24h ephemeral sufficient for demo), PagerDuty integration
 
-**Files:** `modules/eks-addons/main.tf`, `backend/app.js`, `k8s/base/monitoring/servicemonitor.yaml`
+**Files:** `modules/eks-addons/observability.tf`, `modules/eks-addons/grafana-secret.tf`, `backend/app.js`, `k8s/base/monitoring/servicemonitor.yaml`
 
 **Effort:** half day
 
@@ -190,14 +215,28 @@ Access Grafana: `kubectl port-forward svc/kube-prometheus-stack-grafana -n monit
 ```yaml
 strategy:
   canary:
+    analysis:
+      templates:
+      - templateName: error-rate
+      startingStep: 1
     steps:
     - setWeight: 10
+    - analysis:
+        templates:
+        - templateName: error-rate
+    - pause: {duration: 30s}
+    - setWeight: 25
     - pause: {duration: 30s}
     - setWeight: 50
-    - pause: {duration: 30s}
+    - analysis:
+        templates:
+        - templateName: error-rate
+    - pause: {duration: 60s}
 ```
 
-**Skipped:** Flagger, Prometheus-based automated analysis (too complex for demo), frontend canary
+AnalysisTemplate (`k8s/base/monitoring/analysis-template.yaml`) queries nginx 5xx rate via Prometheus every 30s. Fails rollout if error rate ≥ 1% (`result[0] < 0.01`, `failureLimit: 2`). Auto-aborts to stable on 2 consecutive failures.
+
+**Skipped:** Flagger, frontend canary
 
 **Files:** `k8s/base/backend/rollout.yaml` (replaces `deployment.yaml`), `modules/eks-addons/main.tf`, `k8s/overlays/prod/hpa-backend.yaml`
 

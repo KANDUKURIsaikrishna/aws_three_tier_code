@@ -404,11 +404,16 @@ If Prometheus detects >1% error rate during analysis, rollout aborts automatical
 ```
 git push → GitHub Actions CI:
   1. Gitleaks (secret scan)
-  2. Semgrep (SAST)
-  3. npm audit
-  4. Docker build + Trivy scan
-  5. Push to ECR
-  6. kustomize edit set image (k8s/overlays/prod)
+  2. SAST + tests [parallel with step 3]:
+       - vitest (backend unit tests)
+       - npm audit (backend high, frontend critical)
+       - Semgrep (nodejs + owasp-top-ten + secrets)
+  3. Validate [parallel with step 2]:
+       - ESLint frontend (zero warnings)
+       - kubeconform k8s manifests (v1.31.0)
+  4. Docker build + Trivy scan (CRITICAL+HIGH = hard fail)
+  5. Push to ECR (only after clean scan)
+  6. kustomize edit set image (k8s/overlays/prod) [main branch only, requires approval]
   7. git commit + push (GITHUB_TOKEN, doesn't re-trigger CI)
      → ArgoCD polls, detects change, syncs cluster
 ```

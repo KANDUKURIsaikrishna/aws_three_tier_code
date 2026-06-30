@@ -325,13 +325,14 @@ New image deployed
   ├── Step 1: setWeight 10%   (1 in 10 requests hit canary pod)
   ├── Step 2: analysis (error-rate AnalysisTemplate)
   │     Query: sum(5xx rate) / sum(all rate) [2m]
-  │     Threshold: < 0.05 (5% error rate)
+  │     Threshold: < 0.01 (1% error rate)
   │     Guard: or vector(0) / or vector(1)  ← prevents div-by-zero on zero traffic
+  │     failureLimit: 2   ← 2 consecutive failures = abort
   ├── Step 3: pause 30s
   ├── Step 4: setWeight 25%
   ├── Step 5: pause 30s
   ├── Step 6: setWeight 50%
-  ├── Step 7: analysis (repeat)
+  ├── Step 7: analysis (repeat, same threshold)
   └── Step 8: pause 60s → promote to 100%
 
 On failure: automatic abort → stable version at 100%
@@ -350,7 +351,7 @@ Traffic splitting uses the nginx-ingress `canary-weight` annotation. Prometheus 
 backend /metrics (prom-client)
     ↑ scraped by
 Prometheus (ServiceMonitor CRD auto-discovers)
-    → stores in local TSDB (gp3 PVC)
+    → stores in ephemeral TSDB (no PVC — 24h retention, lost on pod restart)
     → evaluates PrometheusRules (alerting)
     → feeds AnalysisTemplate (canary decisions)
     ↓ queried by
@@ -374,7 +375,7 @@ http_requests_total{method, route, status}
 http_request_duration_seconds{method, route, status}
 ```
 
-PrometheusRule fires `HighErrorRate` alert when 5xx rate > 1% for 2 minutes.
+PrometheusRule fires `HighErrorRate` alert when 5xx rate > 5% for 2 minutes. Separate threshold from AnalysisTemplate (1%) — alert warns ops; AnalysisTemplate aborts canary.
 
 ### RDS Metrics
 
@@ -555,9 +556,9 @@ Primary health check failure triggers automatic DNS failover to secondary record
 | React | 18 | CRA |
 | MySQL | 8.0.39 | Pinned in StatefulSet |
 | Nginx (frontend) | 1.27-alpine | |
-| cert-manager | v1.16.2 | |
-| External Secrets Operator | v0.10.7 | |
-| Argo Rollouts | v1.7.2 | |
+| cert-manager | v1.14.4 | Pinned in `modules/eks-addons/cert-manager.tf` |
+| External Secrets Operator | latest | Unpinned — chart pulls latest stable |
+| Argo Rollouts | latest | Unpinned — chart pulls latest stable |
 | ArgoCD | via helm chart | |
 | kube-prometheus-stack | via helm chart | Prometheus + Grafana + Alertmanager |
 | loki-stack | via helm chart | Loki + Promtail |
