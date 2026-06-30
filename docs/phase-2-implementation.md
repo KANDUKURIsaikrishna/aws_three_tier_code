@@ -240,6 +240,8 @@ This builds and pushes:
 
 ## Step 11 — Pin Image Tags in Kustomize Overlay
 
+> **Note:** `k8s/overlays/prod/kustomization.yaml` ships with `000000000000` as the ECR registry placeholder — account ID intentionally not hardcoded in git. CI auto-fills from `secrets.AWS_ACCOUNT_ID` (GitHub Secret) on every push to `main`. For first manual deploy, run this once to prime the file with your real account ID.
+
 ```bash
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-west-1.amazonaws.com"
@@ -257,6 +259,8 @@ git add k8s/overlays/prod/kustomization.yaml
 git commit -m "deploy: pin images to v1.0.0"
 git push origin improvements
 ```
+
+After CI's first successful deploy (Step 12 onwards), CI owns this step automatically — no more manual image pins needed.
 
 ---
 

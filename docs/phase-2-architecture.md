@@ -183,6 +183,8 @@ Two repositories: `bookstore-backend`, `bookstore-frontend`.
 
 Image tag format: `<ACCOUNT>.dkr.ecr.us-west-1.amazonaws.com/bookstore-<app>:<git-sha-8>`. Never `latest` in prod.
 
+**Account ID in git:** `k8s/overlays/prod/kustomization.yaml` uses placeholder `000000000000` as the registry prefix. CI deploy stage reads `secrets.AWS_ACCOUNT_ID` (GitHub Secret) and overwrites via `kustomize edit set image` on every push. Account ID never hardcoded in committed base files.
+
 ---
 
 ## Layer 5 — Kubernetes Workloads
@@ -417,6 +419,7 @@ Performance Insights (7-day free tier) + Enhanced Monitoring (60s interval) + Cl
 | Control | Detail |
 |---|---|
 | No static AWS keys | OIDC only — `role-to-assume` via `aws-actions/configure-aws-credentials` |
+| No account ID in git | `kustomization.yaml` uses `000000000000` placeholder; CI overwrites from `secrets.AWS_ACCOUNT_ID` |
 | Gitleaks | Every push/PR — fail immediately on detected secrets |
 | Semgrep SAST | Node.js + OWASP Top-10 rules |
 | Trivy container scan | CRITICAL + HIGH = hard fail — image never pushed dirty |
@@ -456,8 +459,10 @@ push to main/improvements
     └── docker push (only after clean scan)
 
 then → deploy (only main branch, requires production env approval)
-    ├── kustomize edit set image (prod overlay)
-    └── git commit + push (GITHUB_TOKEN, no re-trigger loop)
+    ├── kustomize edit set image (prod overlay, using secrets.AWS_ACCOUNT_ID)
+    └── git commit + push — infinite loop protected by two layers:
+          1. GITHUB_TOKEN push: GitHub suppresses CI trigger for commits made by GITHUB_TOKEN
+          2. diff check: `git diff --staged --quiet && exit 0` — skips commit if tag unchanged
 ```
 
 Terraform workflow (separate, on `.tf` file changes):
