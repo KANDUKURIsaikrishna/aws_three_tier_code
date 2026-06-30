@@ -6,17 +6,18 @@ resources:
 - hpa-backend.yaml
 - hpa-frontend.yaml
 
-# CI updates these via:
-#   cd k8s/overlays/prod
-#   kustomize edit set image bookstore-backend=<registry>/bookstore-backend:<sha>
-# configure.py fills in ACCOUNT_ID from config.env on first local setup.
+# Account ID is intentionally NOT hardcoded here.
+# CI (deploy stage) overwrites these from secrets.AWS_ACCOUNT_ID every push:
+#   kustomize edit set image bookstore-backend=${ECR_REGISTRY}/bookstore-backend:${SHA}
+# Placeholder 000000000000 is replaced automatically on first CI deploy.
+# For manual local deploy: replace 000000000000 with your real AWS account ID.
 images:
 - name: bookstore-backend
-  newName: ACCOUNT_ID.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
-  newTag: 1e48e2ec
+  newName: 000000000000.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
+  newTag: latest
 - name: bookstore-frontend
-  newName: ACCOUNT_ID.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
-  newTag: 1e48e2ec
+  newName: 000000000000.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
+  newTag: latest
 
 patches:
 - target:

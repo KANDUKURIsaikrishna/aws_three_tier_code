@@ -9,8 +9,8 @@
 #        kubectl wait -n argocd deployment/argocd-server --for=condition=Available --timeout=120s
 #
 #   2. If the repo is private, register credentials first:
-#        argocd repo add https://github.com/YOUR_GITHUB_USERNAME/aws_three_tier_code.git \
-#          --username YOUR_GITHUB_USERNAME --password <github-pat>
+#        argocd repo add https://github.com/KANDUKURIsaikrishna/aws_three_tier_code.git \
+#          --username KANDUKURIsaikrishna --password <github-pat>
 #
 #   3. Apply this manifest once:
 #        kubectl apply -f k8s/argocd/application.yaml
@@ -32,7 +32,7 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/YOUR_GITHUB_USERNAME/aws_three_tier_code.git
+    repoURL: https://github.com/KANDUKURIsaikrishna/aws_three_tier_code.git
     targetRevision: main
     path: k8s/overlays/prod
     kustomize: {}   # ArgoCD runs `kustomize build k8s/overlays/prod/` to render manifests
