@@ -9,13 +9,8 @@ output "argocd_namespace" {
 }
 
 output "monitoring_namespace" {
-  description = "Namespace where Prometheus, Grafana, and Loki are installed"
-  value       = helm_release.kube_prometheus_stack.namespace
-}
-
-output "loki_service" {
-  description = "Loki service URL for Grafana data source config"
-  value       = "http://loki.${helm_release.loki.namespace}.svc.cluster.local:3100"
+  description = "Namespace for in-cluster monitoring components (kube-state-metrics, node-exporter, promtail)"
+  value       = helm_release.kube_state_metrics.namespace
 }
 
 output "grafana_admin_secret_arn" {

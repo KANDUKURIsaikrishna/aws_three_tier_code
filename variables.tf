@@ -43,3 +43,15 @@ variable "enable_cloudfront" {
   type        = bool
   default     = false
 }
+
+variable "dr_kms_key_id" {
+  description = "CMK ARN in var.secondary_region for cross-region RDS backup replication. AWS-managed keys are region-scoped and cannot replicate cross-region. Leave empty to skip replication (demo default)."
+  type        = string
+  default     = ""
+}
+
+variable "monitoring_admin_cidr" {
+  description = "CIDR blocks allowed to reach Grafana (3000) and Prometheus (9090) on the monitoring EC2. Default allows all — restrict to your IP in production."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}

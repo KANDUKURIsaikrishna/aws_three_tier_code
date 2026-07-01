@@ -33,3 +33,8 @@ output "node_role_name" {
   description = "IAM role name of the EKS node group — passed to eks-addons for policy attachment"
   value       = aws_iam_role.node_group.name
 }
+
+output "cluster_security_group_id" {
+  description = "Auto-created EKS cluster security group — applied to all nodes; monitoring EC2 gets inbound rules here"
+  value       = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+}

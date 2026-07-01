@@ -90,6 +90,33 @@ module "eks" {
   node_desired_size  = 1
 }
 
+# ── Monitoring EC2 ────────────────────────────────────────────────────────────
+# Prometheus + Grafana + Loki run on a dedicated t3.small EC2 instance rather
+# than inside EKS. This frees ~600 MB RAM on the single t3.medium node and
+# prevents kube-prometheus-stack from timing out during helm install.
+
+resource "aws_eip" "monitoring" {
+  domain = "vpc"
+  tags   = { Name = "bookstore-monitoring-eip" }
+}
+
+module "monitoring_ec2" {
+  source = "./modules/monitoring-ec2"
+
+  vpc_id                    = module.network.vpc_id
+  vpc_cidr                  = local.vpc_cidr
+  public_subnet_id          = module.network.public_subnet_ids[0]
+  eip_allocation_id         = aws_eip.monitoring.id
+  cluster_name              = module.eks.cluster_name
+  region                    = var.aws_region
+  eks_node_sg_id            = module.eks.cluster_security_group_id
+  grafana_admin_secret_arn  = module.eks_addons.grafana_admin_secret_arn
+  grafana_admin_secret_name = "/bookstore/grafana-admin"
+  admin_cidr_blocks         = var.monitoring_admin_cidr
+
+  depends_on = [module.eks_addons]
+}
+
 # ── EKS Add-ons ────────────────────────────────────────────────────────────────
 
 module "eks_addons" {
@@ -97,6 +124,7 @@ module "eks_addons" {
   cluster_name      = module.eks.cluster_name
   oidc_provider_arn = module.eks.oidc_provider_arn
   node_role_name    = module.eks.node_role_name
+  loki_url          = "http://${aws_eip.monitoring.public_ip}:3100"
 
   depends_on = [module.eks]
 }
