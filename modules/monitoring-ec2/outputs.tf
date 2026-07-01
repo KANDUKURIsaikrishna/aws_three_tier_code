@@ -13,6 +13,11 @@ output "prometheus_url" {
   value       = "http://${aws_eip_association.monitoring.public_ip}:9090"
 }
 
+output "alertmanager_url" {
+  description = "Alertmanager UI URL"
+  value       = "http://${aws_eip_association.monitoring.public_ip}:9093"
+}
+
 output "instance_public_ip" {
   description = "Public IP of the monitoring EC2 instance (Elastic IP)"
   value       = aws_eip_association.monitoring.public_ip

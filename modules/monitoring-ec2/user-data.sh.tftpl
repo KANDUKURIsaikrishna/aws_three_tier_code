@@ -85,6 +85,11 @@ global:
   scrape_interval: 30s
   evaluation_interval: 30s
 
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
 rule_files:
   - "/etc/prometheus/rules/*.yml"
 
@@ -149,6 +154,64 @@ groups:
           summary: "kube-state-metrics is unreachable — no Kubernetes metrics"
 RULES_EOF
 
+# ── Alertmanager config ───────────────────────────────────────────────────────
+mkdir -p /opt/monitoring/alertmanager
+
+cat > /opt/monitoring/alertmanager/alertmanager.yml << 'AM_EOF'
+global:
+  resolve_timeout: 5m
+  # smtp_smarthost: 'smtp.gmail.com:587'
+  # smtp_from: 'alertmanager@example.com'
+  # smtp_auth_username: 'alertmanager@example.com'
+  # smtp_auth_password: 'YOUR_APP_PASSWORD'
+
+route:
+  receiver: 'default-webhook'
+  group_by: ['alertname', 'severity', 'cluster']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: 'critical-webhook'
+      repeat_interval: 1h
+    - matchers:
+        - severity = "warning"
+      receiver: 'default-webhook'
+      repeat_interval: 6h
+
+receivers:
+  - name: 'default-webhook'
+    # Replace with your real endpoint — Slack, PagerDuty, SNS, etc.
+    # Slack example (uncomment and set SLACK_WEBHOOK_URL):
+    # slack_configs:
+    #   - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+    #     channel: '#bookstore-alerts'
+    #     title: '[{{ .Status | toUpper }}] {{ .GroupLabels.alertname }}'
+    #     text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ "\n" }}{{ end }}'
+    #     send_resolved: true
+    webhook_configs:
+      - url: 'http://localhost:5001/'
+        send_resolved: true
+
+  - name: 'critical-webhook'
+    # email_configs:
+    #   - to: 'oncall@example.com'
+    #     subject: '[CRITICAL] {{ .GroupLabels.alertname }}'
+    #     body: '{{ range .Alerts }}{{ .Annotations.summary }}{{ "\n" }}{{ end }}'
+    webhook_configs:
+      - url: 'http://localhost:5001/'
+        send_resolved: true
+
+inhibit_rules:
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ['alertname', 'instance']
+AM_EOF
+
 # ── Loki config ───────────────────────────────────────────────────────────────
 cat > /opt/monitoring/loki/config.yaml << 'LOKI_EOF'
 auth_enabled: false
@@ -188,11 +251,20 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: false
+    jsonData:
+      alertmanagerUid: alertmanager
   - name: Loki
     type: loki
     uid: loki
     url: http://loki:3100
     editable: false
+  - name: Alertmanager
+    type: alertmanager
+    uid: alertmanager
+    url: http://alertmanager:9093
+    editable: false
+    jsonData:
+      implementation: prometheus
 GRAFANA_DS_EOF
 
 # ── Grafana dashboard provisioner config ──────────────────────────────────────
@@ -247,6 +319,20 @@ services:
     command: -config.file=/etc/loki/config.yaml
     restart: unless-stopped
 
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - /opt/monitoring/alertmanager:/etc/alertmanager
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.external-url=http://localhost:9093'
+    restart: unless-stopped
+
   grafana:
     image: grafana/grafana:11.0.0
     container_name: grafana
@@ -268,6 +354,7 @@ volumes:
   prometheus_data:
   grafana_data:
   loki_data:
+  alertmanager_data:
 COMPOSE_EOF
 
 # ── Start the stack ───────────────────────────────────────────────────────────
