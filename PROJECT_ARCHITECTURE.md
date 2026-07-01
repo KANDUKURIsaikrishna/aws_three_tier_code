@@ -80,12 +80,17 @@ AWS Network Load Balancer (NLB)
 │         │              └───────────────┘  │         │      │
 │         └──────────────────────────────────┘         │      │
 │                                                      │      │
-│         ┌──────────────────────────────────┐         │      │
-│         │  Namespace: monitoring           │         │      │
-│         │  Prometheus (1 replica, 24h ret) │         │      │
-│         │  Grafana    (1 replica)          │         │      │
-│         │  ServiceMonitor → backend /metrics│        │      │
-│         └──────────────────────────────────┘         │      │
+│         (zero monitoring pods in EKS cluster)         │      │
+│                                                      │      │
+│  Public Subnet (monitoring EC2 t3.small)             │      │
+│  ┌─────────────────────────────────────────────┐     │      │
+│  │ Elastic IP  ← Grafana :3000 / Prom :9090   │     │      │
+│  │ Docker Compose:                             │     │      │
+│  │   prometheus   (scrapes nodes :9100 + KSM) │     │      │
+│  │   loki         (:3100, VPC-only inbound)   │     │      │
+│  │   grafana      (admin pass from SecretsMgr)│     │      │
+│  │   kube-state-metrics (kubeconfig → EKS API)│     │      │
+│  └─────────────────────────────────────────────┘     │      │
 │                                                      │      │
 │  Private Subnets (RDS)                               │      │
 │  ┌──────────────────┐  ┌──────────────────┐          │      │
@@ -97,10 +102,10 @@ AWS Network Load Balancer (NLB)
 └─────────────────────────────────────────────────────────────┘
 
 AWS Services (outside VPC)
-  ECR       — Docker image registry (bookstore-backend, bookstore-frontend)
-  ACM       — TLS certificate for *.b17facebook.xyz
-  Secrets Manager — DB credentials at /bookstore/db-credentials
-  IAM/OIDC  — Keyless auth for GitHub Actions and ESO (IRSA)
+  ECR            — Docker image registry (bookstore-backend, bookstore-frontend)
+  ACM            — TLS certificate for *.b17facebook.xyz
+  Secrets Manager — DB credentials (/bookstore/db-credentials), Grafana password (/bookstore/grafana-admin)
+  IAM/OIDC       — Keyless auth for GitHub Actions and ESO (IRSA); EKS access entry for monitoring EC2
 ```
 
 ---
@@ -153,10 +158,30 @@ All cluster platform components are managed by Terraform as `helm_release` resou
 | EBS CSI driver | `aws_eks_addon` | `kube-system` | — |
 | cert-manager | `helm_release` | `cert-manager` | v1.14.4, 1 replica |
 | External Secrets Operator | `helm_release` | `external-secrets` | 1 replica |
-| ingress-nginx | `helm_release` | `ingress-nginx` | v4.9.1, 1 replica |
+| ingress-nginx | `helm_release` | `ingress-nginx` | v4.9.1, 1 replica, PDB minAvailable=1 |
 | ArgoCD | `helm_release` | `argocd` | 1 replica each component |
-| kube-prometheus-stack | `helm_release` | `monitoring` | 1 Prometheus replica, no AlertManager, 24h retention, no PVC |
 | argo-rollouts | `helm_release` | `argo-rollouts` | 1 replica |
+
+> **No monitoring Helm charts in EKS.** Prometheus, Grafana, and Loki run on a dedicated EC2 instance (`modules/monitoring-ec2/`). node-exporter and Fluent Bit are installed as AL2 systemd services via the EKS node group launch template — not as Kubernetes pods. kube-state-metrics runs as a Docker container on the monitoring EC2 and authenticates to the K8s API via an EKS access entry.
+
+### 3.9 Monitoring EC2 (`modules/monitoring-ec2/`)
+
+A dedicated `t3.small` EC2 instance in the public subnet hosts the full observability stack:
+
+| Service | Port | Accessible from |
+|---------|------|----------------|
+| Grafana | 3000 | `monitoring_admin_cidr` (default: all) — restrict to your IP |
+| Prometheus | 9090 | `monitoring_admin_cidr` |
+| Loki | 3100 | VPC CIDR only (Fluent Bit on EKS nodes pushes here) |
+| kube-state-metrics | 8080 | Docker internal network only (Prometheus scrapes via Compose network) |
+
+**EKS node metrics (node-exporter on port 9100):** Prometheus discovers node IPs every 5 minutes via `aws ec2 describe-instances` and writes Prometheus `file_sd_configs` target files. A Security Group rule allows inbound 9100 from the monitoring EC2's SG to the EKS cluster SG.
+
+**Automation at first boot:**
+- Kubeconfig generated via `aws eks update-kubeconfig`
+- Grafana admin password fetched from Secrets Manager
+- Prometheus alerting rules provisioned (NodeDown, HighCPU, HighMemory, PodCrashLooping)
+- Grafana dashboards auto-imported via API (Node Exporter Full #1860, K8s cluster #315)
 
 ### 3.4 RDS
 
@@ -263,10 +288,12 @@ This ensures MySQL is never reachable from the internet, and the frontend cannot
 
 ### 4.3 Security Groups
 
-| SG | Inbound | Purpose |
-|----|---------|---------|
-| `bookstore-alb-frontend-sg` | 0.0.0.0/0 → 80, 443 | Internet-facing NLB |
-| `bookstore-rds-sg` | 170.20.0.0/16 → 3306 | RDS access from VPC only |
+| SG | Inbound | Outbound | Purpose |
+|----|---------|----------|---------|
+| `bookstore-alb-frontend-sg` | 0.0.0.0/0 → 80, 443 | 0.0.0.0/0 all | Internet-facing NLB |
+| `bookstore-rds-sg` | 170.20.0.0/16 → 3306 | **none** | RDS access from VPC only; no egress (RDS never initiates connections) |
+| `bookstore-monitoring-sg` | `monitoring_admin_cidr` → 3000, 9090; VPC CIDR → 3100 | 0.0.0.0/0 all | Monitoring EC2; Loki push restricted to VPC |
+| EKS cluster SG (auto) | monitoring-sg → 9100 | — | node-exporter scrape from monitoring EC2 |
 
 ---
 
@@ -297,7 +324,8 @@ All application resources live in the `bookstore` namespace, managed by Kustomiz
 | Security | `readOnlyRootFilesystem: true`, `runAsNonRoot: true`, `runAsUser: 1001` |
 | Config | `backend-config` ConfigMap (`DB_HOST`, `DB_PORT`, `DB_NAME`, `APP_PORT`) |
 | Secrets | `db-secret` (`DB_USERNAME`, `DB_PASSWORD`) — never stored in git |
-| Resource limits (prod) | requests 128m CPU / 128Mi RAM; limits 500m CPU / 256Mi RAM |
+| Resource limits (base/dev) | requests 50m CPU / 64Mi RAM; limits 250m CPU / 128Mi RAM |
+| Resource limits (prod overlay) | requests 128m CPU / 128Mi RAM; limits 500m CPU / 256Mi RAM |
 
 **API endpoints:**
 
@@ -344,19 +372,44 @@ api.bookstore.b17facebook.xyz → backend-service:80
 
 ### 5.5 Observability
 
-Prometheus and Grafana are installed in the `monitoring` namespace by the `kube-prometheus-stack` Helm chart, managed by Terraform.
+**No monitoring pods run in the EKS cluster.** The full observability stack lives on a dedicated EC2 instance. Only data collectors are installed on EKS nodes — as AL2 systemd services via the node group launch template, not as Kubernetes pods.
 
-| Component | Config |
-|-----------|--------|
-| Prometheus | 1 replica, 24h retention, no persistent storage (demo) |
-| Grafana | 1 replica, pre-built k8s dashboards |
-| AlertManager | disabled (demo) |
-| ServiceMonitor | `k8s/base/monitoring/servicemonitor.yaml` — scrapes backend `/metrics` every 30s |
+**EC2 monitoring stack (Docker Compose, `t3.small`):**
 
-The backend (`backend/app.js`) uses `prom-client` to expose:
-- `http_requests_total` — Counter labelled by method, route, status
+| Container | Image | Port | Purpose |
+|-----------|-------|------|---------|
+| prometheus | `prom/prometheus:v2.53.0` | 9090 | Scrapes node-exporter (file_sd, port 9100) + kube-state-metrics (localhost:8080). 15-day retention. |
+| loki | `grafana/loki:3.0.0` | 3100 | Log aggregation. Fluent Bit on EKS nodes pushes here. boltdb-shipper/filesystem storage. |
+| grafana | `grafana/grafana:11.0.0` | 3000 | Dashboards auto-provisioned (datasources) + auto-imported (Node Exporter Full, K8s cluster) |
+| kube-state-metrics | `kube-state-metrics:v2.13.0` | 8080 (internal) | K8s resource metrics. Mounts kubeconfig; authenticates via EKS access entry. |
+
+**EKS node agents (systemd, not K8s pods):**
+
+| Service | Binary | Port | Role |
+|---------|--------|------|------|
+| node-exporter | v1.8.2 | 9100 | Host-level metrics (CPU, memory, disk, network) |
+| fluent-bit | latest AL2 pkg | — | Tails `/var/log/containers/*.log`; pushes to Loki on EC2 |
+
+**Prometheus target discovery:**
+- `update-prom-targets.sh` runs every 5 minutes (cron) on the monitoring EC2
+- Queries `aws ec2 describe-instances --filters "Name=tag:eks:cluster-name,Values=bookstore-eks"` to get current node IPs
+- Writes Prometheus `file_sd_configs` JSON files; Prometheus hot-reloads without restart
+
+**Alerting rules** (`/opt/monitoring/prometheus/rules/bookstore.yml`):
+
+| Alert | Condition | Severity |
+|-------|-----------|---------|
+| NodeDown | `up{job="node-exporter"} == 0` for 5m | critical |
+| HighCPUUsage | CPU > 80% for 10m | warning |
+| HighMemoryUsage | Memory > 85% for 10m | warning |
+| PodCrashLooping | restart rate > 3 in 15m for 5m | warning |
+| KubeStateMetricsDown | `up{job="kube-state-metrics"} == 0` for 5m | critical |
+
+**Backend metrics** (`backend/app.js` with `prom-client`):
+- `http_requests_total` — Counter by method, route, status
 - `http_request_duration_seconds` — Histogram of response times
 - Default Node.js process metrics (memory, CPU, GC, event loop lag)
+- `k8s/base/monitoring/servicemonitor.yaml` is present but targets in-cluster Prometheus which no longer exists; backend metrics are still available at `/metrics` for manual scraping or future ServiceMonitor reconfiguration.
 
 ### 5.6 Image Tags and Kustomize Overlays
 

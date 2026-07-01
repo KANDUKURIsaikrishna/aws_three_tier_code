@@ -43,6 +43,8 @@ terraform {
 | `environment` | string | `prod` | Applied as `Environment` tag on every resource via `default_tags` |
 | `domain` | string | *(required)* | Primary domain for ACM cert and Ingress host rules |
 | `github_repo` | string | *(required)* | `owner/repo` format — scopes the OIDC trust policy to this exact repo |
+| `dr_kms_key_id` | string | `""` | CMK ARN in `secondary_region` for cross-region RDS backup replication. Leave empty to skip (demo default). AWS-managed keys are region-scoped and cannot replicate cross-region. |
+| `monitoring_admin_cidr` | list(string) | `["0.0.0.0/0"]` | CIDRs allowed to reach Grafana (3000) and Prometheus (9090) on the monitoring EC2. **Restrict to your IP in production.** |
 
 **Why no default for `domain` and `github_repo`?** These are environment-specific with no safe default. Terraform forces you to set them in `terraform.tfvars` or via `-var` flag, preventing accidental deployment with wrong values.
 
@@ -102,6 +104,10 @@ Outputs expose values that are useful after `terraform apply` without requiring 
 | `eks_cluster_endpoint` | No | API server URL for kubectl |
 | `eks_oidc_provider_arn` | No | Create IRSA roles for service accounts |
 | `github_oidc_role_arn` | No | Paste into `AWS_ROLE_ARN` GitHub Secret |
+| `grafana_url` | No | `http://<EIP>:3000` — Grafana UI on monitoring EC2 |
+| `prometheus_url` | No | `http://<EIP>:9090` — Prometheus UI on monitoring EC2 |
+| `loki_url` | No | `http://<EIP>:3100` — Loki push endpoint (Fluent Bit uses this) |
+| `grafana_admin_secret_arn` | No | ARN of `/bookstore/grafana-admin` Secrets Manager secret |
 
 **Why `sensitive = true` on `rds_secret_arn`?** The ARN reveals your account ID and secret name. Marking it sensitive prevents Terraform from printing it in plan/apply output and CI logs.
 
@@ -556,11 +562,58 @@ main.tf
     ├── module.eks_addons (needs cluster_name, oidc_provider_arn, node_role_name)
     │       depends_on = [module.eks]
     │
+    ├── aws_eip.monitoring (independent — allocated before modules so IP is known at plan)
+    │
+    ├── module.monitoring_ec2 (needs vpc_id, eks.cluster_security_group_id, eks_addons.grafana_admin_secret_arn, eip)
+    │       depends_on = [module.eks_addons]
+    │
     └── aws_iam_role.github_oidc (needs data.aws_caller_identity)
             └─── outputs: github_oidc_role_arn
 ```
 
 Terraform resolves this graph automatically and parallelizes independent modules. `module.acm`, `module.ecr`, and the security groups all start in parallel. `module.eks_addons` waits until `module.eks` completes.
+
+---
+
+### `modules/monitoring-ec2/` — Monitoring EC2 Instance
+
+Provisions the EC2-based monitoring stack so zero monitoring pods run in EKS.
+
+**Resources created:**
+
+| Resource | Purpose |
+|----------|---------|
+| `aws_security_group.monitoring` | Grafana :3000 + Prometheus :9090 (admin CIDRs); Loki :3100 (VPC CIDR only) |
+| `aws_security_group_rule.eks_scrape_node_exporter` | Inbound 9100 from monitoring SG on EKS cluster SG — allows Prometheus to reach node-exporter systemd |
+| `aws_eks_access_entry.monitoring` | Registers monitoring EC2 IAM role as EKS STANDARD principal |
+| `aws_eks_access_policy_association.monitoring_view` | Grants `AmazonEKSViewPolicy` (read-only K8s API) to monitoring EC2 role |
+| `aws_iam_role.monitoring` | EC2 instance role |
+| `aws_iam_role_policy.monitoring` | `ec2:DescribeInstances`, `eks:DescribeCluster`, `secretsmanager:GetSecretValue` on Grafana secret only |
+| `aws_instance.monitoring` | `t3.small`, public subnet, gp3 20 GB encrypted, `user-data.sh.tftpl` |
+| `aws_eip_association.monitoring` | Associates `aws_eip.monitoring` (created in root) with the instance |
+
+**Why EIP is in root, not this module:**
+`module.eks_addons` needs `loki_url` (the EIP's public IP) at plan time. If the EIP were in `monitoring_ec2`, Terraform would see a circular dependency: `eks_addons` → `monitoring_ec2.loki_url` AND `monitoring_ec2` → `eks_addons.grafana_admin_secret_arn`. Creating the EIP in root breaks the cycle — the IP is known before any module runs.
+
+**`user-data.sh.tftpl` does (on first boot):**
+1. Installs Docker, docker-compose-plugin, awscli, kubectl
+2. Fetches Grafana password from Secrets Manager → writes to `/run/grafana-pass`
+3. Generates kubeconfig with `aws eks update-kubeconfig`
+4. Writes `update-prom-targets.sh` (discovers EKS node IPs; writes Prometheus file_sd JSON)
+5. Writes Prometheus config + alerting rules
+6. Writes Loki config + Grafana datasource provisioning
+7. Writes Docker Compose (Prometheus, Loki, Grafana, kube-state-metrics)
+8. Runs `docker compose up -d`
+9. Spawns background `import-grafana-dashboards.sh` (waits for Grafana health, then imports dashboards via API)
+
+**Template variables (`templatefile()` substitution):**
+
+| Variable | Value |
+|----------|-------|
+| `region` | `var.region` (e.g. `us-west-1`) |
+| `cluster_name` | `var.cluster_name` |
+| `grafana_admin_secret_name` | `/bookstore/grafana-admin` |
+| `ne_port` | `9100` (node-exporter systemd port) |
 
 ---
 
@@ -579,7 +632,8 @@ terraform init
 # 3. Preview what will be created
 terraform plan
 
-# 4. Create all infrastructure (~20 minutes)
+# 4. Create all infrastructure (~20 minutes) — or use the Makefile:
+#    make apply  (runs: init → import known secrets → apply)
 terraform apply
 ```
 
@@ -591,6 +645,20 @@ terraform output eks_cluster_endpoint   # https://...
 terraform output rds_endpoint           # bookstore-db.xxx.us-west-1.rds.amazonaws.com
 terraform output -raw rds_secret_arn    # arn:aws:secretsmanager:...
 terraform output github_oidc_role_arn   # paste into AWS_ROLE_ARN GitHub Secret
+terraform output grafana_url            # http://<EIP>:3000
+terraform output prometheus_url         # http://<EIP>:9090
+terraform output grafana_admin_secret_arn  # retrieve password with aws secretsmanager get-secret-value
+```
+
+### Makefile shortcuts
+
+```bash
+make apply            # terraform init + import known conflicts + apply
+make plan             # terraform init + plan
+make import           # import /bookstore/db-credentials and /bookstore/grafana-admin (TF-003 workaround)
+make monitoring-status  # show docker ps on monitoring EC2 (requires SSH key)
+make monitoring-logs    # tail /var/log/monitoring-init.log on monitoring EC2
+make destroy          # terraform destroy
 ```
 
 ### Configure kubectl
