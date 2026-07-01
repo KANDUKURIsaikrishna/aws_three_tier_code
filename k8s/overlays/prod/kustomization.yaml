@@ -26,7 +26,7 @@ patches:
     kind: Rollout
     name: backend
   patch: |-
-    - op: add
+    - op: replace
       path: /spec/template/spec/containers/0/resources
       value:
         requests:

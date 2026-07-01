@@ -56,11 +56,15 @@ spec:
               command: ["mysqladmin", "ping", "-h", "localhost"]
             initialDelaySeconds: 20
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             exec:
               command: ["mysqladmin", "ping", "-h", "localhost"]
             initialDelaySeconds: 60
             periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
           volumeMounts:
             - name: mysql-data
               mountPath: /var/lib/mysql
