@@ -1,87 +1,58 @@
-resource "helm_release" "kube_prometheus_stack" {
-  name             = "kube-prometheus-stack"
+resource "helm_release" "kube_state_metrics" {
+  name             = "kube-state-metrics"
   repository       = "https://prometheus-community.github.io/helm-charts"
-  chart            = "kube-prometheus-stack"
+  chart            = "kube-state-metrics"
   namespace        = "monitoring"
   create_namespace = true
   wait             = true
-  timeout          = 900
+  timeout          = 300
 
   set {
-    name  = "prometheus.prometheusSpec.replicas"
-    value = "1"
+    name  = "service.type"
+    value = "NodePort"
   }
   set {
-    name  = "alertmanager.enabled"
-    value = "true"
-  }
-  set {
-    name  = "alertmanager.alertmanagerSpec.replicas"
-    value = "1"
-  }
-  set {
-    name  = "grafana.replicas"
-    value = "1"
-  }
-  set {
-    name  = "grafana.persistence.enabled"
-    value = "false"
-  }
-  set {
-    name  = "prometheus.prometheusSpec.retention"
-    value = "24h"
+    name  = "service.nodePort"
+    value = "30808"
   }
 
-  set_sensitive {
-    name  = "grafana.adminPassword"
-    value = random_password.grafana_admin.result
-  }
-
-  set {
-    name  = "grafana.additionalDataSources[0].name"
-    value = "Loki"
-  }
-  set {
-    name  = "grafana.additionalDataSources[0].type"
-    value = "loki"
-  }
-  set {
-    name  = "grafana.additionalDataSources[0].url"
-    value = "http://loki.monitoring.svc.cluster.local:3100"
-  }
-  set {
-    name  = "grafana.additionalDataSources[0].access"
-    value = "proxy"
-  }
-  set {
-    name  = "grafana.additionalDataSources[0].isDefault"
-    value = "false"
-  }
-
-  depends_on = [aws_secretsmanager_secret_version.grafana_admin, helm_release.ingress_nginx]
+  depends_on = [helm_release.ingress_nginx]
 }
 
-resource "helm_release" "loki" {
-  name             = "loki"
-  repository       = "https://grafana.github.io/helm-charts"
-  chart            = "loki-stack"
+resource "helm_release" "prometheus_node_exporter" {
+  name             = "prometheus-node-exporter"
+  repository       = "https://prometheus-community.github.io/helm-charts"
+  chart            = "prometheus-node-exporter"
   namespace        = "monitoring"
   create_namespace = false
   wait             = true
-  timeout          = 600
+  timeout          = 300
 
   set {
-    name  = "loki.persistence.enabled"
-    value = "false"
+    name  = "service.type"
+    value = "NodePort"
   }
   set {
-    name  = "promtail.enabled"
-    value = "true"
-  }
-  set {
-    name  = "grafana.enabled"
-    value = "false"
+    name  = "service.nodePort"
+    value = "30809"
   }
 
-  depends_on = [helm_release.kube_prometheus_stack]
+  depends_on = [helm_release.kube_state_metrics]
+}
+
+resource "helm_release" "promtail" {
+  name             = "promtail"
+  repository       = "https://grafana.github.io/helm-charts"
+  chart            = "promtail"
+  namespace        = "monitoring"
+  create_namespace = false
+  wait             = true
+  timeout          = 300
+
+  set {
+    name  = "config.clients[0].url"
+    value = "${var.loki_url}/loki/api/v1/push"
+  }
+
+  depends_on = [helm_release.prometheus_node_exporter]
 }

@@ -54,9 +54,19 @@ output "route53_public_name_servers" {
   value       = module.route53.public_name_servers
 }
 
-output "loki_service_url" {
-  description = "Loki service URL — add as data source in Grafana"
-  value       = module.eks_addons.loki_service
+output "grafana_url" {
+  description = "Grafana UI on monitoring EC2 — default user: admin"
+  value       = module.monitoring_ec2.grafana_url
+}
+
+output "prometheus_url" {
+  description = "Prometheus UI on monitoring EC2"
+  value       = module.monitoring_ec2.prometheus_url
+}
+
+output "loki_url" {
+  description = "Loki URL on monitoring EC2 — Promtail in EKS pushes here"
+  value       = module.monitoring_ec2.loki_url
 }
 
 output "grafana_admin_secret_arn" {

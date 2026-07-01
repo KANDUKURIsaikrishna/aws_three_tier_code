@@ -1,0 +1,185 @@
+#!/bin/bash
+set -euo pipefail
+exec > /var/log/monitoring-init.log 2>&1
+
+REGION="${region}"
+CLUSTER_NAME="${cluster_name}"
+SECRET_NAME="${grafana_admin_secret_name}"
+KSM_PORT="${ksm_nodeport}"
+NE_PORT="${ne_nodeport}"
+
+# ── Install Docker + tools ────────────────────────────────────────────────────
+apt-get update -y
+apt-get install -y docker.io docker-compose-plugin awscli jq
+systemctl enable docker
+systemctl start docker
+
+# ── Directory structure ───────────────────────────────────────────────────────
+mkdir -p /opt/monitoring/{prometheus/targets,grafana/provisioning/datasources,loki}
+
+# ── Grafana admin password from Secrets Manager ───────────────────────────────
+GRAFANA_PASSWORD=$(aws secretsmanager get-secret-value \
+  --secret-id "$SECRET_NAME" \
+  --region "$REGION" \
+  --query SecretString \
+  --output text)
+
+# ── Node-discovery script (cron updates Prometheus file_sd targets) ───────────
+# Terraform substitutes ${region}, ${cluster_name}, etc. at apply time so the
+# script has hardcoded values and needs no AWS env vars beyond the instance role.
+cat > /usr/local/bin/update-prom-targets.sh << 'SCRIPT_EOF'
+#!/bin/bash
+REGION="${region}"
+CLUSTER_NAME="${cluster_name}"
+KSM_PORT="${ksm_nodeport}"
+NE_PORT="${ne_nodeport}"
+
+NODE_IPS=$(aws ec2 describe-instances \
+  --region "$REGION" \
+  --filters \
+    "Name=tag:eks:cluster-name,Values=$CLUSTER_NAME" \
+    "Name=instance-state-name,Values=running" \
+  --query 'Reservations[*].Instances[*].PrivateIpAddress' \
+  --output text | tr '\t\n' ' ' | xargs)
+
+build_json() {
+  local port=$1
+  local first=true
+  printf '['
+  for ip in $NODE_IPS; do
+    [ "$first" = "false" ] && printf ','
+    printf '{"targets":["%s:%s"],"labels":{"cluster":"%s"}}' \
+      "$ip" "$port" "$CLUSTER_NAME"
+    first=false
+  done
+  printf ']'
+}
+
+build_json "$KSM_PORT" > /opt/monitoring/prometheus/targets/ksm.json
+build_json "$NE_PORT"  > /opt/monitoring/prometheus/targets/ne.json
+SCRIPT_EOF
+
+chmod +x /usr/local/bin/update-prom-targets.sh
+/usr/local/bin/update-prom-targets.sh
+
+# Refresh every 5 minutes (handles node replacements / scale events)
+echo "*/5 * * * * root /usr/local/bin/update-prom-targets.sh" > /etc/cron.d/prom-targets
+
+# ── Prometheus config (static + file_sd so cron can hot-update targets) ───────
+cat > /opt/monitoring/prometheus/prometheus.yml << 'PROM_EOF'
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: 'kube-state-metrics'
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/ksm.json']
+        refresh_interval: 5m
+
+  - job_name: 'node-exporter'
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/ne.json']
+        refresh_interval: 5m
+PROM_EOF
+
+# ── Loki config ───────────────────────────────────────────────────────────────
+cat > /opt/monitoring/loki/config.yaml << 'LOKI_EOF'
+auth_enabled: false
+server:
+  http_listen_port: 3100
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: boltdb-shipper
+      object_store: filesystem
+      schema: v11
+      index:
+        prefix: index_
+        period: 24h
+limits_config:
+  allow_structured_metadata: false
+LOKI_EOF
+
+# ── Grafana datasources ───────────────────────────────────────────────────────
+cat > /opt/monitoring/grafana/provisioning/datasources/datasources.yaml << 'GRAFANA_EOF'
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+  - name: Loki
+    type: loki
+    uid: loki
+    url: http://loki:3100
+    editable: false
+GRAFANA_EOF
+
+# ── Docker Compose ────────────────────────────────────────────────────────────
+cat > /opt/monitoring/docker-compose.yml << COMPOSE_EOF
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - /opt/monitoring/prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - /opt/monitoring/loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/config.yaml
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=$GRAFANA_PASSWORD
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    volumes:
+      - /opt/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - loki
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+COMPOSE_EOF
+
+# ── Start the stack ───────────────────────────────────────────────────────────
+cd /opt/monitoring
+docker compose up -d

@@ -222,6 +222,114 @@ Terraform's Helm provider marks a release as created in state even if the pods n
 
 ---
 
+---
+
+## TF-006 — kube-prometheus-stack still timing out even after serialisation
+
+**Symptom**
+```
+module.eks_addons.helm_release.kube_prometheus_stack: Still creating... [21m00s elapsed]
+Error: context deadline exceeded
+  with module.eks_addons.helm_release.kube_prometheus_stack
+Warning: Helm release "" was created but has a failed status.
+```
+
+**Root cause**
+
+Even with a 900 s timeout and a serialised `depends_on` chain, `kube-prometheus-stack` (~6 pods: Prometheus, Grafana, Alertmanager, kube-state-metrics, node-exporter, operator) saturates the single `t3.medium` node (2 vCPU, 4 GB). The images alone exceed 1.5 GB to pull on a cold node; CPU stays pegged while the operator waits for CRDs to settle.
+
+**Resolution — move Prometheus + Grafana + Loki to a dedicated EC2 instance**
+
+Architecture change:
+
+| Before | After |
+|---|---|
+| kube-prometheus-stack (6 pods, ~800 MB RAM) in EKS | Removed from EKS |
+| loki-stack (2 pods, ~150 MB RAM) in EKS | Removed from EKS |
+| — | `t3.small` EC2 with Docker Compose: Prometheus + Grafana + Loki |
+| — | `kube-state-metrics` Helm chart only (~50 MB) |
+| — | `prometheus-node-exporter` Helm chart only (~30 MB) |
+| — | `promtail` Helm chart (daemonset, ~50 MB) → pushes logs to Loki on EC2 |
+
+**EKS node RAM freed: ~950 MB**
+
+Files changed:
+
+| File | Change |
+|---|---|
+| `modules/eks-addons/observability.tf` | Replaced kube-prometheus-stack + loki with kube-state-metrics + node-exporter + promtail |
+| `modules/eks-addons/gitops.tf` | ArgoCD `depends_on` updated to `helm_release.promtail` |
+| `modules/eks-addons/variables.tf` | Added `loki_url` variable |
+| `modules/eks-addons/outputs.tf` | Removed kube_prometheus_stack/loki outputs |
+| `modules/eks/outputs.tf` | Added `cluster_security_group_id` |
+| `modules/monitoring-ec2/` | New module: EC2 + SG + IAM + Docker Compose user-data |
+| `main.tf` | Added `aws_eip.monitoring` + `module.monitoring_ec2` |
+| `variables.tf` | Added `monitoring_admin_cidr` |
+| `outputs.tf` | Replaced `loki_service_url` with `grafana_url`, `prometheus_url`, `loki_url` |
+
+**How Prometheus scrapes EKS nodes**
+
+`kube-state-metrics` and `prometheus-node-exporter` are exposed as NodePort services (30808, 30809). Prometheus on EC2 uses `file_sd_configs` targeting those NodePorts on EKS node private IPs. A cron job (`update-prom-targets.sh`) runs every 5 minutes and rewrites the target JSON files using `aws ec2 describe-instances --filters "Name=tag:eks:cluster-name,Values=<cluster>"`.
+
+**How Promtail finds Loki**
+
+An `aws_eip` is created in root before any module runs. Its `public_ip` is known at plan time. It is passed directly as `loki_url` to `module.eks_addons`, so Promtail's config has the correct Loki endpoint before EC2 even starts. Promtail retries until Loki is reachable.
+
+---
+
+## TF-007 — RDS cross-region backup replication requires CMK KMS key
+
+**Symptom**
+```
+Error: starting RDS Instance Automated Backups Replication
+  (...) api error InvalidParameterValue:
+  Encrypted instances require a valid KMS key ID.
+  with aws_db_instance_automated_backups_replication.secondary
+  on dr.tf line 4
+```
+
+**Root cause**
+
+`dr.tf` tries to replicate RDS automated backups to the secondary region. When the source DB is encrypted with the AWS-managed key (default — `kms_key_id = null` in `modules/rds/main.tf`), AWS requires an explicit CMK in the secondary region for the replication. AWS-managed keys are region-scoped and cannot be used cross-region.
+
+**Resolution**
+
+Two options:
+
+**Option A — Create a CMK and pass it (production path)**
+
+1. Create a KMS key in `var.secondary_region`.
+2. Set `dr_kms_key_id = "arn:aws:kms:<secondary-region>:<account>:key/<id>"` in `terraform.tfvars`.
+3. `dr.tf` now uses `count = var.dr_kms_key_id != "" ? 1 : 0` and passes the key to the replication resource.
+
+**Option B — Skip cross-region backup (demo default)**
+
+Leave `dr_kms_key_id = ""` (the default). The `count = 0` skips the replication resource entirely. RDS automated backups still run within the primary region (7-day retention).
+
+**Code change (`dr.tf`):**
+
+```hcl
+# before
+resource "aws_db_instance_automated_backups_replication" "secondary" {
+  provider               = aws.secondary
+  source_db_instance_arn = module.rds.rds_instance_arn
+  retention_period       = 7
+}
+
+# after
+resource "aws_db_instance_automated_backups_replication" "secondary" {
+  count                  = var.dr_kms_key_id != "" ? 1 : 0
+  provider               = aws.secondary
+  source_db_instance_arn = module.rds.rds_instance_arn
+  retention_period       = 7
+  kms_key_id             = var.dr_kms_key_id
+}
+```
+
+**No code change needed for demo.** Default `dr_kms_key_id = ""` skips replication.
+
+---
+
 ## Diagnostic commands
 
 ```bash
