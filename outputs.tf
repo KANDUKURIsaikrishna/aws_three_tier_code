@@ -69,6 +69,11 @@ output "loki_url" {
   value       = module.monitoring_ec2.loki_url
 }
 
+output "alertmanager_url" {
+  description = "Alertmanager UI on monitoring EC2"
+  value       = module.monitoring_ec2.alertmanager_url
+}
+
 output "grafana_admin_secret_arn" {
   description = "Secrets Manager secret ARN for Grafana admin password — retrieve: aws secretsmanager get-secret-value --secret-id /bookstore/grafana-admin"
   value       = module.eks_addons.grafana_admin_secret_arn

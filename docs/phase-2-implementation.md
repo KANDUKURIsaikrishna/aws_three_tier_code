@@ -1,5 +1,24 @@
 # Phase 2 — Implementation & Deployment Guide
 
+> **Manual vs automated quick reference**
+>
+> | Step | Who does it | When |
+> |---|---|---|
+> | Clone repo, fill `config.env`, run `configure.py` | **Manual** (once) | Before first apply |
+> | Bootstrap S3 backend (`bootstrap-tf-state.sh`) | **Manual** (once per account) | Before first apply |
+> | Fill `versions.tf` backend block | **Manual** (once) | After bootstrap |
+> | Everything in AWS: VPC, EKS, RDS, ECR, IAM, Secrets, EC2 monitoring stack | **Terraform** | `make apply` |
+> | EKS add-ons: cert-manager, ESO, Nginx, ArgoCD, Argo Rollouts | **Terraform (Helm)** | `make apply` |
+> | Monitoring: EC2 + Docker Compose + Dashboards + Alertmanager | **Terraform + user-data** | `make apply` |
+> | IRSA role for ESO + ArgoCD Application | **`eks_bootstrap.py`** | After first apply |
+> | Build + push images | **GitHub Actions CI** (or manual) | On push to main |
+> | DNS NS records at registrar | **Manual** (once) | After first apply |
+> | Configure Alertmanager receiver (Slack/email) | **Manual** (once, SSH) | After first apply |
+>
+> See [docs/observability.md](observability.md) for full monitoring detail.
+
+---
+
 ## Prerequisites
 
 | Tool | Version | Install |
@@ -39,8 +58,17 @@ Internet
   │    EKS node (t3.medium) ◄── ArgoCD GitOps       │
   │      ├── frontend pod (React)                   │
   │      ├── backend pod (Node.js) → RDS MySQL      │
-  │      ├── Prometheus + Grafana + Loki            │
-  │      └── cert-manager / ESO / Argo Rollouts     │
+  │      ├── cert-manager / ESO / Argo Rollouts     │
+  │      ├── node-exporter  (systemd, not a pod)    │
+  │      └── Fluent Bit     (systemd, not a pod)    │
+  │                                                 │
+  │  Public subnet                                  │
+  │    monitoring EC2 (t3.small, EIP)               │
+  │      ├── Prometheus  :9090                      │
+  │      ├── Grafana     :3000                      │
+  │      ├── Alertmanager :9093                     │
+  │      ├── Loki        :3100                      │
+  │      └── kube-state-metrics (reads EKS API)     │
   │                                                 │
   │  RDS private subnets                            │
   │    └── MySQL 8.0 (Multi-AZ, encrypted)          │
@@ -137,10 +165,14 @@ terraform apply tfplan
 - ACM TLS certificate for `*.b17facebook.xyz`
 - Route53 public hosted zone for `b17facebook.xyz`
 - Route53 private zone `bookstore.internal` → RDS CNAME
-- All EKS add-ons via Helm: cert-manager, ESO, nginx-ingress, Prometheus+Grafana+Loki, Argo Rollouts, ArgoCD
+- All EKS add-ons via Helm: cert-manager, ESO, nginx-ingress, ArgoCD, Argo Rollouts
+- **Monitoring EC2** (`t3.small`, EIP) with Docker Compose: Prometheus + Grafana + Alertmanager + Loki + kube-state-metrics — fully automated, no manual steps
+- node-exporter + Fluent Bit baked into EKS node launch template (systemd, not pods)
 - GitHub OIDC IAM role for CI
 
-**Expected time:** 15-20 minutes (EKS + RDS are slow to provision).
+> **Tip:** Use `make apply` instead of `terraform apply` — it runs `init`, imports any pre-existing Secrets Manager secrets, then applies.
+
+**Expected time:** 25–35 minutes (EKS + RDS + EC2 init).
 
 Save outputs — needed in later steps:
 ```bash
@@ -149,6 +181,11 @@ terraform output rds_endpoint
 terraform output eks_cluster_name
 terraform output route53_public_name_servers
 terraform output rds_secret_arn
+
+# Monitoring URLs (fully automated — just open these after apply)
+terraform output grafana_url          # http://<EIP>:3000
+terraform output prometheus_url       # http://<EIP>:9090
+terraform output alertmanager_url     # http://<EIP>:9093
 ```
 
 ---
@@ -177,7 +214,9 @@ kubectl get nodes
 kubectl get pods -A
 ```
 
-Expected: 1 node in `Ready` state, add-on pods running in `cert-manager`, `ingress-nginx`, `monitoring`, `argocd`, `argo-rollouts` namespaces.
+Expected: 1 node in `Ready` state, add-on pods running in `cert-manager`, `ingress-nginx`, `argocd`, `argo-rollouts` namespaces.
+
+> **No monitoring namespace in EKS.** Prometheus, Grafana, Alertmanager, Loki, and kube-state-metrics all run on the monitoring EC2. Verify with `make monitoring-status`.
 
 ---
 
@@ -339,24 +378,45 @@ kubectl get ingress -n bookstore
 
 # Canary rollout status
 kubectl argo rollouts get rollout backend -n bookstore --watch
-
-# Prometheus targets
-kubectl port-forward svc/kube-prometheus-stack-prometheus -n monitoring 9090:9090
-# Open http://localhost:9090/targets — backend should be UP
-
-# Grafana — retrieve auto-generated password from Secrets Manager
-GRAFANA_PASS=$(aws secretsmanager get-secret-value \
-  --secret-id /bookstore/grafana-admin \
-  --region us-west-1 \
-  --query SecretString --output text)
-echo "Grafana password: $GRAFANA_PASS"
-kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80
-# Open http://localhost:3000 — login: admin / <password printed above>
 ```
 
 Open the app:
 - Frontend: `https://b17facebook.xyz`
 - API: `https://api.b17facebook.xyz/books`
+
+### Step 14b — Verify observability (EC2-based, no kubectl needed)
+
+```bash
+# Get monitoring URLs
+terraform output grafana_url          # → http://<EIP>:3000
+terraform output prometheus_url       # → http://<EIP>:9090
+terraform output alertmanager_url     # → http://<EIP>:9093
+
+# Get Grafana password
+aws secretsmanager get-secret-value \
+  --secret-id /bookstore/grafana-admin \
+  --region us-west-1 \
+  --query SecretString --output text
+
+# Check all monitoring services healthy
+make monitoring-status
+# Expected: prometheus, kube-state-metrics, loki, alertmanager, grafana — all Up
+
+# Prometheus scraping EKS nodes?
+curl -s http://<EIP>:9090/api/v1/targets | jq \
+  '.data.activeTargets[] | {job:.labels.job, health:.health}'
+# Expected: node-exporter=up, kube-state-metrics=up, prometheus=up
+
+# Alertmanager healthy?
+curl -s http://<EIP>:9093/-/healthy
+```
+
+Open dashboards:
+- **Grafana**: `http://<EIP>:3000` → Dashboards → Bookstore → Node Exporter Full
+- **Prometheus**: `http://<EIP>:9090/targets` — all targets should be UP
+- **Alertmanager**: `http://<EIP>:9093` — see active alerts
+
+> For full observability docs: [docs/observability.md](observability.md)
 
 ---
 
@@ -418,7 +478,7 @@ git push → GitHub Actions CI:
      → ArgoCD polls, detects change, syncs cluster
 ```
 
-### EKS Add-ons (all via Terraform helm_release)
+### EKS Add-ons (via Terraform helm_release)
 
 | Add-on | Namespace | Purpose |
 |---|---|---|
@@ -426,10 +486,24 @@ git push → GitHub Actions CI:
 | cert-manager | cert-manager | TLS cert lifecycle |
 | external-secrets | external-secrets | Secrets Manager → k8s Secret sync |
 | ingress-nginx | ingress-nginx | L7 routing + NLB |
-| kube-prometheus-stack | monitoring | Prometheus + Grafana + Alertmanager |
-| loki-stack | monitoring | Log aggregation (Promtail ships logs) |
 | argo-rollouts | argo-rollouts | Progressive delivery controller |
 | argo-cd | argocd | GitOps sync controller |
+
+> **No monitoring pods in EKS.** All observability runs on the monitoring EC2 (Docker Compose). See [docs/observability.md](observability.md).
+
+### Monitoring Stack (EC2 Docker Compose — automated by Terraform)
+
+| Service | Port | Purpose |
+|---|---|---|
+| Prometheus | 9090 | Metrics collection + alerting rule evaluation |
+| Grafana | 3000 | Dashboards + log exploration |
+| Alertmanager | 9093 | Alert routing → Slack / email / webhook |
+| Loki | 3100 (VPC only) | Log aggregation from Fluent Bit |
+| kube-state-metrics | 8080 (internal) | K8s cluster state metrics via EKS API |
+
+**EKS node agents (systemd, not pods):**
+- `node-exporter` v1.8.2 — hardware metrics on port 9100
+- `Fluent Bit` — tails container logs, pushes to Loki
 
 ### Secrets Flow
 ```

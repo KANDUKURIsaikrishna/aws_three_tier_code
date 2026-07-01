@@ -16,7 +16,7 @@ data "aws_ami" "ubuntu" {
 
 resource "aws_security_group" "monitoring" {
   name        = "bookstore-monitoring-sg"
-  description = "Monitoring EC2: Grafana (3000), Prometheus (9090), Loki (3100)"
+  description = "Monitoring EC2: Grafana (3000), Prometheus (9090), Alertmanager (9093), Loki (3100)"
   vpc_id      = var.vpc_id
 
   ingress {
@@ -32,6 +32,13 @@ resource "aws_security_group" "monitoring" {
     protocol    = "tcp"
     cidr_blocks = var.admin_cidr_blocks
     description = "Prometheus UI"
+  }
+  ingress {
+    from_port   = 9093
+    to_port     = 9093
+    protocol    = "tcp"
+    cidr_blocks = var.admin_cidr_blocks
+    description = "Alertmanager UI"
   }
   ingress {
     from_port   = 3100
