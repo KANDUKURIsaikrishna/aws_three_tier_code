@@ -16,6 +16,10 @@ resource "helm_release" "ingress_nginx" {
     name  = "controller.service.type"
     value = "LoadBalancer"
   }
+  set {
+    name  = "controller.podDisruptionBudget.minAvailable"
+    value = "1"
+  }
 
   depends_on = [helm_release.external_secrets]
 }

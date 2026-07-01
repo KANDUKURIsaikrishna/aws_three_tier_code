@@ -55,11 +55,4 @@ resource "aws_security_group_rule" "alb_egress" {
   security_group_id = aws_security_group.alb_frontend.id
 }
 
-resource "aws_security_group_rule" "rds_egress" {
-  type              = "egress"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
-  cidr_blocks       = ["0.0.0.0/0"]
-  security_group_id = aws_security_group.rds.id
-}
+# RDS does not initiate outbound connections — no egress rule needed.
