@@ -375,7 +375,9 @@ App-level PDBs (frontend, backend) existed in `k8s/base/pdb/pdb.yaml` but the in
 
 ---
 
-## CI-001 — Semgrep scan blocks CI pipeline (29 findings, exit code 1)
+## CI-001 — Semgrep scan blocks CI pipeline (29 findings, exit code 1) ✅ RESOLVED
+
+**Status:** Fixed in commits `62c0dc6` + `eebfee2`. CI passes with 0 findings.
 
 **Symptom**
 
@@ -531,20 +533,23 @@ resource "aws_instance" "monitoring" {
 
 The monitoring EC2 requires a public IP by design — Grafana (`:3000`), Prometheus (`:9090`), Alertmanager (`:9093`) UIs are accessed from the operator's workstation via security group rules scoped to `admin_cidr_blocks`. Removing the public IP would break all monitoring access without setting up a bastion or VPN.
 
-**Suppress with inline comment:**
+**Suppress with inline comment — critical gotcha:**
+
+Semgrep anchors `aws-ec2-has-public-ip` to the **`resource` declaration line**, not to the `associate_public_ip_address` attribute line. The `# nosemgrep` comment must be on the same line as the finding anchor or it is ignored.
 
 ```hcl
+# WRONG — nosemgrep on attribute line, finding anchored to resource line → still fires
 resource "aws_instance" "monitoring" {
-  associate_public_ip_address = true  # nosemgrep: aws-ec2-has-public-ip — intentional, SG restricts to admin_cidr_blocks
-  # ...
+  associate_public_ip_address = true  # nosemgrep: aws-ec2-has-public-ip
+}
+
+# CORRECT — nosemgrep on the resource declaration line
+resource "aws_instance" "monitoring" { # nosemgrep: aws-ec2-has-public-ip
+  associate_public_ip_address = true  # intentional — SG restricts to admin_cidr_blocks
 }
 ```
 
-Alternatively, suppress in `.semgrepignore` for the file:
-
-```
-modules/monitoring-ec2/main.tf
-```
+**Commit `eebfee2`** moved the comment to the correct line after the first attempt (commit `62c0dc6`) still triggered 1 finding.
 
 ---
 
