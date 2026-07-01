@@ -330,6 +330,46 @@ resource "aws_db_instance_automated_backups_replication" "secondary" {
 
 ---
 
+## TF-008 / K8S-001 — Security hardening (post-apply audit)
+
+**Scope:** Not errors — proactive fixes found by code audit after the EC2 monitoring migration.
+
+### K8S-001 — MySQL probes lacked `timeoutSeconds` (false liveness kills under load)
+
+**File:** `k8s/base/database/mysql-statefulset.yaml`
+
+`mysqladmin ping` can take 2–3 s when MySQL is under write pressure. The default `timeoutSeconds: 1` caused spurious liveness probe failures, triggering unnecessary pod restarts.
+
+**Fix:** Added `timeoutSeconds: 5` and `failureThreshold: 3` to both `readinessProbe` and `livenessProbe`.
+
+### K8S-002 — Backend resource requests/limits missing from base manifest
+
+**File:** `k8s/base/backend/rollout.yaml`
+
+The base rollout had no `resources` block. Only the prod overlay patched in limits. The dev overlay did not — dev backend pods ran with no CPU/memory limits and could starve other pods on the single node.
+
+**Fix:** Added base resources (`requests: 50m CPU / 64Mi RAM; limits: 250m CPU / 128Mi RAM`). Prod overlay still overrides with higher values. Changed prod overlay `op: add` → `op: replace` (semantically correct now that base has the field).
+
+### TF-008 — RDS egress rule allowing 0.0.0.0/0 (unnecessary blast radius)
+
+**File:** `modules/security/main.tf`
+
+`aws_security_group_rule.rds_egress` allowed all outbound traffic from the RDS security group. RDS never initiates connections — this rule was dead code that unnecessarily widened the attack surface.
+
+**Fix:** Removed `rds_egress` resource entirely. No impact on RDS functionality.
+
+### K8S-003 — Ingress-nginx missing PodDisruptionBudget
+
+**File:** `modules/eks-addons/ingress.tf`
+
+App-level PDBs (frontend, backend) existed in `k8s/base/pdb/pdb.yaml` but the ingress-nginx controller had none. A `kubectl drain` could evict the only ingress pod and drop all external traffic.
+
+**Fix:** Added `controller.podDisruptionBudget.minAvailable: 1` via Helm set. Ensures at least 1 ingress pod stays available during voluntary disruptions.
+
+**Commit:** `f541a00`
+
+---
+
 ## Diagnostic commands
 
 ```bash

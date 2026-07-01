@@ -135,67 +135,59 @@ k8s/
 
 ---
 
-## Item 4 — Observability (Prometheus + Grafana only, no Loki) ✅ DONE
+## Item 4 — Observability (EC2-based Prometheus + Grafana + Loki) ✅ DONE
 
-**Why:** Basic metrics visibility. Loki (log aggregation) is skipped — too heavy for 1 node, and `kubectl logs` is sufficient for a demo.
+**Why:** `kube-prometheus-stack` in EKS (~6 pods, ~950 MB RAM) saturates the single `t3.medium` node even at 900 s timeout. Moving the entire monitoring stack to a dedicated EC2 instance frees ~950 MB RAM and eliminates Helm timeouts — while keeping EKS cluster zero monitoring pods.
 
-**What was done:**
+**Architecture:**
 
-Added to `modules/eks-addons/observability.tf`:
+| Where | Components | How it connects |
+|---|---|---|
+| EC2 `t3.small` (public subnet, EIP) | Prometheus + Grafana + Loki (Docker Compose) | Static EIP; accessible from internet on 3000/9090; Loki on 3100 from VPC only |
+| EKS node launch template | node-exporter (systemd, port 9100) | Prometheus on EC2 scrapes directly via VPC |
+| EKS node launch template | Fluent Bit (systemd) | Pushes container logs to Loki on EC2 (port 3100) |
+| EC2 Docker Compose | kube-state-metrics | Runs on EC2 with kubeconfig; talks to EKS API via EKS access entry |
 
-```hcl
-resource "helm_release" "kube_prometheus_stack" {
-  name       = "kube-prometheus-stack"
-  repository = "https://prometheus-community.github.io/helm-charts"
-  chart      = "kube-prometheus-stack"
-  namespace  = "monitoring"
-  create_namespace = true
+**How Prometheus scrapes EKS nodes:**
+- A cron job (`update-prom-targets.sh`) runs every 5 minutes and rewrites `/opt/monitoring/prometheus/targets/ne.json` using `aws ec2 describe-instances --filters "Name=tag:eks:cluster-name"`.
+- Prometheus uses `file_sd_configs` pointing to that JSON file — hot-reloads targets automatically.
+- EKS cluster SG allows inbound port 9100 from monitoring EC2 SG.
 
-  set { name = "prometheus.prometheusSpec.replicas",  value = "1" }
-  set { name = "alertmanager.enabled",                value = "true" }
-  set { name = "alertmanager.alertmanagerSpec.replicas", value = "1" }
-  set { name = "grafana.replicas",                    value = "1" }
-  set { name = "grafana.persistence.enabled",         value = "false" }
-  set { name = "prometheus.prometheusSpec.retention", value = "24h" }
-  set_sensitive { name = "grafana.adminPassword",     value = random_password.grafana_admin.result }
-}
+**How kube-state-metrics runs on EC2 without being in the cluster:**
+- `aws eks update-kubeconfig` generates `/root/.kube/config` at first boot.
+- An EKS access entry grants the monitoring EC2 IAM role `AmazonEKSViewPolicy` (read-only K8s API).
+- kube-state-metrics runs as a Docker Compose service mounting `/root/.kube`, scrapes the EKS API from outside the cluster.
 
-resource "helm_release" "loki" {
-  name       = "loki"
-  repository = "https://grafana.github.io/helm-charts"
-  chart      = "loki-stack"
-  namespace  = "monitoring"
-  set { name = "loki.persistence.enabled", value = "false" }
-  set { name = "promtail.enabled",         value = "true" }
-  set { name = "grafana.enabled",          value = "false" }
-}
-```
+**Automation built in:**
+- Grafana dashboards auto-imported at first boot: Node Exporter Full (1860) + Kubernetes cluster monitoring (315).
+- Prometheus alerting rules provisioned: `NodeDown`, `HighCPUUsage`, `HighMemoryUsage`, `PodCrashLooping`, `KubeStateMetricsDown`.
+- Grafana admin password fetched from Secrets Manager at boot (no plaintext on disk).
 
-Also added:
-- `modules/eks-addons/grafana-secret.tf` — Grafana admin password (`random_password`, 24 chars, no specials) stored in Secrets Manager at `/bookstore/grafana-admin`
-- Grafana auto-configured with Loki as an additional data source (no manual setup)
-- Prometheus storage: ephemeral (no PVC), 24h retention — sufficient for demo
+**EKS node launch template (MIME multipart):**
+- AL2 managed node groups merge MIME user-data with EKS bootstrap — custom part runs first, then EKS joins the node.
+- Installs node-exporter v1.8.2 as systemd service.
+- Installs Fluent Bit from official Amazon Linux 2 repo as systemd service.
 
-Added `prom-client` to the Node.js backend:
-- `backend/app.js` exposes `/metrics` endpoint using `prom-client`
-- Tracks: `http_requests_total` (Counter) and `http_request_duration_seconds` (Histogram) with method/route/status labels
-- Default Node.js metrics also collected via `collectDefaultMetrics()`
-
-Added `k8s/base/monitoring/servicemonitor.yaml` so Prometheus scrapes the backend automatically.
-
-Access Grafana:
+**Access Grafana:**
 ```bash
-GRAFANA_PASS=$(aws secretsmanager get-secret-value --secret-id /bookstore/grafana-admin \
-  --region us-west-1 --query SecretString --output text)
-kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80
-# Open http://localhost:3000 — login: admin / <password above>
+# Get the EIP-based URL from Terraform outputs
+terraform output grafana_url          # → http://<EIP>:3000
+terraform output prometheus_url       # → http://<EIP>:9090
+
+# Retrieve Grafana admin password
+aws secretsmanager get-secret-value \
+  --secret-id /bookstore/grafana-admin \
+  --region us-west-1 --query SecretString --output text
 ```
 
-**Skipped:** persistent storage for metrics (24h ephemeral sufficient for demo), PagerDuty integration
+**Also added:**
+- `modules/eks-addons/grafana-secret.tf` — Grafana admin password (`random_password`, 24 chars) stored in Secrets Manager at `/bookstore/grafana-admin`
+- `backend/app.js` exposes `/metrics` using `prom-client` (`http_requests_total`, `http_request_duration_seconds`, default Node.js metrics)
+- `k8s/base/monitoring/servicemonitor.yaml` — scrapes backend `/metrics` every 30s
 
-**Files:** `modules/eks-addons/observability.tf`, `modules/eks-addons/grafana-secret.tf`, `backend/app.js`, `k8s/base/monitoring/servicemonitor.yaml`
+**Files:** `modules/monitoring-ec2/` (new module: main.tf, variables.tf, outputs.tf, user-data.sh.tftpl), `modules/eks/node-user-data.sh.tftpl` (new), `modules/eks/main.tf`, `modules/eks-addons/observability.tf`, `modules/eks-addons/grafana-secret.tf`, `backend/app.js`, `k8s/base/monitoring/servicemonitor.yaml`, `main.tf`, `outputs.tf`, `variables.tf`
 
-**Effort:** half day
+**Effort:** 1 day
 
 ---
 
@@ -264,6 +256,46 @@ AnalysisTemplate (`k8s/base/monitoring/analysis-template.yaml`) queries nginx 5x
 
 ---
 
+## Item 7 — EC2 monitoring migration + automation ✅ DONE
+
+**Why:** kube-prometheus-stack timed out even at 900 s due to node resource exhaustion (see `docs/phase-2-troubleshooting.md` TF-006). Zero monitoring pods in EKS + EC2 Docker Compose is the right architecture for a constrained single-node cluster.
+
+**Summary of changes:** See Item 4 above (Observability) for full detail. This item tracks the migration work done after the initial implementation.
+
+**Automation added:**
+- `Makefile` — `make apply` (init + import known secrets + apply), `make monitoring-status`, `make monitoring-logs`
+- Grafana dashboard auto-import script (`import-grafana-dashboards.sh`) runs as background job on first boot
+- Prometheus `rule_files` provisioned with 5 alerting rules
+
+**Commits:** `d0d85cc`
+
+---
+
+## Item 8 — Kubernetes + Terraform security hardening ✅ DONE
+
+**Why:** Audit found 4 real issues across K8s manifests and Terraform security groups.
+
+**Changes:**
+
+| File | Fix |
+|---|---|
+| `modules/security/main.tf` | Removed `rds_egress` (0.0.0.0/0 all protocols). RDS never initiates outbound connections — the rule was dead code that widened blast radius. |
+| `k8s/base/backend/rollout.yaml` | Added resource `requests`/`limits` to the base manifest. Dev overlay had no limits — pods could starve the node. |
+| `k8s/overlays/prod/kustomization.yaml` | Changed `op: add` → `op: replace` for resources patch (base now has resources; `add` is semantically incorrect when field exists). |
+| `k8s/base/database/mysql-statefulset.yaml` | Added `timeoutSeconds: 5` + `failureThreshold: 3` to both probes. `mysqladmin ping` can exceed the default 1 s timeout under load, causing false liveness kills. |
+| `modules/eks-addons/ingress.tf` | Added `controller.podDisruptionBudget.minAvailable: 1` to ingress-nginx Helm chart. |
+
+**What was already correct (not changed):**
+- All 3 workloads (frontend, backend, MySQL) had both liveness + readiness probes.
+- `readOnlyRootFilesystem: true`, `runAsNonRoot: true`, `seccompProfile: RuntimeDefault`, `capabilities: drop ALL` on all workloads that support it.
+- NetworkPolicy, PodDisruptionBudget, HPA all existed.
+- RDS: `multi_az`, `backup_retention_period`, `deletion_protection` all set.
+- ExternalSecrets: no plaintext secrets in Git.
+
+**Commit:** `f541a00`
+
+---
+
 ## Skipped items (explicitly out of scope for this demo)
 
 | Item | Reason skipped |
@@ -281,11 +313,13 @@ AnalysisTemplate (`k8s/base/monitoring/analysis-template.yaml`) queries nginx 5x
 
 ## Work order — completed
 
-| # | Item | Status |
-|---|---|---|
-| 1 | gp3 StorageClass manifest | **DONE** |
-| 2 | EKS add-ons in Terraform (`modules/eks-addons/`) | **DONE** |
-| 3 | Kustomize overlays (dev / prod) | **DONE** |
-| 4 | Observability (Prometheus + Grafana, backend `/metrics`) | **DONE** |
-| 5 | Argo Rollouts canary for backend | **DONE** |
-| 6 | Backend tests (vitest + vi.fn() mock db) | **DONE** |
+| # | Item | Status | Commit |
+|---|---|---|---|
+| 1 | gp3 StorageClass manifest | **DONE** | — |
+| 2 | EKS add-ons in Terraform (`modules/eks-addons/`) | **DONE** | — |
+| 3 | Kustomize overlays (dev / prod) | **DONE** | — |
+| 4 | Observability — EC2-based Prometheus + Grafana + Loki | **DONE** | `0454d90`, `d0d85cc` |
+| 5 | Argo Rollouts canary for backend | **DONE** | — |
+| 6 | Backend tests (vitest + vi.fn() mock db) | **DONE** | — |
+| 7 | EC2 monitoring automation (Makefile, dashboards, alerts) | **DONE** | `d0d85cc` |
+| 8 | K8s + Terraform security hardening | **DONE** | `f541a00` |
