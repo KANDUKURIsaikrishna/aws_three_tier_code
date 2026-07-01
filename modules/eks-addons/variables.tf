@@ -13,7 +13,3 @@ variable "node_role_name" {
   type        = string
 }
 
-variable "loki_url" {
-  description = "Loki base URL on the monitoring EC2 instance (e.g. http://<eip>:3100) — Promtail pushes logs here"
-  type        = string
-}

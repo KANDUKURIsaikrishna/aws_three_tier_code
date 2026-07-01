@@ -12,6 +12,10 @@ resource "aws_eks_cluster" "this" {
     public_access_cidrs     = var.public_access_cidrs
   }
 
+  access_config {
+    authentication_mode = "API_AND_CONFIG_MAP"
+  }
+
   enabled_cluster_log_types = [
     "api", "audit", "authenticator", "controllerManager", "scheduler"
   ]
@@ -34,6 +38,28 @@ resource "aws_iam_openid_connect_provider" "eks" {
   url             = aws_eks_cluster.this.identity[0].oidc[0].issuer
 }
 
+# ── Node Launch Template (node-exporter + Fluent Bit as systemd services) ─────
+# AL2 managed node groups merge MIME multipart user-data with EKS bootstrap.
+# No AMI ID specified → MNG picks EKS-optimised AL2 AMI and appends bootstrap.
+
+resource "aws_launch_template" "nodes" {
+  name_prefix = "${var.prefix}-node-"
+
+  user_data = base64encode(templatefile("${path.module}/node-user-data.sh.tftpl", {
+    cluster_name = var.cluster_name
+    loki_url     = var.loki_url
+  }))
+
+  tag_specifications {
+    resource_type = "instance"
+    tags          = { Name = "${var.prefix}-eks-node" }
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 # ── Managed Node Group ────────────────────────────────────────────────────────
 
 resource "aws_eks_node_group" "this" {
@@ -44,6 +70,11 @@ resource "aws_eks_node_group" "this" {
 
   instance_types = [var.node_instance_type]
   ami_type       = "AL2_x86_64"
+
+  launch_template {
+    id      = aws_launch_template.nodes.id
+    version = aws_launch_template.nodes.latest_version
+  }
 
   scaling_config {
     min_size     = var.node_min_size

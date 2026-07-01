@@ -88,6 +88,7 @@ module "eks" {
   node_min_size      = 1
   node_max_size      = 2
   node_desired_size  = 1
+  loki_url           = "http://${aws_eip.monitoring.public_ip}:3100"
 }
 
 # ── Monitoring EC2 ────────────────────────────────────────────────────────────
@@ -124,7 +125,6 @@ module "eks_addons" {
   cluster_name      = module.eks.cluster_name
   oidc_provider_arn = module.eks.oidc_provider_arn
   node_role_name    = module.eks.node_role_name
-  loki_url          = "http://${aws_eip.monitoring.public_ip}:3100"
 
   depends_on = [module.eks]
 }

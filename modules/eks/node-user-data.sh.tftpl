@@ -1,0 +1,77 @@
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="==EKSBOUNDARY=="
+
+--==EKSBOUNDARY==
+Content-Type: text/x-shellscript; charset="us-ascii"
+
+#!/bin/bash
+set -ex
+exec >> /var/log/custom-node-setup.log 2>&1
+
+# ── node-exporter v1.8.2 as systemd ──────────────────────────────────────────
+NE_VER="1.8.2"
+curl -sL \
+  "https://github.com/prometheus/node_exporter/releases/download/v$${NE_VER}/node_exporter-$${NE_VER}.linux-amd64.tar.gz" \
+  | tar xzf - -C /tmp --strip-components=1 --wildcards "*/node_exporter"
+install -m 755 /tmp/node_exporter /usr/local/bin/node_exporter
+id -u node_exporter &>/dev/null || useradd -r -s /bin/false node_exporter
+
+cat > /etc/systemd/system/node_exporter.service << 'NE_SVC'
+[Unit]
+Description=Prometheus Node Exporter
+After=network.target
+[Service]
+User=node_exporter
+ExecStart=/usr/local/bin/node_exporter
+Restart=always
+RestartSec=5s
+[Install]
+WantedBy=multi-user.target
+NE_SVC
+
+systemctl daemon-reload
+systemctl enable --now node_exporter
+
+# ── Fluent Bit (container logs → Loki on monitoring EC2) ─────────────────────
+# Single-quoted heredoc: $basearch is a yum variable (expanded by yum, not bash)
+cat > /etc/yum.repos.d/fluent-bit.repo << 'FB_REPO'
+[fluent-bit]
+name=Fluent Bit
+baseurl=https://packages.fluentbit.io/amazonlinux/2/$basearch/
+gpgcheck=1
+gpgkey=https://packages.fluentbit.io/fluentbit.key
+enabled=1
+FB_REPO
+
+yum install -y fluent-bit
+
+# Terraform substitutes ${loki_url} at apply time; bash extracts just the host
+LOKI_HOST=$(echo "${loki_url}" | sed 's|http://||' | cut -d: -f1)
+
+# Unquoted FBEOF: bash expands $${LOKI_HOST} (→ ${LOKI_HOST} after Terraform) at runtime
+cat > /etc/fluent-bit/fluent-bit.conf << FBEOF
+[SERVICE]
+    Flush           5
+    Log_Level       warn
+    Parsers_File    /etc/fluent-bit/parsers.conf
+
+[INPUT]
+    Name             tail
+    Path             /var/log/containers/*.log
+    Tag              kube.*
+    Parser           cri
+    Refresh_Interval 5
+    Mem_Buf_Limit    10MB
+    Skip_Long_Lines  On
+
+[OUTPUT]
+    Name    loki
+    Match   *
+    Host    $${LOKI_HOST}
+    Port    3100
+    Labels  job=eks-containers,cluster=${cluster_name}
+FBEOF
+
+systemctl enable --now fluent-bit
+
+--==EKSBOUNDARY==--

@@ -5,17 +5,22 @@ exec > /var/log/monitoring-init.log 2>&1
 REGION="${region}"
 CLUSTER_NAME="${cluster_name}"
 SECRET_NAME="${grafana_admin_secret_name}"
-KSM_PORT="${ksm_nodeport}"
-NE_PORT="${ne_nodeport}"
+NE_PORT="${ne_port}"
 
 # ── Install Docker + tools ────────────────────────────────────────────────────
 apt-get update -y
-apt-get install -y docker.io docker-compose-plugin awscli jq
+apt-get install -y docker.io docker-compose-plugin awscli jq curl
 systemctl enable docker
 systemctl start docker
 
+# ── Install kubectl ───────────────────────────────────────────────────────────
+KUBECTL_VER="v1.31.0"
+curl -sL "https://dl.k8s.io/release/$${KUBECTL_VER}/bin/linux/amd64/kubectl" \
+  -o /usr/local/bin/kubectl
+chmod +x /usr/local/bin/kubectl
+
 # ── Directory structure ───────────────────────────────────────────────────────
-mkdir -p /opt/monitoring/{prometheus/targets,grafana/provisioning/datasources,loki}
+mkdir -p /opt/monitoring/{prometheus/{targets,rules},grafana/provisioning/{datasources,dashboards},loki}
 
 # ── Grafana admin password from Secrets Manager ───────────────────────────────
 GRAFANA_PASSWORD=$(aws secretsmanager get-secret-value \
@@ -24,15 +29,25 @@ GRAFANA_PASSWORD=$(aws secretsmanager get-secret-value \
   --query SecretString \
   --output text)
 
+# Write to temp file so background dashboard importer can read it
+echo "$GRAFANA_PASSWORD" > /run/grafana-pass
+chmod 600 /run/grafana-pass
+
+# ── kubeconfig for kube-state-metrics Docker container ───────────────────────
+mkdir -p /root/.kube
+aws eks update-kubeconfig \
+  --region "$REGION" \
+  --name "$CLUSTER_NAME" \
+  --kubeconfig /root/.kube/config
+
 # ── Node-discovery script (cron updates Prometheus file_sd targets) ───────────
-# Terraform substitutes ${region}, ${cluster_name}, etc. at apply time so the
-# script has hardcoded values and needs no AWS env vars beyond the instance role.
+# Terraform substitutes ${region}, ${cluster_name}, ${ne_port} at apply time
+# so the written script has hardcoded values — no env vars needed at runtime.
 cat > /usr/local/bin/update-prom-targets.sh << 'SCRIPT_EOF'
 #!/bin/bash
 REGION="${region}"
 CLUSTER_NAME="${cluster_name}"
-KSM_PORT="${ksm_nodeport}"
-NE_PORT="${ne_nodeport}"
+NE_PORT="${ne_port}"
 
 NODE_IPS=$(aws ec2 describe-instances \
   --region "$REGION" \
@@ -55,8 +70,7 @@ build_json() {
   printf ']'
 }
 
-build_json "$KSM_PORT" > /opt/monitoring/prometheus/targets/ksm.json
-build_json "$NE_PORT"  > /opt/monitoring/prometheus/targets/ne.json
+build_json "$NE_PORT" > /opt/monitoring/prometheus/targets/ne.json
 SCRIPT_EOF
 
 chmod +x /usr/local/bin/update-prom-targets.sh
@@ -65,23 +79,75 @@ chmod +x /usr/local/bin/update-prom-targets.sh
 # Refresh every 5 minutes (handles node replacements / scale events)
 echo "*/5 * * * * root /usr/local/bin/update-prom-targets.sh" > /etc/cron.d/prom-targets
 
-# ── Prometheus config (static + file_sd so cron can hot-update targets) ───────
+# ── Prometheus config ─────────────────────────────────────────────────────────
 cat > /opt/monitoring/prometheus/prometheus.yml << 'PROM_EOF'
 global:
   scrape_interval: 30s
   evaluation_interval: 30s
 
+rule_files:
+  - "/etc/prometheus/rules/*.yml"
+
 scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
   - job_name: 'kube-state-metrics'
-    file_sd_configs:
-      - files: ['/etc/prometheus/targets/ksm.json']
-        refresh_interval: 5m
+    static_configs:
+      - targets: ['kube-state-metrics:8080']
 
   - job_name: 'node-exporter'
     file_sd_configs:
       - files: ['/etc/prometheus/targets/ne.json']
         refresh_interval: 5m
 PROM_EOF
+
+# ── Prometheus alerting rules ─────────────────────────────────────────────────
+cat > /opt/monitoring/prometheus/rules/bookstore.yml << 'RULES_EOF'
+groups:
+  - name: bookstore
+    rules:
+      - alert: NodeDown
+        expr: up{job="node-exporter"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "EKS node {{ $labels.instance }} unreachable"
+
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU > 80% on {{ $labels.instance }}: {{ $value | printf \"%.1f\" }}%"
+
+      - alert: HighMemoryUsage
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory > 85% on {{ $labels.instance }}: {{ $value | printf \"%.1f\" }}%"
+
+      - alert: PodCrashLooping
+        expr: rate(kube_pod_container_status_restarts_total[15m]) * 60 * 15 > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} crash-looping"
+
+      - alert: KubeStateMetricsDown
+        expr: up{job="kube-state-metrics"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "kube-state-metrics is unreachable — no Kubernetes metrics"
+RULES_EOF
 
 # ── Loki config ───────────────────────────────────────────────────────────────
 cat > /opt/monitoring/loki/config.yaml << 'LOKI_EOF'
@@ -113,7 +179,7 @@ limits_config:
 LOKI_EOF
 
 # ── Grafana datasources ───────────────────────────────────────────────────────
-cat > /opt/monitoring/grafana/provisioning/datasources/datasources.yaml << 'GRAFANA_EOF'
+cat > /opt/monitoring/grafana/provisioning/datasources/datasources.yaml << 'GRAFANA_DS_EOF'
 apiVersion: 1
 datasources:
   - name: Prometheus
@@ -127,9 +193,24 @@ datasources:
     uid: loki
     url: http://loki:3100
     editable: false
-GRAFANA_EOF
+GRAFANA_DS_EOF
+
+# ── Grafana dashboard provisioner config ──────────────────────────────────────
+cat > /opt/monitoring/grafana/provisioning/dashboards/dashboards.yaml << 'DASH_PROV_EOF'
+apiVersion: 1
+providers:
+  - name: default
+    orgId: 1
+    folder: Bookstore
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards
+DASH_PROV_EOF
 
 # ── Docker Compose ────────────────────────────────────────────────────────────
+# Unquoted heredoc: $GRAFANA_PASSWORD is expanded by bash at write time
 cat > /opt/monitoring/docker-compose.yml << COMPOSE_EOF
 services:
   prometheus:
@@ -144,6 +225,15 @@ services:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.retention.time=15d'
       - '--web.enable-lifecycle'
+    restart: unless-stopped
+
+  kube-state-metrics:
+    image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.13.0
+    container_name: kube-state-metrics
+    volumes:
+      - /root/.kube:/root/.kube:ro
+    command:
+      - '--kubeconfig=/root/.kube/config'
     restart: unless-stopped
 
   loki:
@@ -183,3 +273,46 @@ COMPOSE_EOF
 # ── Start the stack ───────────────────────────────────────────────────────────
 cd /opt/monitoring
 docker compose up -d
+
+# ── Import Grafana dashboards in background (after Grafana is healthy) ────────
+cat > /usr/local/bin/import-grafana-dashboards.sh << 'IMPORT_EOF'
+#!/bin/bash
+set -euo pipefail
+exec > /var/log/grafana-dashboard-import.log 2>&1
+
+GRAFANA="http://localhost:3000"
+PASS=$(cat /run/grafana-pass)
+
+for i in $(seq 1 36); do
+  curl -sf "$GRAFANA/api/health" 2>/dev/null | grep -q '"database": "ok"' && break
+  echo "Waiting for Grafana... attempt $i"
+  sleep 10
+done
+
+import_dash() {
+  local id=$1 rev=$2 ds_input=$3
+  local json
+  json=$(curl -sf "https://grafana.com/api/dashboards/$id/revisions/$rev/download") || {
+    echo "Failed to download dashboard $id"
+    return 0
+  }
+  curl -sf -X POST "$GRAFANA/api/dashboards/import" \
+    -u "admin:$PASS" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"dashboard\": $json,
+      \"overwrite\": true,
+      \"inputs\": [{\"name\": \"$ds_input\",\"type\": \"datasource\",\"pluginId\": \"prometheus\",\"value\": \"prometheus\"}],
+      \"folderId\": 0
+    }" > /dev/null
+  echo "Imported Grafana dashboard $id (rev $rev)"
+}
+
+import_dash 1860 37 "DS_PROMETHEUS"  # Node Exporter Full
+import_dash 315  3  "DS_PROMETHEUS"  # Kubernetes cluster monitoring
+
+echo "Dashboard import complete"
+IMPORT_EOF
+
+chmod +x /usr/local/bin/import-grafana-dashboards.sh
+nohup /usr/local/bin/import-grafana-dashboards.sh &
