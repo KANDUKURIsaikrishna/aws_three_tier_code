@@ -38,7 +38,7 @@ resource "aws_security_group" "monitoring" {
     to_port     = 3100
     protocol    = "tcp"
     cidr_blocks = [var.vpc_cidr]
-    description = "Loki push from Promtail in EKS"
+    description = "Loki push from Fluent Bit on EKS nodes"
   }
   egress {
     from_port   = 0
@@ -51,25 +51,36 @@ resource "aws_security_group" "monitoring" {
   tags = { Name = "bookstore-monitoring-sg" }
 }
 
-# Allow monitoring EC2 to scrape kube-state-metrics and node-exporter via NodePort
-resource "aws_security_group_rule" "eks_scrape_ksm" {
-  type                     = "ingress"
-  from_port                = 30808
-  to_port                  = 30808
-  protocol                 = "tcp"
-  source_security_group_id = aws_security_group.monitoring.id
-  security_group_id        = var.eks_node_sg_id
-  description              = "Prometheus on monitoring EC2 scrapes kube-state-metrics NodePort"
-}
-
+# Allow monitoring EC2 to scrape node-exporter (systemd, port 9100) on EKS nodes
 resource "aws_security_group_rule" "eks_scrape_node_exporter" {
   type                     = "ingress"
-  from_port                = 30809
-  to_port                  = 30809
+  from_port                = 9100
+  to_port                  = 9100
   protocol                 = "tcp"
   source_security_group_id = aws_security_group.monitoring.id
   security_group_id        = var.eks_node_sg_id
-  description              = "Prometheus on monitoring EC2 scrapes node-exporter NodePort"
+  description              = "Prometheus on monitoring EC2 scrapes node-exporter systemd service"
+}
+
+# ── EKS Access Entry (monitoring EC2 IAM role → read-only K8s API) ─────────────
+# Enables kube-state-metrics Docker container on EC2 to authenticate via kubeconfig
+
+resource "aws_eks_access_entry" "monitoring" {
+  cluster_name  = var.cluster_name
+  principal_arn = aws_iam_role.monitoring.arn
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "monitoring_view" {
+  cluster_name  = var.cluster_name
+  principal_arn = aws_iam_role.monitoring.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+
+  depends_on = [aws_eks_access_entry.monitoring]
 }
 
 # ── IAM Role ───────────────────────────────────────────────────────────────────
@@ -95,6 +106,11 @@ resource "aws_iam_role_policy" "monitoring" {
       {
         Effect   = "Allow"
         Action   = ["ec2:DescribeInstances"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["eks:DescribeCluster"]
         Resource = "*"
       },
       {
@@ -125,8 +141,7 @@ resource "aws_instance" "monitoring" {
     cluster_name              = var.cluster_name
     region                    = var.region
     grafana_admin_secret_name = var.grafana_admin_secret_name
-    ksm_nodeport              = 30808
-    ne_nodeport               = 30809
+    ne_port                   = 9100
   })
 
   root_block_device {
@@ -136,6 +151,12 @@ resource "aws_instance" "monitoring" {
   }
 
   tags = { Name = "bookstore-monitoring" }
+
+  # Access entry must exist before the instance starts user-data
+  depends_on = [
+    aws_eks_access_entry.monitoring,
+    aws_eks_access_policy_association.monitoring_view,
+  ]
 }
 
 resource "aws_eip_association" "monitoring" {

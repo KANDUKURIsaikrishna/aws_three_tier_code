@@ -4,7 +4,7 @@ variable "vpc_id" {
 }
 
 variable "vpc_cidr" {
-  description = "VPC CIDR block — allows Promtail in EKS to push logs to Loki"
+  description = "VPC CIDR block — allows Fluent Bit on EKS nodes to push logs to Loki"
   type        = string
 }
 
@@ -29,7 +29,7 @@ variable "region" {
 }
 
 variable "eks_node_sg_id" {
-  description = "EKS cluster security group ID — monitoring EC2 gets inbound permission to scrape NodePorts 30808/30809"
+  description = "EKS cluster security group ID — monitoring EC2 gets inbound rule to scrape node-exporter on port 9100"
   type        = string
 }
 

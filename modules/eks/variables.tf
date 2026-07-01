@@ -55,3 +55,9 @@ variable "public_access_cidrs" {
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
+
+variable "loki_url" {
+  description = "Loki push URL on the monitoring EC2 (e.g. http://<eip>:3100) — Fluent Bit on nodes ships container logs here. Empty string disables Fluent Bit output."
+  type        = string
+  default     = ""
+}

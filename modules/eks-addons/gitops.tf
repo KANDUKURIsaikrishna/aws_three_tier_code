@@ -45,5 +45,5 @@ resource "helm_release" "argocd" {
     value = "1"
   }
 
-  depends_on = [helm_release.promtail]
+  depends_on = [helm_release.ingress_nginx]
 }
