@@ -53,9 +53,10 @@ Your cluster has these namespaces:
 | `ingress-nginx` | Nginx Ingress Controller — the front door | Terraform (Helm) |
 | `cert-manager` | Automatic TLS/HTTPS certificates | Terraform (Helm) |
 | `external-secrets` | Syncs passwords from AWS Secrets Manager | Terraform (Helm) |
-| `monitoring` | Prometheus + Grafana — metrics and dashboards | Terraform (Helm) |
 | `argo-rollouts` | Argo Rollouts controller — canary deployments | Terraform (Helm) |
 | `kube-system` | Kubernetes' own internals (DNS, networking) | AWS EKS |
+
+> **No monitoring namespace in EKS.** Prometheus, Grafana, Loki, and kube-state-metrics all run on a dedicated `t3.small` EC2 instance (Docker Compose), outside the cluster. Each EKS node runs `node-exporter` (port 9100) and `Fluent Bit` as **systemd services** via the managed node group launch template — not as Kubernetes pods. This keeps zero monitoring workload inside the cluster and frees ~950 MB RAM on the single `t3.medium` node.
 
 The `k8s/` folder in this repo **manages the `bookstore` namespace** (and the gp3 StorageClass). The platform namespaces are installed by Terraform (`modules/eks-addons/`).
 
@@ -244,7 +245,7 @@ Key details:
 - **1 replica** — one MySQL pod
 - **Storage**: 10 GB EBS volume (`gp3` type) attached to the pod — data survives if the pod restarts
 - **Passwords**: read from the `db-secret` Kubernetes Secret (no hardcoded passwords)
-- **Health checks**: runs `mysqladmin ping` every 10 seconds to confirm MySQL is alive
+- **Health checks**: runs `mysqladmin ping` every 10 seconds to confirm MySQL is alive; `timeoutSeconds: 5` prevents false liveness kills when MySQL is under write pressure (default of 1 s was too tight)
 - **Resources**: requests 250m CPU + 512MB RAM; can use up to 1 CPU + 1GB RAM
 
 ---
@@ -281,6 +282,7 @@ Key details:
 | Root filesystem | Read-only | Security — container can't write to its own disk |
 | Capabilities | ALL dropped | Security — container has minimal Linux privileges |
 | `/tmp` volume | emptyDir | Writable scratch space (needed because root FS is read-only) |
+| Resources (base) | requests: 50m CPU / 64Mi RAM; limits: 250m CPU / 128Mi RAM | Base manifest has limits so dev pods can't starve the node; prod overlay increases these |
 
 **Environment variables** injected from two places:
 - Non-secret config (`DB_PORT`, `DB_NAME`, `APP_PORT`) → from `backend-config` ConfigMap
@@ -344,20 +346,61 @@ Ingress (bookstore.b17facebook.xyz:443)  →  frontend-service:80  →  frontend
 
 ### `monitoring/servicemonitor.yaml` — Backend Metrics
 
-A **ServiceMonitor** is a custom resource understood by the Prometheus Operator (installed as part of `kube-prometheus-stack`). It tells Prometheus: "go scrape the `/metrics` endpoint on any pod that matches the `app: backend` label in the `bookstore` namespace every 30 seconds."
+A **ServiceMonitor** is a custom resource that Prometheus understands. It tells Prometheus: "go scrape the `/metrics` endpoint on any pod that matches the `app: backend` label in the `bookstore` namespace every 30 seconds."
 
 The backend exposes metrics via the `prom-client` library (`backend/app.js`):
 - `http_requests_total` — counter labelled by method, route, and HTTP status code
 - `http_request_duration_seconds` — histogram of response times
 - Default Node.js process metrics (memory, CPU, event loop lag)
 
-This means Prometheus automatically collects backend performance data without any manual configuration. Grafana (also installed by the stack) can visualise these metrics using built-in dashboards.
+> **Where does Prometheus run?** Not inside EKS. Prometheus, Grafana, Loki, and kube-state-metrics run on a dedicated **EC2 instance** (`modules/monitoring-ec2/`) using Docker Compose. There is no `monitoring` namespace in the cluster. The ServiceMonitor here is informational — the EC2 Prometheus scrapes the backend directly via the backend pod IP (which it discovers through the EKS API using kube-state-metrics running on EC2).
 
-Access Grafana locally:
-```bash
-kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80
-# Default credentials: admin / prom-operator
+### How the EC2 monitoring stack connects to EKS
+
 ```
+EC2 (t3.small, EIP)
+├── Prometheus        → scrapes backend pods at port 3000 via file_sd_configs
+│                     → scrapes kube-state-metrics at localhost:8080
+│                     → scrapes node-exporter on EKS nodes at port 9100
+├── Grafana  :3000    → reads from Prometheus + Loki datasources
+├── Loki     :3100    → receives logs from Fluent Bit (on each EKS node)
+└── kube-state-metrics → reads EKS API (read-only access via EKS access entry)
+
+EKS node (AL2, launch template)
+├── node-exporter (systemd, port 9100) → scraped by EC2 Prometheus
+└── Fluent Bit (systemd)               → pushes container logs to Loki on EC2
+```
+
+**Target discovery**: A cron job (`update-prom-targets.sh`) runs every 5 min on EC2, queries `aws ec2 describe-instances --filters "Name=tag:eks:cluster-name"`, and writes a `ne.json` file. Prometheus uses `file_sd_configs` pointing at that file and hot-reloads when it changes.
+
+**Access Grafana:**
+```bash
+# Get URL from Terraform outputs
+terraform output grafana_url
+# → http://<EIP>:3000
+
+# Get admin password from Secrets Manager
+aws secretsmanager get-secret-value \
+  --secret-id /bookstore/grafana-admin \
+  --region us-west-1 --query SecretString --output text
+
+# Grafana dashboards auto-imported at first boot:
+#   - Node Exporter Full (dashboard 1860)
+#   - Kubernetes cluster monitoring (dashboard 315)
+```
+
+---
+
+## EKS Node Agents (not in `k8s/` — installed via launch template)
+
+These are **not Kubernetes pods** and are not in the `k8s/` folder. They run as `systemd` services on each EC2 worker node, installed automatically by the managed node group launch template (`modules/eks/node-user-data.sh.tftpl`) when a node boots.
+
+| Agent | Port | How installed | What it does |
+|---|---|---|---|
+| `node-exporter v1.8.2` | 9100 | systemd unit (binary from GitHub releases) | Exposes hardware + OS metrics: CPU, memory, disk, network per node |
+| `Fluent Bit` | — (outbound only) | systemd unit (Amazon Linux 2 yum repo) | Tails `/var/log/containers/*.log` and pushes to Loki on the monitoring EC2 at port 3100 |
+
+Both agents start before the EKS bootstrap so they are running by the time the node joins the cluster. The EC2 Prometheus scrapes `node-exporter` at `<node-private-ip>:9100`; Fluent Bit pushes logs out to Loki using the monitoring EC2's Elastic IP.
 
 ---
 
@@ -529,8 +572,9 @@ This file tells ArgoCD what to watch and where to deploy it.
 | `ingress-nginx` | Nginx reverse proxy (front door) |
 | `cert-manager` | Automatic HTTPS certificates |
 | `external-secrets` | AWS Secrets Manager sync |
-| `monitoring` | Prometheus + Grafana metrics |
 | `argo-rollouts` | Canary deployment controller |
+
+> Monitoring has **no namespace** — it runs on a dedicated EC2 instance, not inside EKS.
 
 ---
 
@@ -630,6 +674,8 @@ This file tells ArgoCD what to watch and where to deploy it.
 |---|---|---|---|
 | `backend-monitor` | `bookstore` | backend pods | `/metrics` (port 3000) |
 
+> Prometheus runs on the monitoring EC2, not in-cluster. The ServiceMonitor exists as a declarative record of what should be scraped. The EC2 Prometheus uses `file_sd_configs` to discover node IPs and scrapes `kube-state-metrics` (running on EC2) for cluster-level metrics.
+
 ---
 
 ## How It All Connects — The Full Request Journey
@@ -712,9 +758,20 @@ kubectl get application bookstore -n argocd
 kubectl port-forward svc/frontend-service 8080:80 -n bookstore
 # Then open http://localhost:8080
 
-# Port-forward Grafana
-kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80
-# Then open http://localhost:3000
+# Access Grafana on the monitoring EC2 (no kubectl needed)
+terraform output grafana_url
+# → http://<EIP>:3000  (open directly in browser)
+
+# Get Grafana admin password
+aws secretsmanager get-secret-value \
+  --secret-id /bookstore/grafana-admin \
+  --region us-west-1 --query SecretString --output text
+
+# Check monitoring EC2 status (Docker Compose services)
+make monitoring-status
+
+# Tail the monitoring EC2 init log
+make monitoring-logs
 
 # Force ESO to resync the DB secret immediately
 kubectl annotate externalsecret db-secret -n bookstore \

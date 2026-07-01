@@ -238,42 +238,47 @@ Warning: Helm release "" was created but has a failed status.
 
 Even with a 900 s timeout and a serialised `depends_on` chain, `kube-prometheus-stack` (~6 pods: Prometheus, Grafana, Alertmanager, kube-state-metrics, node-exporter, operator) saturates the single `t3.medium` node (2 vCPU, 4 GB). The images alone exceed 1.5 GB to pull on a cold node; CPU stays pegged while the operator waits for CRDs to settle.
 
-**Resolution — move Prometheus + Grafana + Loki to a dedicated EC2 instance**
+**Resolution — move entire monitoring stack to a dedicated EC2 instance (zero monitoring pods in EKS)**
 
 Architecture change:
 
 | Before | After |
 |---|---|
-| kube-prometheus-stack (6 pods, ~800 MB RAM) in EKS | Removed from EKS |
-| loki-stack (2 pods, ~150 MB RAM) in EKS | Removed from EKS |
-| — | `t3.small` EC2 with Docker Compose: Prometheus + Grafana + Loki |
-| — | `kube-state-metrics` Helm chart only (~50 MB) |
-| — | `prometheus-node-exporter` Helm chart only (~30 MB) |
-| — | `promtail` Helm chart (daemonset, ~50 MB) → pushes logs to Loki on EC2 |
+| kube-prometheus-stack (6 pods, ~800 MB RAM) in EKS | Removed from EKS entirely |
+| loki-stack (2 pods, ~150 MB RAM) in EKS | Removed from EKS entirely |
+| — | `t3.small` EC2 with Docker Compose: Prometheus + Grafana + Loki + kube-state-metrics |
+| — | `node-exporter` v1.8.2 as **systemd service** on each EKS AL2 node (launch template) |
+| — | `Fluent Bit` as **systemd service** on each EKS AL2 node → pushes logs to Loki on EC2 |
 
-**EKS node RAM freed: ~950 MB**
+**EKS node RAM freed: ~950 MB. Zero monitoring pods in cluster.**
 
 Files changed:
 
 | File | Change |
 |---|---|
-| `modules/eks-addons/observability.tf` | Replaced kube-prometheus-stack + loki with kube-state-metrics + node-exporter + promtail |
-| `modules/eks-addons/gitops.tf` | ArgoCD `depends_on` updated to `helm_release.promtail` |
-| `modules/eks-addons/variables.tf` | Added `loki_url` variable |
-| `modules/eks-addons/outputs.tf` | Removed kube_prometheus_stack/loki outputs |
-| `modules/eks/outputs.tf` | Added `cluster_security_group_id` |
-| `modules/monitoring-ec2/` | New module: EC2 + SG + IAM + Docker Compose user-data |
-| `main.tf` | Added `aws_eip.monitoring` + `module.monitoring_ec2` |
+| `modules/eks-addons/observability.tf` | Removed all Helm releases (kube-prometheus-stack, loki, kube-state-metrics, node-exporter, promtail) |
+| `modules/eks-addons/gitops.tf` | ArgoCD `depends_on` updated to `helm_release.ingress_nginx` |
+| `modules/eks-addons/variables.tf` | Removed `loki_url` variable |
+| `modules/eks-addons/outputs.tf` | Removed `monitoring_namespace` output |
+| `modules/eks/main.tf` | Added `aws_launch_template.nodes` + `aws_eks_access_entry.monitoring` |
+| `modules/eks/node-user-data.sh.tftpl` | New: MIME multipart user-data installs node-exporter + Fluent Bit as systemd |
+| `modules/monitoring-ec2/` | New module: EC2 + SG + IAM + Docker Compose user-data with KSM |
+| `main.tf` | Added `aws_eip.monitoring` (root resource, breaks circular dep) + `module.monitoring_ec2` |
 | `variables.tf` | Added `monitoring_admin_cidr` |
 | `outputs.tf` | Replaced `loki_service_url` with `grafana_url`, `prometheus_url`, `loki_url` |
+| `modules/security/main.tf` | Removed `rds_egress` rule (RDS never initiates outbound — dead code) |
 
 **How Prometheus scrapes EKS nodes**
 
-`kube-state-metrics` and `prometheus-node-exporter` are exposed as NodePort services (30808, 30809). Prometheus on EC2 uses `file_sd_configs` targeting those NodePorts on EKS node private IPs. A cron job (`update-prom-targets.sh`) runs every 5 minutes and rewrites the target JSON files using `aws ec2 describe-instances --filters "Name=tag:eks:cluster-name,Values=<cluster>"`.
+`node-exporter` runs as a systemd service on each AL2 node (port 9100). A cron job (`update-prom-targets.sh`) runs every 5 minutes on the monitoring EC2, queries `aws ec2 describe-instances --filters "Name=tag:eks:cluster-name,Values=<cluster>"`, and rewrites `/opt/monitoring/prometheus/targets/ne.json`. Prometheus uses `file_sd_configs` and hot-reloads targets automatically. The EKS cluster SG allows inbound port 9100 from the monitoring EC2 SG.
 
-**How Promtail finds Loki**
+**How kube-state-metrics runs outside the cluster**
 
-An `aws_eip` is created in root before any module runs. Its `public_ip` is known at plan time. It is passed directly as `loki_url` to `module.eks_addons`, so Promtail's config has the correct Loki endpoint before EC2 even starts. Promtail retries until Loki is reachable.
+kube-state-metrics runs as a Docker Compose service on the monitoring EC2. At boot, `aws eks update-kubeconfig` generates `/root/.kube/config`. An EKS access entry grants the monitoring EC2 IAM role `AmazonEKSViewPolicy` (read-only K8s API access). kube-state-metrics mounts the kubeconfig and queries the EKS API from outside the cluster.
+
+**EIP circular dependency avoidance**
+
+`aws_eip.monitoring` is created as a root resource before any module runs. Its `public_ip` is known at plan time. It is passed as `loki_url` to `module.eks` (for the Fluent Bit config in the launch template) and as the EC2 host to `module.monitoring_ec2`. No circular dependency between the modules.
 
 ---
 

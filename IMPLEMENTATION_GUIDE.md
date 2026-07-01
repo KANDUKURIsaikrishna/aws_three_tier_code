@@ -65,10 +65,18 @@ Follow every part in order on a first deployment. After initial setup, only Part
 │   │  │   │  Nginx Ingress          MySQL StatefulSet                │   │   │   │
 │   │  │   │  (ingress-nginx ns)     (dev / local only)              │   │   │   │
 │   │  │   │                              │ in prod → RDS             │   │   │   │
+│   │  │   │  ─ ─ node agents (systemd, NOT pods) ─ ─ ─ ─ ─ ─ ─ ─   │   │   │   │
+│   │  │   │    node-exporter :9100    Fluent Bit → Loki EC2 :3100   │   │   │   │
 │   │  │   └──────────────────────────────────────────────────────────┘   │   │   │
-│   │  │                                  │                                │   │   │
-│   │  │   monitoring namespace           │                                │   │   │
-│   │  │   Prometheus + Grafana           │                                │   │   │
+│   │  └──────────────────────────────────────────────────────────────────┘   │   │
+│   │                                                                         │   │
+│   │  ┌──────────────────────────────────────────────────────────────────┐   │   │
+│   │  │  Public Subnet — Monitoring EC2 (Amazon EC2 t3.small, EIP)      │   │   │
+│   │  │  Docker Compose (no K8s pods):                                   │   │   │
+│   │  │  ┌──────────────┐ ┌──────────────┐ ┌──────┐ ┌────────────────┐  │   │   │
+│   │  │  │ Prometheus   │ │   Grafana    │ │ Loki │ │kube-state-mets │  │   │   │
+│   │  │  │ :9090        │ │   :3000      │ │:3100 │ │ reads EKS API  │  │   │   │
+│   │  │  └──────────────┘ └──────────────┘ └──────┘ └────────────────┘  │   │   │
 │   │  └──────────────────────────────────────────────────────────────────┘   │   │
 │   │                                                                         │   │
 │   │  ┌──────────────────────────────────────────────────────────────────┐   │   │
@@ -107,7 +115,7 @@ Developer pushes code
 │  Stage 0: Secret Scan      Stage 1: SAST              Stage 2: Lint   │
 │  ┌─────────────────────┐   ┌──────────────────────┐   ┌────────────┐  │
 │  │  Gitleaks           │   │  npm test (vitest)   │   │  ESLint    │  │
-│  │  Full git history   │ → │  npm audit --omit=dev│   │  kubeval   │  │
+│  │  Full git history   │ → │  npm audit --omit=dev│   │kubeconform │  │
 │  └─────────────────────┘   │  Semgrep (OWASP)     │   └────────────┘  │
 │                            └──────────────────────┘         │         │
 │                                    │                         │         │
@@ -509,26 +517,30 @@ Review the plan output. Terraform will create approximately 50–60 resources. L
 terraform apply
 ```
 
-Type `yes` when prompted. This takes **20–30 minutes** because:
+Type `yes` when prompted. This takes **25–40 minutes** because:
 - EKS control plane provisioning takes 10–12 minutes
 - RDS Multi-AZ instance takes 5–8 minutes
-- Helm releases (cert-manager, ESO, ingress-nginx, ArgoCD, Prometheus stack, Argo Rollouts) are installed sequentially after the cluster is ready
+- Helm releases (cert-manager, ESO, ingress-nginx, ArgoCD, Argo Rollouts) are installed sequentially after the cluster is ready
+- Monitoring EC2 boots and runs its init script (~3 min after EC2 starts)
 
 ### Step 3.4 — What the eks-addons module installs
 
 The `modules/eks-addons/` module installs all cluster platform components via Terraform-managed Helm releases. You do not need to install these manually.
 
-| Component | Helm chart | Namespace |
+| Component | How installed | Namespace / Location |
 |---|---|---|
 | EBS CSI driver | `aws_eks_addon` (not Helm) | `kube-system` |
-| cert-manager | `jetstack/cert-manager` v1.14.4 | `cert-manager` |
-| External Secrets Operator | `external-secrets/external-secrets` | `external-secrets` |
-| Nginx Ingress | `ingress-nginx/ingress-nginx` v4.9.1 | `ingress-nginx` |
-| ArgoCD | `argo/argo-cd` | `argocd` |
-| Prometheus + Grafana | `prometheus-community/kube-prometheus-stack` | `monitoring` |
-| Argo Rollouts | `argo/argo-rollouts` | `argo-rollouts` |
+| cert-manager | Helm `jetstack/cert-manager` v1.14.4 | `cert-manager` |
+| External Secrets Operator | Helm `external-secrets/external-secrets` | `external-secrets` |
+| Nginx Ingress | Helm `ingress-nginx/ingress-nginx` v4.9.1 | `ingress-nginx` |
+| ArgoCD | Helm `argo/argo-cd` | `argocd` |
+| Argo Rollouts | Helm `argo/argo-rollouts` | `argo-rollouts` |
+| **Prometheus + Grafana + Loki** | **EC2 Docker Compose** (`modules/monitoring-ec2/`) | **EC2 (EIP), not in EKS** |
+| node-exporter v1.8.2 | AL2 systemd (launch template) | each EKS node :9100 |
+| Fluent Bit | AL2 systemd (launch template) | each EKS node → Loki :3100 |
+| kube-state-metrics | EC2 Docker Compose | EC2 (reads EKS API via access entry) |
 
-All components are configured at minimal replica count for the tech demo (1 replica each). AlertManager is disabled.
+All in-cluster Helm components are configured at 1 replica each (tech demo sizing). **No Prometheus or Grafana pods run inside EKS.**
 
 ### Step 3.5 — Capture outputs
 
@@ -552,7 +564,15 @@ terraform output backend_repo_url
 
 terraform output eks_oidc_provider_arn
 # arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-west-1.amazonaws.com/id/XXXX
+
+terraform output grafana_url
+# http://<EIP>:3000
+
+terraform output prometheus_url
+# http://<EIP>:9090
 ```
+
+> Use `make apply` instead of `terraform apply` for convenience — it runs `init`, imports any pre-existing Secrets Manager secrets, then applies. See the `Makefile` at the repo root.
 
 ---
 
@@ -949,15 +969,29 @@ argocd app get bookstore
 # Health Status:      Healthy
 ```
 
-### Step 10.5 — Access Grafana dashboards (optional)
+### Step 10.5 — Access Grafana dashboards
+
+Grafana runs on the monitoring EC2 — no `kubectl port-forward` needed.
 
 ```bash
-kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80
-# Open http://localhost:3000
-# Default credentials: admin / prom-operator
+# Get the URL (Elastic IP based)
+terraform output grafana_url
+# → http://<EIP>:3000   (open in browser)
+
+# Get admin password from Secrets Manager
+aws secretsmanager get-secret-value \
+  --secret-id /bookstore/grafana-admin \
+  --region us-west-1 --query SecretString --output text
+
+# Check that monitoring services are healthy on EC2
+make monitoring-status
 ```
 
-Grafana includes pre-built Kubernetes dashboards. The backend exposes `http_requests_total` and `http_request_duration_seconds` metrics that Prometheus scrapes via the `ServiceMonitor` in `k8s/base/monitoring/servicemonitor.yaml`.
+Grafana ships with two dashboards auto-imported at first boot:
+- **Node Exporter Full** (dashboard 1860) — per-node CPU, memory, disk, network
+- **Kubernetes cluster monitoring** (dashboard 315) — pod/deployment counts via kube-state-metrics
+
+The backend exposes `http_requests_total` and `http_request_duration_seconds` metrics scraped by the EC2 Prometheus from the backend service every 30 seconds.
 
 ### Step 10.6 — Verify the security scan results
 
@@ -1149,8 +1183,10 @@ kubectl argo rollouts abort backend -n bookstore
 | External Secrets Operator | Terraform (Helm) | `modules/eks-addons/` |
 | Nginx Ingress | Terraform (Helm) | `modules/eks-addons/` |
 | ArgoCD | Terraform (Helm) | `modules/eks-addons/` |
-| Prometheus + Grafana | Terraform (Helm) | `modules/eks-addons/` |
 | Argo Rollouts | Terraform (Helm) | `modules/eks-addons/` |
+| Monitoring EC2 (Prometheus+Grafana+Loki+KSM) | Terraform | `modules/monitoring-ec2/` |
+| node-exporter + Fluent Bit (systemd on EKS nodes) | Terraform (launch template) | `modules/eks/node-user-data.sh.tftpl` |
+| Grafana admin password (`/bookstore/grafana-admin`) | Terraform | `modules/eks-addons/grafana-secret.tf` |
 | ClusterIssuer | ArgoCD (Kustomize base) | `k8s/base/cert-manager/cluster-issuer.yaml` |
 | IRSA for ESO | `eks_bootstrap.py` Phase 3 | (created via AWS CLI) |
 | DB credentials (`/bookstore/db-credentials`) | Terraform | `modules/rds/main.tf` |
