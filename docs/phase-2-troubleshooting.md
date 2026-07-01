@@ -375,6 +375,190 @@ App-level PDBs (frontend, backend) existed in `k8s/base/pdb/pdb.yaml` but the in
 
 ---
 
+## CI-001 — Semgrep scan blocks CI pipeline (29 findings, exit code 1)
+
+**Symptom**
+
+```
+Run python -m pip install semgrep --quiet
+semgrep scan \
+  --config p/nodejs \
+  --config p/owasp-top-ten \
+  --config p/secrets \
+  --error \
+  .
+
+┌──────────────────┐
+│ 29 Code Findings │
+└──────────────────┘
+Ran 354 rules on 146 files: 29 findings.
+Error: Process completed with exit code 1.
+```
+
+All 29 findings are `Blocking`. CI pipeline fails on the `semgrep` step and subsequent jobs do not run.
+
+**Finding categories**
+
+| Rule | Count | Files |
+|---|---|---|
+| `gha-workflow-env-secret` | 1 | `.github/workflows/ci-cd.yml:18` |
+| `github-actions-mutable-action-tag` | 25 | `ci-cd.yml`, `terraform.yml`, `terraform-drift.yml` |
+| `aws-ec2-launch-template-metadata-service-v1-enabled` | 1 | `modules/eks/main.tf:45` |
+| `aws-ec2-has-public-ip` | 1 | `modules/monitoring-ec2/main.tf:139` |
+| `ec2-imdsv1-optional` | 1 | `modules/monitoring-ec2/main.tf:139` |
+
+---
+
+### Fix 1 — `gha-workflow-env-secret`: move `ECR_REGISTRY` to step-level env
+
+**File:** `.github/workflows/ci-cd.yml`
+
+`ECR_REGISTRY` is set in the workflow-level `env:` block, making `${{ secrets.AWS_ACCOUNT_ID }}` accessible to every job including untrusted PR code.
+
+**Fix:** Remove `ECR_REGISTRY` from workflow-level `env:`, add it only to the build step that needs it:
+
+```yaml
+# Remove from top-level env:
+# ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-west-1.amazonaws.com
+
+# Add at step level inside the build job:
+- name: Build and push backend image
+  env:
+    ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-west-1.amazonaws.com
+  run: |
+    docker build ...
+```
+
+---
+
+### Fix 2 — `github-actions-mutable-action-tag`: pin actions to full SHA
+
+**Files:** all three workflow files
+
+Mutable version tags (`@v4`, `@v2`, `@v3`) can be silently repointed — supply-chain risk (see trivy-action compromise). Pin each action to its full 40-character commit SHA.
+
+**How to get SHAs:**
+
+```bash
+# Example — find SHA for actions/checkout@v4
+gh api repos/actions/checkout/git/refs/tags/v4 --jq '.object.sha'
+# If tag is annotated, dereference:
+gh api repos/actions/checkout/git/tags/<sha-from-above> --jq '.object.sha'
+```
+
+**Example replacement pattern:**
+
+```yaml
+# Before (mutable)
+uses: actions/checkout@v4
+
+# After (pinned)
+uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+```
+
+Apply to every `uses:` line across `ci-cd.yml`, `terraform.yml`, `terraform-drift.yml`. Keep the human-readable version in a comment for maintainability.
+
+**High-priority actions to pin** (most commonly compromised):
+
+| Action | Mutable ref used |
+|---|---|
+| `actions/checkout` | `@v4` |
+| `actions/setup-node` | `@v4` |
+| `aws-actions/configure-aws-credentials` | `@v4` |
+| `aws-actions/amazon-ecr-login` | `@v2` |
+| `docker/build-push-action` | `@v6` |
+| `aquasecurity/trivy-action` | `@v0.28.0` |
+| `github/codeql-action/upload-sarif` | `@v4` |
+| `gitleaks/gitleaks-action` | `@v2` |
+| `hashicorp/setup-terraform` | `@v3` |
+| `actions/github-script` | `@v7` |
+| `docker/setup-buildx-action` | `@v3` |
+
+---
+
+### Fix 3 — `ec2-imdsv1-optional`: enforce IMDSv2 on EKS launch template
+
+**File:** `modules/eks/main.tf`
+
+The EKS node launch template (`aws_launch_template.nodes`) does not set `metadata_options`, so IMDSv1 (unauthenticated token-free IMDS) remains available. IMDSv2 requires a session token, blocking SSRF-based metadata exfiltration.
+
+**Fix:** Add `metadata_options` block to the launch template resource:
+
+```hcl
+resource "aws_launch_template" "nodes" {
+  name_prefix = "${var.prefix}-node-"
+  # ... existing config ...
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"   # enforces IMDSv2
+    http_put_response_hop_limit = 2            # 2 required for containers on nodes
+  }
+}
+```
+
+`hop_limit = 2` is required — containers on the node need to reach IMDS through one extra network hop.
+
+---
+
+### Fix 4 — `ec2-imdsv1-optional`: enforce IMDSv2 on monitoring EC2
+
+**File:** `modules/monitoring-ec2/main.tf`
+
+Same IMDSv2 gap on the monitoring EC2 instance.
+
+**Fix:** Add `metadata_options` to `aws_instance.monitoring`:
+
+```hcl
+resource "aws_instance" "monitoring" {
+  # ... existing config ...
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+}
+```
+
+`hop_limit = 1` is fine here — no containers run on the monitoring EC2 host network.
+
+---
+
+### Finding accepted — `aws-ec2-has-public-ip` on monitoring EC2
+
+**Rule:** `terraform.aws.security.aws-ec2-has-public-ip`
+
+The monitoring EC2 requires a public IP by design — Grafana (`:3000`), Prometheus (`:9090`), Alertmanager (`:9093`) UIs are accessed from the operator's workstation via security group rules scoped to `admin_cidr_blocks`. Removing the public IP would break all monitoring access without setting up a bastion or VPN.
+
+**Suppress with inline comment:**
+
+```hcl
+resource "aws_instance" "monitoring" {
+  associate_public_ip_address = true  # nosemgrep: aws-ec2-has-public-ip — intentional, SG restricts to admin_cidr_blocks
+  # ...
+}
+```
+
+Alternatively, suppress in `.semgrepignore` for the file:
+
+```
+modules/monitoring-ec2/main.tf
+```
+
+---
+
+### Priority order for fixing
+
+1. **IMDSv2** (`Fix 3` + `Fix 4`) — Low effort, high security impact. `terraform apply` required.
+2. **Move ECR_REGISTRY** (`Fix 1`) — 5-line change in ci-cd.yml.
+3. **Pin action SHAs** (`Fix 2`) — Mechanical but tedious. Script with `gh api` + `sed` helps.
+4. **Suppress monitoring public IP** — One comment, zero risk change.
+
+After all fixes: `semgrep scan --config p/nodejs --config p/owasp-top-ten --config p/secrets --error .` should return exit code 0.
+
+---
+
 ## Diagnostic commands
 
 ```bash
