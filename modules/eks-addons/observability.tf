@@ -5,7 +5,7 @@ resource "helm_release" "kube_prometheus_stack" {
   namespace        = "monitoring"
   create_namespace = true
   wait             = true
-  timeout          = 600
+  timeout          = 900
 
   set {
     name  = "prometheus.prometheusSpec.replicas"
@@ -58,7 +58,7 @@ resource "helm_release" "kube_prometheus_stack" {
     value = "false"
   }
 
-  depends_on = [aws_secretsmanager_secret_version.grafana_admin]
+  depends_on = [aws_secretsmanager_secret_version.grafana_admin, helm_release.ingress_nginx]
 }
 
 resource "helm_release" "loki" {
@@ -68,7 +68,7 @@ resource "helm_release" "loki" {
   namespace        = "monitoring"
   create_namespace = false
   wait             = true
-  timeout          = 300
+  timeout          = 600
 
   set {
     name  = "loki.persistence.enabled"

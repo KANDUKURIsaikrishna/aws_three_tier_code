@@ -15,6 +15,8 @@ resource "helm_release" "argo_rollouts" {
     name  = "dashboard.enabled"
     value = "false"
   }
+
+  depends_on = [helm_release.argocd]
 }
 
 resource "helm_release" "argocd" {
@@ -24,7 +26,7 @@ resource "helm_release" "argocd" {
   namespace        = "argocd"
   create_namespace = true
   wait             = true
-  timeout          = 600
+  timeout          = 900
 
   set {
     name  = "server.replicas"
@@ -42,4 +44,6 @@ resource "helm_release" "argocd" {
     name  = "controller.replicas"
     value = "1"
   }
+
+  depends_on = [helm_release.kube_prometheus_stack]
 }

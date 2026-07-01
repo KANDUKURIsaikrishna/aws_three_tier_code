@@ -64,9 +64,9 @@ resource "aws_db_instance" "db" {
   deletion_protection = var.deletion_protection
 
   # ── Performance & Monitoring ──────────────────────────────────────
-  performance_insights_enabled          = true
-  performance_insights_retention_period = 7
-  monitoring_interval                   = 60
+  # Performance Insights not supported on db.t3.micro
+  performance_insights_enabled = false
+  monitoring_interval          = 60
   monitoring_role_arn                   = aws_iam_role.rds_monitoring.arn
   enabled_cloudwatch_logs_exports       = ["error", "general", "slowquery"]
 
