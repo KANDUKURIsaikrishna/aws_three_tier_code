@@ -5,10 +5,12 @@ resource "helm_release" "external_secrets" {
   namespace        = "external-secrets"
   create_namespace = true
   wait             = true
-  timeout          = 300
+  timeout          = 600
 
   set {
     name  = "installCRDs"
     value = "true"
   }
+
+  depends_on = [helm_release.cert_manager]
 }

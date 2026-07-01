@@ -6,7 +6,7 @@ resource "helm_release" "ingress_nginx" {
   namespace        = "ingress-nginx"
   create_namespace = true
   wait             = true
-  timeout          = 300
+  timeout          = 600
 
   set {
     name  = "controller.replicaCount"
@@ -16,4 +16,6 @@ resource "helm_release" "ingress_nginx" {
     name  = "controller.service.type"
     value = "LoadBalancer"
   }
+
+  depends_on = [helm_release.external_secrets]
 }
