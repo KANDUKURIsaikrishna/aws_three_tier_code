@@ -2,6 +2,33 @@
 
 > **Architecture principle:** Zero monitoring pods inside EKS. All observability tooling runs on a dedicated `t3.small` EC2 instance (Docker Compose). EKS worker nodes run `node-exporter` and `Fluent Bit` as systemd services — not as Kubernetes pods.
 
+### Why Docker Compose (not systemd binaries, not Kubernetes)?
+
+Five services need to call each other internally:
+
+```
+Grafana     → http://prometheus:9090
+Grafana     → http://loki:3100
+Grafana     → http://alertmanager:9093
+Prometheus  → http://kube-state-metrics:8080
+Prometheus  → http://alertmanager:9093
+```
+
+Docker Compose gives a private Docker network with hostname-based DNS for free. Without it, you'd wire everything manually via `localhost` ports or hardcoded IPs and write 5 separate systemd units that reference each other by port number.
+
+`restart: unless-stopped`, named volumes, `depends_on`, and a single `docker compose up -d` handle lifecycle — no custom init logic needed.
+
+**Why not the alternatives?**
+
+| Option | Verdict for this project |
+|---|---|
+| Systemd binaries directly | Works for single binaries (node-exporter is already done this way). Falls apart for 5 services that need inter-service DNS. |
+| Prometheus in EKS (Helm) | Explicitly avoided — saturates the single `t3.medium` node (~950 MB RAM). See TF-006 in troubleshooting. |
+| Amazon Managed Prometheus + Managed Grafana | Right call for production. Eliminates EC2 entirely, auto-scales, no ops burden. ~$10–30/month extra at this scale. |
+| CloudWatch Metrics + Logs Insights | Viable if all-in on AWS native. No Grafana, no PromQL, less flexible dashboards. |
+
+Docker Compose is the right fit here: multi-service stack, inter-service calls, demo/small scale, single EC2 node.
+
 ---
 
 ## Table of Contents
