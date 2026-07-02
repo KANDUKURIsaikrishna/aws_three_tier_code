@@ -564,6 +564,163 @@ After all fixes: `semgrep scan --config p/nodejs --config p/owasp-top-ten --conf
 
 ---
 
+## TF-009 — Unicode character in MIME user-data crashes AL2 cloud-init ✅ RESOLVED
+
+**Symptom**
+
+EKS node group `CREATE_FAILED` with `NodeCreationFailure: Instances failed to join the kubernetes cluster`. EC2 console output shows:
+
+```
+UnicodeEncodeError: 'ascii' codec can't encode characters in position 222-223: ordinal not in range(128)
+FAILED Failed to start Initial cloud-init job (metadata service crawler).
+```
+
+Node boots but kubelet never starts — EKS bootstrap script is never executed.
+
+**Root cause**
+
+`modules/eks/node-user-data.sh.tftpl` contained a `→` (Unicode U+2192) character inside a shell comment. AL2 uses **Python 2.7** for cloud-init; its MIME email parser (`email.message_from_string`) is ASCII-only. Any non-ASCII byte in MIME multipart user-data aborts `cloud-init` at the `init` stage, preventing all further user-data execution including the EKS bootstrap.
+
+The offending line (before fix):
+```bash
+# Unquoted FBEOF: bash expands $${LOKI_HOST} (→ ${LOKI_HOST} after Terraform) at runtime
+```
+
+**Fix**
+
+Rewrite the comment to use only ASCII characters. Terraform also rejects bare `${VAR}` in `.tftpl` files as unresolved template references — so both problems were in this comment.
+
+**Commit:** `1f1892c`
+
+**Rule for `.tftpl` files targeting AL2:**
+- No Unicode characters anywhere — comments included
+- All `${VAR}` must either be in the `vars` map passed to `templatefile()` or escaped as `$${VAR}`
+
+---
+
+## TF-010 — CloudWatch log group already exists outside Terraform state ✅ RESOLVED
+
+**Symptom**
+
+```
+Error: creating CloudWatch Logs Log Group (/aws/vpc/flowlogs/bookstore):
+  ResourceAlreadyExistsException: The specified log group already exists
+  with module.network.aws_cloudwatch_log_group.vpc_flow_logs
+  on modules/network/main.tf line 70
+```
+
+**Root cause**
+
+A previous partial `terraform apply` created `/aws/vpc/flowlogs/bookstore` but the run failed before writing it to Terraform state. Subsequent applies try to `CREATE` it again.
+
+**Fix — import into state (one-time):**
+
+```bash
+terraform import \
+  module.network.aws_cloudwatch_log_group.vpc_flow_logs \
+  /aws/vpc/flowlogs/bookstore
+```
+
+After import, `terraform apply` and `terraform destroy` both manage the log group correctly.
+
+**Prevention:** This cannot recur after a clean destroy + apply cycle — destroy removes the log group, apply creates it fresh with nothing pre-existing.
+
+---
+
+## TF-011 — EKS node group stuck in `CREATE_FAILED` ✅ RESOLVED
+
+**Symptom**
+
+```
+Error: waiting for EKS Node Group (bookstore-eks:bookstore-node-group) create:
+  unexpected state 'CREATE_FAILED', wanted target 'ACTIVE'.
+  last error: i-XXXXX: NodeCreationFailure: Instances failed to join the kubernetes cluster
+```
+
+**Root cause**
+
+The node group entered `CREATE_FAILED` during a previous apply. A `CREATE_FAILED` node group cannot transition to `ACTIVE` — it must be deleted and recreated. Terraform's retry logic waits for the existing failed group and times out rather than replacing it.
+
+**Fix — force replace:**
+
+```bash
+# Option A: let Terraform handle destroy + recreate in one step
+terraform apply -replace=module.eks.aws_eks_node_group.this
+
+# Option B: manual delete, then apply
+aws eks delete-nodegroup \
+  --cluster-name bookstore-eks \
+  --nodegroup-name bookstore-node-group \
+  --region us-west-1
+
+# Poll until DELETED (~5 min)
+watch -n 10 "aws eks describe-nodegroup \
+  --cluster-name bookstore-eks \
+  --nodegroup-name bookstore-node-group \
+  --region us-west-1 \
+  --query 'nodegroup.status' 2>&1"
+
+terraform apply
+```
+
+**Underlying cause of this specific failure:** TF-009 (non-ASCII in user-data) — once TF-009 was fixed, the replacement node group bootstrapped and joined successfully.
+
+---
+
+## Destroy pre-flight checklist
+
+Run these steps **before** `terraform destroy` to avoid dangling AWS resources blocking VPC deletion:
+
+### Step 1 — Delete Kubernetes load balancers
+
+If `ingress-nginx` was installed (via Helm), it creates an AWS NLB/ELB attached to the VPC subnets. Terraform does not know about it — if the ELB still exists when Terraform tries to delete the VPC, subnet deletion fails with a dependency violation.
+
+```bash
+# Remove ingress-nginx (deletes the NLB/ELB via Kubernetes controller)
+helm uninstall ingress-nginx -n ingress-nginx
+# Wait ~60s for AWS to remove the load balancer, then verify:
+aws elb describe-load-balancers --region us-west-1 \
+  --query 'LoadBalancerDescriptions[?contains(LoadBalancerName,`bookstore`)]'
+aws elbv2 describe-load-balancers --region us-west-1 \
+  --query 'LoadBalancers[?contains(LoadBalancerName,`bookstore`)]'
+```
+
+### Step 2 — Scale down ArgoCD applications (optional but safe)
+
+ArgoCD auto-sync will try to re-create resources while Terraform is tearing them down, causing race conditions. Suspend sync before destroy:
+
+```bash
+kubectl patch application bookstore -n argocd \
+  --type merge -p '{"spec":{"syncPolicy":null}}'
+```
+
+### Step 3 — Run destroy
+
+```bash
+terraform destroy
+```
+
+Terraform destroy order (automatic via dependency graph):
+1. Helm releases (ArgoCD, cert-manager, external-secrets, ingress-nginx, argo-rollouts)
+2. EKS access entry + policy association
+3. EKS node group → EKS cluster
+4. Monitoring EC2 → EIP association
+5. RDS instance
+6. ECR repos (`force_delete = true` handles images automatically)
+7. VPC + subnets + SGs + IGW + NAT
+
+### Step 4 — Handle known destroy edge cases
+
+| Scenario | Symptom | Fix |
+|---|---|---|
+| Node group in `CREATE_FAILED` at destroy time | `Error: deleting EKS Node Group` | Usually auto-clears; if not: `aws eks delete-nodegroup --cluster-name bookstore-eks --nodegroup-name bookstore-node-group --region us-west-1` |
+| VPC subnet deletion blocked by ENI | `DependencyViolation: subnet has dependencies` | Find and delete orphan ENIs: `aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=<VPC_ID>" --region us-west-1` then `aws ec2 delete-network-interface --network-interface-id <eni-id>` |
+| CloudWatch log group retention | Destroy removes the group — no issue post-import | — |
+| EIP not released | EIP remains allocated (billed) after destroy | `aws ec2 release-address --allocation-id <alloc-id> --region us-west-1` |
+| Secrets Manager secret deletion | SM secrets have 7-day recovery window by default | `aws secretsmanager delete-secret --secret-id /bookstore/db-credentials --force-delete-without-recovery --region us-west-1` (if needed for clean re-apply) |
+
+---
+
 ## Diagnostic commands
 
 ```bash
