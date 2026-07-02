@@ -48,7 +48,7 @@ yum install -y fluent-bit
 # Terraform substitutes ${loki_url} at apply time; bash extracts just the host
 LOKI_HOST=$(echo "${loki_url}" | sed 's|http://||' | cut -d: -f1)
 
-# Unquoted FBEOF: bash expands $${LOKI_HOST} (→ ${LOKI_HOST} after Terraform) at runtime
+# Unquoted FBEOF: Terraform turns $${LOKI_HOST} → ${LOKI_HOST}; bash expands it at runtime
 cat > /etc/fluent-bit/fluent-bit.conf << FBEOF
 [SERVICE]
     Flush           5
