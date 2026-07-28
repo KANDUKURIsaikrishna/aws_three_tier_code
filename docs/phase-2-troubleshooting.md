@@ -667,16 +667,261 @@ terraform apply
 
 ---
 
+## TF-012 — Secrets Manager secret "already scheduled for deletion"
+
+**Symptom**
+```
+Error: creating Secrets Manager Secret (/bookstore/grafana-admin):
+  InvalidRequestException: You can't create this secret because a secret
+  with this name is already scheduled for deletion.
+  with module.eks_addons.aws_secretsmanager_secret.grafana_admin
+  on modules/eks-addons/grafana-secret.tf line 6
+```
+
+**Root cause**
+
+A previous `terraform destroy` (or a manual delete) removed `/bookstore/grafana-admin`, but `recovery_window_in_days = 7` on `aws_secretsmanager_secret.grafana_admin` (modules/eks-addons/grafana-secret.tf:8) means AWS soft-deletes it — the name stays reserved in "pending deletion" state for 7 days. A subsequent `terraform apply` tries to `CREATE` a secret with the same name and AWS rejects it outright (distinct from TF-003, which is `ResourceExistsException` on a live secret — this is `InvalidRequestException` on a *pending-deletion* one).
+
+**Fix — force-delete the pending secret, then re-apply:**
+
+```bash
+aws secretsmanager delete-secret \
+  --secret-id /bookstore/grafana-admin \
+  --region us-west-1 \
+  --force-delete-without-recovery
+
+terraform apply
+```
+
+**Alternative — restore instead of force-delete** (keeps the old Grafana admin password instead of generating a new one):
+```bash
+aws secretsmanager restore-secret --secret-id /bookstore/grafana-admin --region us-west-1
+# then import it into state (same procedure as TF-003) instead of letting Terraform create it
+```
+
+**Applies to any secret in this project with `recovery_window_in_days > 0`** — same failure mode can hit `/bookstore/db-credentials` (see Destroy pre-flight checklist, Step 4 table, below).
+
+---
+
+## TF-013 — `Kubernetes cluster unreachable: the server has asked for the client to provide credentials`
+
+**Symptom**
+```
+Error: Kubernetes cluster unreachable: the server has asked for the client to provide credentials
+  with module.eks_addons.helm_release.cert_manager,
+  on modules/eks-addons/cert-manager.tf line 1, in resource "helm_release" "cert_manager":
+```
+Hits any `helm_release` in `modules/eks-addons/` — cert-manager is just whichever one runs first.
+
+**Root cause — verified, not assumed**
+
+`aws eks get-token` (the exec plugin in `providers.tf`'s `helm` provider block) succeeds and returns a syntactically valid `ExecCredential` token — this is NOT an expired-session or missing-CLI-creds problem. Checked with:
+```bash
+aws eks list-access-entries --cluster-name bookstore-eks --region us-west-1
+```
+which returned only:
+- `arn:aws:iam::<ACCOUNT_ID>:role/aws-service-role/eks.amazonaws.com/AWSServiceRoleForAmazonEKS`
+- `arn:aws:iam::<ACCOUNT_ID>:role/bookstore-eks-node-role`
+
+The IAM principal actually running `terraform apply` (e.g. `arn:aws:iam::<ACCOUNT_ID>:user/<your-iam-user>`) has **no EKS access entry at all**. The token is valid AWS-side, but the API server has no RBAC mapping for that identity, returns 401, and client-go surfaces it as this confusing "asked for credentials" message rather than a clear "Forbidden."
+
+This happens because `aws_eks_cluster.this` (`modules/eks/main.tf`) relies on the implicit `bootstrap_cluster_creator_admin_permissions` grant (default `true`, not set explicitly) — that grant only ever applies to whichever identity/session created the cluster. It does not transfer to a different local AWS profile, a different operator, or a CI role running later.
+
+**Fix — grant an access entry for the principal running Terraform (immediate unblock):**
+
+```bash
+aws eks create-access-entry \
+  --cluster-name bookstore-eks \
+  --region us-west-1 \
+  --principal-arn arn:aws:iam::<ACCOUNT_ID>:user/<your-iam-user>
+
+aws eks associate-access-policy \
+  --cluster-name bookstore-eks \
+  --region us-west-1 \
+  --principal-arn arn:aws:iam::<ACCOUNT_ID>:user/<your-iam-user> \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope type=cluster
+
+terraform apply
+```
+
+**Durable fix — implemented:** `modules/eks/main.tf` now has `aws_eks_access_entry.admin` + `aws_eks_access_policy_association.admin` (`for_each` over `var.admin_principal_arns`), same pattern as the monitoring EC2 role. Root `main.tf` passes `admin_principal_arns = concat([data.aws_caller_identity.current.arn], var.extra_admin_principal_arns)` — so every `apply` grants cluster-admin to whoever is currently running it, plus anyone listed in `var.extra_admin_principal_arns` (teammates, CI/CD OIDC role). No more manual CLI step, and it's tracked in state — `terraform destroy` removes it cleanly (EKS also auto-deletes access entries as part of `DeleteCluster` regardless).
+
+**Why the CLI workaround is safe even without this fix:** EKS access entries are child resources of the cluster — `DeleteCluster` removes them automatically. Unlike ELBs/ENIs/EIPs, they never dangle in the VPC and block `terraform destroy`. The Terraform-native fix above is about not having to repeat the manual step, not about avoiding a destroy hazard.
+
+---
+
+## TF-014 — ArgoCD helm install times out: `context deadline exceeded` after 900s
+
+**Symptom**
+```
+Warning: Helm release "" was created but has a failed status. Use the `helm` command to investigate the error, correct it, then run Terraform again.
+  with module.eks_addons.helm_release.argocd,
+  on modules/eks-addons/gitops.tf line 22, in resource "helm_release" "argocd":
+
+Error: context deadline exceeded
+  with module.eks_addons.helm_release.argocd,
+```
+`argocd-server`, `argocd-redis`, `argocd-dex-server` come up fine; `argocd-repo-server`, `argocd-application-controller`, `argocd-applicationset-controller`, `argocd-notifications-controller` sit `Pending` forever.
+
+**Root cause — verified via `kubectl describe pod`, not assumed**
+
+Not memory/CPU (only 24% of allocatable memory was requested at failure time — checked via `kubectl describe node`). The actual scheduler event:
+```
+Warning  FailedScheduling  default-scheduler  0/1 nodes are available: 1 Too many pods.
+```
+`kubectl get node -o json` showed `capacity.pods: "17"` — this is a **hard AWS ENI/IP ceiling** for `t3.medium` (not a resource-request limit), set once at kubelet bootstrap via the standard EKS max-pods formula. The node was already at exactly 17 running pods (kube-system: aws-node, 2x coredns, 2x ebs-csi-controller, ebs-csi-node, kube-proxy = 7; cert-manager x3; external-secrets x3; ingress-nginx x1; argocd's first 3 pods that did schedule = 3 → 17 total) before ArgoCD's remaining 4 pods even got a chance. `helm wait` then blocks until `timeout = 900` and Terraform reports `context deadline exceeded`.
+
+This is a different failure class from TF-001/TF-006 (which were CPU/memory headroom on a single node for `kube-prometheus-stack`, since removed) — this is a pod-*count* ceiling, unrelated to how much RAM/CPU is actually free.
+
+**Fix — chosen: add a 2nd node (within existing headroom)**
+
+`node_max_size` was already `2` — only `node_desired_size` needed to move from `1` to `2` (`main.tf`, `module.eks`). No autoscaler (Cluster Autoscaler/Karpenter) is installed in this repo, so `max_size` alone does nothing — `desired_size` is what actually provisions the node.
+
+**Alternative considered, not taken:** VPC CNI prefix delegation (`ENABLE_PREFIX_DELEGATION=true`) would raise the pod ceiling without a 2nd node and at no extra AWS cost, but the *already-running* node's kubelet `--max-pods` is a static value baked in at boot from AWS's standard (non-prefix) formula — enabling prefix delegation on the CNI doesn't retroactively raise it. Getting the real benefit requires the node to bootstrap with an explicit `--max-pods` override, which means calling `/etc/eks/bootstrap.sh` explicitly in `node-user-data.sh.tftpl` instead of relying on EKS's auto-injected bootstrap (see TF-009) — more moving parts in a file that has already broken twice from encoding issues. Deferred; revisit if the 2nd node's extra ~$30/mo becomes a real problem.
+
+**Cleanup required before re-apply** (the failed release leaves state + a live Helm release behind — same pattern as TF-005):
+```bash
+helm uninstall argocd -n argocd   # CRDs are kept by Helm's resource policy — expected
+terraform state rm module.eks_addons.helm_release.argocd
+terraform apply
+```
+
+**No kubectl/helm were installed on this machine** when this was diagnosed — installed via `brew install kubectl helm` to get direct pod/scheduler evidence instead of guessing from the Terraform error text alone. Worth keeping installed for any future EKS debugging.
+
+---
+
+## TF-015 — `.tf` edits to delete-time-only attributes don't take effect until `apply`; destroy leaves orphans that block the next `apply`
+
+**What happened**
+
+During one destroy/apply cycle in this project:
+1. Edited `deletion_protection = false` and `force_destroy = true` in `.tf` files, then went straight to `terraform destroy` without an intermediate `apply`. Both edits were ignored — RDS delete failed with `Cannot delete protected DB Instance`, and the CloudTrail S3 bucket delete failed with `BucketNotEmpty`, even though the config said otherwise.
+2. After fixing those and completing destroy, two Secrets Manager secrets (`/bookstore/grafana-admin`, `/bookstore/db-credentials`) were left in "pending deletion" (7-day recovery window, `recovery_window_in_days = 7`), and a stray `/aws/vpc/flowlogs/bookstore` CloudWatch log group (orphaned from an even older session, never actually in Terraform state despite TF-010 claiming this was resolved) was still live. All three would have hit `terraform apply` immediately the next day with `ResourceExistsException` / `InvalidRequestException` / `ResourceAlreadyExistsException`.
+
+**Root cause — two distinct lessons**
+
+1. **`terraform destroy` does not run an update pass before deleting.** Attributes like `deletion_protection` and `force_destroy` are consulted from *state*, not from the `.tf` file, when a resource is being destroyed. If you change such an attribute and skip straight to `destroy`, Terraform still deletes using the last-`apply`'d value. Fix: either run `terraform apply` first (even a no-op-looking one) so the new value lands in state, or push the change live via AWS CLI directly (`aws rds modify-db-instance --no-deletion-protection`) — both work, CLI is faster when you're already mid-incident.
+
+2. **AWS soft-delete/already-exists semantics let resources silently drift out of Terraform's view.** Secrets Manager's default recovery window, and any partially-failed `apply` that creates a resource before Terraform records it in state, both produce real AWS resources Terraform doesn't know about. The next `apply` collides with them. This project's own TF-003/TF-010 entries document the *symptom*; this entry documents the *prevention*.
+
+**Fix — implemented**
+
+- `modules/eks-addons/grafana-secret.tf` and `modules/rds/main.tf`: both `aws_secretsmanager_secret` resources now use `recovery_window_in_days = 0` (force delete on destroy, no soft-delete window) instead of `7`. This permanently closes the TF-012 hole for both secrets — destroy now actually removes them instead of parking them.
+- Manually force-purged both pending-deletion secrets and deleted the orphaned log group via CLI so the next `apply` starts from a truly clean slate.
+
+**Recommended pre-`apply` sanity check, whenever picking this project back up after a destroy:**
+```bash
+# Anything Secrets Manager thinks is still around?
+aws secretsmanager list-secrets --region us-west-1 --query "SecretList[?starts_with(Name,'/bookstore')].{Name:Name,DeletedDate:DeletedDate}"
+
+# Any log group Terraform doesn't know about?
+aws logs describe-log-groups --log-group-name-prefix "/aws/vpc/flowlogs/bookstore" --region us-west-1
+
+# Does Terraform's state match your expectation (empty after a clean destroy)?
+terraform state list
+
+# Dry-run the full build — catches config errors before you spend 20+ min applying
+terraform plan
+```
+
+**Known non-blocking orphans found during this sweep, not yet cleaned up** (don't match any current resource name in the code, so they won't cause an `apply` error — just cost/clutter): an old Route53 public hosted zone for `b17facebook.xyz` (zone ID `Z09020593QE7ZCUI17J3`, predates current code, distinct from the one Terraform creates/destroys each cycle) and two old IAM roles (`bookstore-eso-role`, `bookstore-external-secrets-irsa`) from before the `eks-addons` module's current IRSA naming scheme. Safe to delete manually if you want a fully clean account, not required for `apply`/`destroy` to succeed.
+
+---
+
+## TF-016 — `helm_release` fails with `read: connection reset by peer` mid-install
+
+**Symptom**
+```
+Warning: Helm release "" was created but has a failed status. Use the `helm` command to investigate the error, correct it, then run Terraform again.
+  with module.eks_addons.helm_release.external_secrets,
+
+Error: 2 errors occurred:
+	* Post "https://<cluster-id>.yl4.us-west-1.eks.amazonaws.com/apis/apiextensions.k8s.io/v1/customresourcedefinitions?...": read tcp 192.168.x.x:xxxxx-><eks-ip>:443: read: connection reset by peer
+```
+Hit on `external_secrets`, but this can land on any `helm_release` in `modules/eks-addons/` — whichever one happens to be mid-install when the network blips.
+
+**Root cause**
+
+A TCP-level reset mid-request, not a config or logic bug. Helm installs a chart's CRDs (`apiextensions.k8s.io/v1/customresourcedefinitions`) before the rest of its templates; if that specific POST gets reset, Helm aborts and marks the whole release `failed` — even though, in this case, the Deployments/pods had already been applied and came up `Running` fine (verified via `kubectl get pods -n external-secrets` and `kubectl get crd | grep external-secrets.io` — all 24 CRDs and all 3 pods were actually present).
+
+Likely cause: a local network interruption (this ran from a home laptop over `192.168.x.x`, apply had already been running 28+ minutes for the RDS instance alone) or a mid-size CRD payload hitting a path-MTU/proxy blip on the way to the EKS public endpoint. Not reproduced on immediate retry, so treated as transient rather than chased further — see `superpowers:systematic-debugging`: a transient, non-reproducible network error after confirming the underlying resources are actually healthy is a legitimate stopping point, not "no root cause found."
+
+**Fix**
+
+None needed in code. Terraform's Helm provider (v2.17+) detects the `failed` release status on the next `apply` and repairs it in place — no manual `helm uninstall` / `terraform state rm` required this time (unlike TF-005, which was a genuine stuck-state case). Just re-run:
+```bash
+terraform apply
+```
+If it fails the same way repeatedly (not just once), then treat it as TF-005 instead — uninstall + state rm + reapply.
+
+**One-time gotcha this surfaced:** after a cluster is destroyed and recreated, its EKS API endpoint hostname changes (new cluster ID in the URL). Local `kubectl`/`helm` CLI commands will fail with `dial tcp: ... no such host` if your kubeconfig still points at the old, now-deleted cluster. Terraform itself is unaffected (its Helm/Kubernetes provider reads `module.eks.cluster_endpoint` fresh every run), but you'll need to refresh your own shell:
+```bash
+aws eks update-kubeconfig --name bookstore-eks --region us-west-1
+```
+
+---
+
+## TF-017 — Kubernetes-provisioned AWS resources (LoadBalancers, log groups) invisible to `terraform destroy`
+
+**What happened**
+
+Two separate resources kept surviving `terraform destroy` with **zero error reported**, then blocked the next `apply`:
+1. `ingress-nginx`'s Kubernetes `Service` (`type=LoadBalancer`) provisions a real AWS NLB as a side effect of the Kubernetes cloud-controller-manager reacting to the Service spec — Terraform's state only knows about the `helm_release`, never calls the AWS API for the NLB itself, so it's structurally invisible to `terraform destroy`. Left alone, it blocks VPC/subnet deletion with `DependencyViolation`.
+2. `/aws/vpc/flowlogs/bookstore` (`modules/network/main.tf`, plain `aws_cloudwatch_log_group`, no `lifecycle` block) reappeared after a "clean" destroy **three times**, with `terraform state list` confirmed empty afterward each time. **Root cause found 2026-07-21** via `aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=CreateLogGroup` (the earlier `AttributeKey=ResourceName` query was a dead end — known CloudTrail limitation for this event type, don't bother with it): two `CreateLogGroup` events, one by `saikrishna` (Terraform, normal), one immediately after by `vpc-flow-logging+<account-id>` — **AWS's own VPC Flow Logs service self-healing its destination log group.** `aws_iam_role_policy.vpc_flow_log` grants that service `logs:CreateLogGroup` (needed for it to work at all); if the log group vanishes while `aws_flow_log.vpc` is still actively delivering records, the service just recreates it using that same permission. The 3rd occurrence was actually caused by the *fix* below — its original version had no ordering relative to `aws_flow_log.vpc`, only an implicit dependency on the log group itself, so it could (and did) race ahead and delete the log group while flow logs were still live.
+
+**Fix — implemented**
+
+Both now have a `null_resource` with a `destroy`-time `local-exec` provisioner that force-deletes the AWS-side resource directly:
+- `modules/eks-addons/ingress.tf` — `null_resource.delete_ingress_nginx_lb`: `kubectl delete svc ingress-nginx-controller -n ingress-nginx`, then a 30s sleep for AWS to actually deprovision the NLB before Terraform reaches the VPC.
+- `modules/network/main.tf` — `null_resource.force_delete_flow_log_group`: explicit `depends_on = [aws_flow_log.vpc]` (the actual fix — ensures flow-log delivery has stopped before the log group is deleted), plus a 15s sleep for any in-flight delivery to fully drain, then `aws logs delete-log-group`.
+
+Both are best-effort (`|| true` throughout) — they need `kubectl`/`aws` CLI available on whatever machine runs `terraform destroy`; if those binaries are missing (e.g. a bare CI runner), the provisioner silently no-ops and you're back to the manual cleanup below.
+
+**Validated:** the ingress-nginx fix has now worked cleanly across multiple `terraform destroy` runs — NLB gone every time, no manual `helm uninstall` step needed. The log group fix's *previous* version reliably failed to prevent recreation (that's how the root cause above was found); the `depends_on` version is not yet validated against a real destroy — confirm on the next cycle and update this entry.
+
+**Manual fallback, if the provisioners don't fire for any reason:**
+```bash
+kubectl delete svc ingress-nginx-controller -n ingress-nginx --ignore-not-found
+aws logs delete-log-group --log-group-name "/aws/vpc/flowlogs/bookstore" --region us-west-1
+```
+
+**Added `null` provider** to `versions.tf` (`hashicorp/null ~> 3.0`) — ran `terraform init` to install it. If you see `Missing required provider` for `null`, run `terraform init` again.
+
+---
+
+## TF-018 — `terraform apply` taking ~1 hour; parallelized the Helm addon chain
+
+**What was slow**
+
+Full `apply` cycles were approaching an hour. Broke down the actual critical path instead of guessing:
+- RDS Multi-AZ creation (~28 min observed) — **not actually the bottleneck**. Nothing in `module.eks_addons` depends on `module.rds`, so Terraform already creates them in parallel; RDS's time is absorbed under the EKS/addons critical path rather than adding to it.
+- The real serial chain: `modules/eks-addons/` had `cert_manager → external_secrets → ingress_nginx → argocd → argo_rollouts`, each `depends_on` the previous one, each with its own `wait=true` + up-to-900s timeout. This was written in TF-001, when the cluster ran a **single node** and couldn't tolerate concurrent Helm installs. By the time this was revisited, the cluster had already moved to 2 nodes (TF-014) and `kube-prometheus-stack` was long gone (moved to EC2) — the original resource-contention justification for full serialization no longer fully applied, but the `depends_on` chain was never revisited.
+
+**Fix — implemented**
+
+`cert-manager`, `external-secrets`, and `ingress-nginx` now install **concurrently** — removed the artificial `depends_on` between them in `modules/eks-addons/external-secrets.tf` and `modules/eks-addons/ingress.tf`. None of the three have a real functional dependency on each other. Kept:
+- `argocd` still waits for `ingress-nginx` (soft dependency — its Ingress resource wants the `nginx` IngressClass to exist)
+- `argo-rollouts` still waits for `argocd` (left as-is, not revisited — it's normally fast, so serializing it costs little)
+
+**Trade-off, accepted knowingly:** 2 nodes is more headroom than the 1-node setup this chain was built for, but not unlimited — if concurrent installs reintroduce resource-contention failures (the TF-001/TF-006 class), that's the signal to partially re-serialize rather than assume something else broke. Check node capacity (`kubectl describe node | grep -A10 "Allocated resources"`) before re-adding `depends_on` links reflexively.
+
+**Not touched:** RDS `multi_az`. Disabling it would speed up RDS creation further, but it's a real HA feature this project's own `test_multi_az_failover.py` (see `docs/superpowers/specs/2026-07-08-cross-region-dr-design.md`) depends on being `true` to test at all — cutting it for apply speed would directly undercut DR testing that was just designed.
+
+---
+
 ## Destroy pre-flight checklist
 
 Run these steps **before** `terraform destroy` to avoid dangling AWS resources blocking VPC deletion:
 
-### Step 1 — Delete Kubernetes load balancers
+### Step 1 — Delete Kubernetes load balancers (now automatic — see TF-017)
 
 If `ingress-nginx` was installed (via Helm), it creates an AWS NLB/ELB attached to the VPC subnets. Terraform does not know about it — if the ELB still exists when Terraform tries to delete the VPC, subnet deletion fails with a dependency violation.
 
+**As of TF-017, this is handled automatically** by `null_resource.delete_ingress_nginx_lb` in `modules/eks-addons/ingress.tf` — it deletes the Service (and waits 30s for AWS to deprovision the NLB) as part of `terraform destroy` itself. Validated working — no manual step needed. Only fall back to the manual command below if the provisioner didn't fire (e.g. `kubectl`/`aws` CLI missing on the machine running destroy) and you see a `DependencyViolation` on subnet deletion:
+
 ```bash
-# Remove ingress-nginx (deletes the NLB/ELB via Kubernetes controller)
+# Manual fallback only
 helm uninstall ingress-nginx -n ingress-nginx
 # Wait ~60s for AWS to remove the load balancer, then verify:
 aws elb describe-load-balancers --region us-west-1 \
@@ -715,9 +960,106 @@ Terraform destroy order (automatic via dependency graph):
 |---|---|---|
 | Node group in `CREATE_FAILED` at destroy time | `Error: deleting EKS Node Group` | Usually auto-clears; if not: `aws eks delete-nodegroup --cluster-name bookstore-eks --nodegroup-name bookstore-node-group --region us-west-1` |
 | VPC subnet deletion blocked by ENI | `DependencyViolation: subnet has dependencies` | Find and delete orphan ENIs: `aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=<VPC_ID>" --region us-west-1` then `aws ec2 delete-network-interface --network-interface-id <eni-id>` |
-| CloudWatch log group retention | Destroy removes the group — no issue post-import | — |
+| CloudWatch log group survives destroy | `/aws/vpc/flowlogs/bookstore` reappears, blocks next apply (TF-010) | `null_resource.force_delete_flow_log_group` in modules/network/main.tf handles this now (TF-017) — belt-and-suspenders, not a real root-cause fix. Fallback: `aws logs delete-log-group --log-group-name "/aws/vpc/flowlogs/bookstore" --region us-west-1` |
 | EIP not released | EIP remains allocated (billed) after destroy | `aws ec2 release-address --allocation-id <alloc-id> --region us-west-1` |
-| Secrets Manager secret deletion | SM secrets have 7-day recovery window by default | `aws secretsmanager delete-secret --secret-id /bookstore/db-credentials --force-delete-without-recovery --region us-west-1` (if needed for clean re-apply) |
+| Secrets Manager secret deletion | SM secrets have 7-day recovery window by default — affects both `/bookstore/db-credentials` and `/bookstore/grafana-admin` (see TF-012) | `aws secretsmanager delete-secret --secret-id <secret-id> --force-delete-without-recovery --region us-west-1` (if needed for clean re-apply) |
+
+---
+
+## TF-019 — Network drops mid-apply: DNS failures, errored.tfstate, stuck DynamoDB lock
+
+**Symptom**
+
+Multiple errors across unrelated resources in a single apply, all sharing the same pattern — DNS resolution failure against AWS service hostnames:
+
+```
+Error: failed to upload state: operation error S3: PutObject, ...
+  Put "https://bookstore-terraform-state-<ACCOUNT_ID>-ca.s3.us-west-1.amazonaws.com/...":
+  dial tcp: lookup bookstore-terraform-state-<ACCOUNT_ID>-ca.s3.us-west-1.amazonaws.com:
+  no such host
+
+Error: waiting for EKS Add-On (bookstore-eks:aws-ebs-csi-driver) create: ...
+  dial tcp: lookup eks.us-west-1.amazonaws.com: no such host
+
+Error: waiting for RDS DB Instance (bookstore-db) create: ...
+  dial tcp: lookup rds.us-west-1.amazonaws.com: no such host
+
+Error: Error releasing the state lock
+  dial tcp: lookup dynamodb.us-west-1.amazonaws.com: no such host
+
+Error: Failed to persist state to backend
+  The error shown above has prevented Terraform from writing the updated state
+  to the configured backend. To allow for recovery, the state has been written
+  to the file "errored.tfstate" in the current working directory.
+```
+
+Alongside these, Helm releases show `http2: client connection lost` to the EKS API endpoint and any `helm_release` or `aws_eks_addon` in-flight at that moment errors out.
+
+**Root cause**
+
+Local network (WiFi / VPN / DNS resolver) dropped mid-apply. Terraform was in the middle of creating 6–8 resources concurrently; all outstanding AWS API calls failed to resolve DNS. This is **not a code or configuration bug** — nothing in the Terraform files is wrong. The partial resource creation (some resources already created before the drop) plus the failed state push is what requires manual recovery steps.
+
+**Compound: S3 bucket name mismatch**
+
+The error URL above shows `bookstore-terraform-state-<ACCOUNT_ID>-ca` — with a `-ca` suffix not generated by `scripts/bootstrap-tf-state.sh` (which creates `bookstore-terraform-state-<ACCOUNT_ID>`, no suffix). If the bucket name in `versions.tf` has a suffix that doesn't exist, DNS will also fail (`no such host`) even when the network is fine. Verify:
+
+```bash
+# whichever returns 200/no error is the real bucket
+aws s3api head-bucket --bucket bookstore-terraform-state-<ACCOUNT_ID> --region us-west-1
+aws s3api head-bucket --bucket bookstore-terraform-state-<ACCOUNT_ID>-ca --region us-west-1
+```
+
+Fix `versions.tf` `backend "s3"` `bucket` field to match the bucket that actually exists, then run `terraform init -reconfigure`.
+
+**Recovery sequence — run in order**
+
+**Step 1 — confirm network is back**
+```bash
+aws sts get-caller-identity
+# must succeed before continuing
+```
+
+**Step 2 — force-unlock the stuck DynamoDB state lock**
+```bash
+# Lock ID is printed in the "Error: Error releasing the state lock" message
+terraform force-unlock 82d71b91-713d-a513-85ff-410ce252e18e
+```
+Confirm with:
+```bash
+aws dynamodb get-item \
+  --table-name terraform-state-lock \
+  --key '{"LockID": {"S": "bookstore-terraform-state-<ACCOUNT_ID>/prod/terraform.tfstate"}}' \
+  --region us-west-1
+# should return no Item, or an empty result
+```
+
+**Step 3 — push errored.tfstate to S3** (recover partial resource state before next apply)
+```bash
+terraform state push errored.tfstate
+# Terraform instructs this exact command in the "Failed to persist state" error text
+```
+
+**Step 4 — import any resources created but not in state**
+
+After the drop, some resources may have been created in AWS but not recorded in state. The most common are:
+- CloudWatch log group (TF-010): `terraform import module.network.aws_cloudwatch_log_group.vpc_flow_logs /aws/vpc/flowlogs/bookstore`
+- Secrets Manager secret (TF-003): `terraform import module.rds.aws_secretsmanager_secret.db_credentials /bookstore/db-credentials`
+
+Run `terraform plan` — it will surface `Error: already exists` for any such resource, revealing exactly which imports are needed.
+
+**Step 5 — re-run apply**
+```bash
+terraform apply
+```
+
+Resources already created (RDS instance, VPC, etc.) will show no change; resources that errored mid-create will be retried.
+
+**Prevention**
+
+No code change prevents a network drop. Mitigations:
+- Run Terraform from a stable wired connection or from an EC2 instance in the same region (no cross-internet dependency).
+- Keep `errored.tfstate` as a safety net — never delete it until you have confirmed `terraform state push errored.tfstate` succeeded and `terraform plan` shows the expected state.
+- Run `terraform apply` in a `tmux`/`screen` session so a disconnect doesn't kill the process.
 
 ---
 
