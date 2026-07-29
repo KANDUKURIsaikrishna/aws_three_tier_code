@@ -164,6 +164,8 @@ All cluster platform components are managed by Terraform as `helm_release` resou
 
 > **No monitoring Helm charts in EKS.** Prometheus, Grafana, and Loki run on a dedicated EC2 instance (`modules/monitoring-ec2/`). node-exporter and Fluent Bit are installed as AL2 systemd services via the EKS node group launch template — not as Kubernetes pods. kube-state-metrics runs as a Docker container on the monitoring EC2 and authenticates to the K8s API via an EKS access entry.
 
+**Install order:** `cert-manager`, `external-secrets`, and `ingress-nginx` install **concurrently** (no real functional dependency between them — only serialized originally for single-node resource contention, back when the cluster ran 1 node). `argocd` waits for `ingress-nginx` (its Ingress resource needs the `nginx` IngressClass); `argo-rollouts` waits for `argocd`. Cuts real wall-clock time off `terraform apply` on the current 2-node cluster.
+
 ### 3.9 Monitoring EC2 (`modules/monitoring-ec2/`)
 
 A dedicated `t3.small` EC2 instance in the public subnet hosts the full observability stack:
@@ -225,7 +227,7 @@ Used by ingress-nginx for HTTPS termination via cert-manager (Let's Encrypt `let
 | `bookstore.b17facebook.xyz` | A (ALIAS) | NLB hostname |
 | `api.bookstore.b17facebook.xyz` | A (ALIAS) | NLB hostname |
 
-**Private hosted zone** — created by the `route53` module for internal RDS endpoint resolution.
+**Private hosted zone** — created by the `route53` module for internal RDS endpoint resolution (`db.bookstore.internal`, CNAME, TTL 100s). As of today the backend does **not** actually resolve through this CNAME — `DB_HOST` comes straight from the Secrets Manager secret (the raw RDS endpoint). Once the cross-region DR work lands (§3.10), this CNAME becomes the live DB failover cutover point — see `docs/superpowers/specs/2026-07-08-cross-region-dr-design.md`.
 
 > A wildcard `*.b17facebook.xyz` only matches one subdomain level. It covers `bookstore.b17facebook.xyz` but NOT `api.bookstore.b17facebook.xyz` (two levels). Both records must be created explicitly.
 
@@ -245,6 +247,19 @@ IAM Role: bookstore-github-oidc-role
 ```
 
 The trust policy restricts assumption to commits from the `github_repo` Terraform variable (set in `terraform.tfvars`). No `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` is stored anywhere.
+
+### 3.10 Disaster Recovery (Cross-Region)
+
+**Current state (`dr.tf`, live today):**
+- `aws_db_instance_automated_backups_replication` — copies RDS automated backups to us-west-2. Gated by `var.dr_kms_key_id` (default `""` — **disabled** unless explicitly set, since AWS-managed KMS keys can't replicate cross-region and this needs a real CMK ARN).
+- ECR image replication and Secrets Manager credential replication to us-west-2 (`modules/ecr`, always-on).
+- `multi_az = true` on RDS gives real, automatic failover — but only across AZs *within* us-west-1. Nothing today fails over across *regions*.
+
+**Planned (spec'd, not yet implemented — `docs/superpowers/specs/2026-07-08-cross-region-dr-design.md`):**
+- A real, always-replicating cross-region **read replica** in a new minimal us-west-2 VPC (`170.21.0.0/16`, 2 private subnets, no NAT/IGW — replication rides AWS's internal backbone, not customer routing), gated behind `var.enable_cross_region_replica` (opt-in, real ongoing cost).
+- Failover becomes a scripted runbook (`scripts/dr_failover.py`, Python): promote the replica → repoint the private Route53 CNAME `db.bookstore.internal` → restart the backend Argo Rollout to force DNS re-resolution. Not automatic — plain RDS has no native cross-region auto-failover (only Aurora Global Database does, and migrating engines is explicitly out of scope).
+- Test suite (`scripts/test_*.py`) exercises both same-region Multi-AZ failover and the full cross-region promote/cutover, with a load generator running throughout to measure actual downtime.
+- **Explicitly out of scope:** EKS/app-compute failover to us-west-2. This is DB-only DR. A full region outage still has no application compute to fail over to — see `docs/disaster-recovery.md` (once written) for the honest RTO/RPO picture.
 
 ---
 

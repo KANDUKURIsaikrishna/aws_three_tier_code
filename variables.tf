@@ -55,3 +55,9 @@ variable "monitoring_admin_cidr" {
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
+
+variable "extra_admin_principal_arns" {
+  description = "Additional IAM principal ARNs (teammates, CI/CD roles) to grant EKS cluster-admin, beyond whoever is currently running Terraform (which is always included automatically — see main.tf module.eks)."
+  type        = list(string)
+  default     = []
+}

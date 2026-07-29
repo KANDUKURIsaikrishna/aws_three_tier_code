@@ -5,7 +5,7 @@ resource "random_password" "grafana_admin" {
 
 resource "aws_secretsmanager_secret" "grafana_admin" {
   name                    = "/bookstore/grafana-admin"
-  recovery_window_in_days = 7
+  recovery_window_in_days = 0 # 0 = force delete on destroy, no soft-delete window — see TF-012
 }
 
 resource "aws_secretsmanager_secret_version" "grafana_admin" {

@@ -61,3 +61,9 @@ variable "loki_url" {
   type        = string
   default     = ""
 }
+
+variable "admin_principal_arns" {
+  description = "IAM principal ARNs granted cluster-admin via EKS access entries (AmazonEKSClusterAdminPolicy). bootstrap_cluster_creator_admin_permissions only fires once at cluster creation and doesn't cover later operators/CI roles — this list is the persistent, re-appliable alternative."
+  type        = list(string)
+  default     = []
+}

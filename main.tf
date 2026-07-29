@@ -42,8 +42,8 @@ module "rds" {
   ]
   multi_az                = true
   backup_retention_period = 7
-  deletion_protection     = true
-  skip_final_snapshot     = false
+  deletion_protection     = false # flipped off for today's destroy — AWS refuses DeleteDBInstance while true
+  skip_final_snapshot     = true  # avoids a lingering snapshot + naming collision on next apply
   secondary_region        = var.secondary_region
 }
 
@@ -73,11 +73,11 @@ module "ecr" {
 # ── EKS ────────────────────────────────────────────────────────────────────────
 
 module "eks" {
-  source             = "./modules/eks"
-  cluster_name       = "bookstore-eks"
-  cluster_version    = "1.31"
-  prefix             = "bookstore"
-  vpc_id             = module.network.vpc_id
+  source          = "./modules/eks"
+  cluster_name    = "bookstore-eks"
+  cluster_version = "1.31"
+  prefix          = "bookstore"
+  vpc_id          = module.network.vpc_id
   subnet_ids = [
     module.network.private_subnet_ids[0],
     module.network.private_subnet_ids[1],
@@ -87,8 +87,15 @@ module "eks" {
   node_instance_type = "t3.medium"
   node_min_size      = 1
   node_max_size      = 2
-  node_desired_size  = 1
+  node_desired_size  = 2 # t3.medium caps at 17 pods (ENI IP limit); 1 node can't fit full ArgoCD stack — see TF-014
   loki_url           = "http://${aws_eip.monitoring.public_ip}:3100"
+
+  # Whoever runs `terraform apply` always gets cluster-admin, regardless of who
+  # originally created the cluster — see TF-013 in docs/phase-2-troubleshooting.md.
+  admin_principal_arns = concat(
+    [data.aws_caller_identity.current.arn],
+    var.extra_admin_principal_arns
+  )
 }
 
 # ── Monitoring EC2 ────────────────────────────────────────────────────────────
