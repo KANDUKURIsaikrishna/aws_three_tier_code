@@ -296,12 +296,17 @@ AnalysisTemplate (`k8s/base/monitoring/analysis-template.yaml`) queries nginx 5x
 
 ---
 
+## In progress — no longer skipped
+
+| Item | Status |
+|---|---|
+| RDS cross-region read replica | **Spec'd, not yet implemented.** See `docs/superpowers/specs/2026-07-08-cross-region-dr-design.md` and (once written) `docs/disaster-recovery.md`. Scope: DB-only DR via a real cross-region read replica + scripted promote/DNS-cutover runbook, plain MySQL (no Aurora migration). Does NOT include EKS/app-compute failover to us-west-2 — that stays out of scope, see below. |
+
 ## Skipped items (explicitly out of scope for this demo)
 
 | Item | Reason skipped |
 |---|---|
-| Multi-region active-passive failover | Overkill for a demo — doubles cost and complexity |
-| RDS cross-region read replicas | Part of multi-region — skipped |
+| Multi-region active-passive failover (full app compute, not just DB) | Overkill for a demo — doubles cost and complexity. EKS/NLB in us-west-2 remains unprovisioned even after the DB-only DR work above. |
 | Multiple clusters per region | Explicitly excluded |
 | Loki log aggregation | Too heavy for 1-node demo; `kubectl logs` suffices |
 | AlertManager / PagerDuty | Not needed for a demo |

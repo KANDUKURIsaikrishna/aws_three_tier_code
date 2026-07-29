@@ -1,6 +1,6 @@
 resource "aws_s3_bucket" "cloudtrail" {
   bucket        = "bookstore-cloudtrail-${data.aws_caller_identity.current.account_id}"
-  force_destroy = false
+  force_destroy = true # flipped for today's destroy — bucket is versioned, empty non-empty bucket delete otherwise fails
 }
 
 resource "aws_s3_bucket_versioning" "cloudtrail" {

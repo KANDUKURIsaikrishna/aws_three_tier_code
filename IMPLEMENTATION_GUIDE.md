@@ -23,6 +23,8 @@ Follow every part in order on a first deployment. After initial setup, only Part
 13. [Part 10 — Verify the Application](#part-10--verify-the-application)
 14. [Part 11 — Local Development Setup](#part-11--local-development-setup)
 15. [Troubleshooting](#troubleshooting)
+16. [Summary — Component Ownership](#summary--component-ownership)
+17. [Part 12 — Disaster Recovery (Planned, Not Yet Implemented)](#part-12--disaster-recovery-planned-not-yet-implemented)
 
 ---
 
@@ -1194,3 +1196,15 @@ kubectl argo rollouts abort backend -n bookstore
 | k8s base manifests | ArgoCD + Kustomize | `k8s/base/` |
 | k8s prod overlay (image tags, HPAs) | ArgoCD + CI/CD | `k8s/overlays/prod/` |
 | Docker images | GitHub Actions | `.github/workflows/ci-cd.yml` |
+| RDS cross-region read replica *(planned, not yet built)* | Terraform | `dr.tf` |
+| Secondary-region DB-only VPC *(planned, not yet built)* | Terraform | new module, see spec |
+| DR failover runbook *(planned, not yet built)* | Python script | `scripts/dr_failover.py` |
+| DR test suite *(planned, not yet built)* | Python scripts | `scripts/test_*.py` |
+
+---
+
+## Part 12 — Disaster Recovery (Planned, Not Yet Implemented)
+
+Everything above this section reflects what's actually built and running. Cross-region RDS DR is **spec'd but not implemented** — design is in `docs/superpowers/specs/2026-07-08-cross-region-dr-design.md`, and once built, the full setup/test/runbook walkthrough belongs in a standalone `docs/disaster-recovery.md` rather than bolted onto this guide's Part 1-11 install flow, since DR is an operational procedure you run *after* the app is already up, not a step in first-time setup.
+
+In short: a real cross-region read replica in us-west-2, promoted via a scripted runbook that repoints the existing (currently-unused) private Route53 CNAME `db.bookstore.internal` and restarts the backend. DB-only — EKS/app-compute failover to a second region is explicitly out of scope. See the spec for full reasoning and the open implementation questions.

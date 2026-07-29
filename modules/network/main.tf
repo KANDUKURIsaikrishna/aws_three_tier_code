@@ -111,6 +111,40 @@ resource "aws_flow_log" "vpc" {
   vpc_id          = aws_vpc.main.id
 }
 
+# ── Destroy safety net ──────────────────────────────────────────────────────
+# Root cause found via CloudTrail (2026-07-21, lookup-events by EventName, not
+# ResourceName — the latter returns nothing for this event type and was a dead
+# end): AWS's VPC Flow Logs service self-heals its destination log group. The
+# IAM role below grants it logs:CreateLogGroup; if the log group vanishes while
+# aws_flow_log.vpc is still actively delivering records, the service recreates
+# it using that permission (CloudTrail shows the creator as
+# "vpc-flow-logging+<account>", not Terraform). This resource previously had no
+# depends_on beyond the implicit one from referencing the log group's name in
+# triggers — nothing ordered it after aws_flow_log.vpc's destruction, so it
+# could (and did) delete the log group while flow logs were still live,
+# triggering the auto-recreate. Fixed: explicit depends_on on aws_flow_log.vpc,
+# plus a short sleep for any in-flight delivery to fully stop before deleting.
+# Best-effort only (|| true) — requires aws CLI on whatever machine runs
+# `terraform destroy`.
+resource "null_resource" "force_delete_flow_log_group" {
+  triggers = {
+    log_group_name = aws_cloudwatch_log_group.vpc_flow_logs.name
+    region         = data.aws_region.current.name
+  }
+
+  depends_on = [aws_flow_log.vpc]
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = <<-EOT
+      sleep 15
+      aws logs delete-log-group --log-group-name '${self.triggers.log_group_name}' --region ${self.triggers.region} 2>/dev/null || true
+    EOT
+  }
+}
+
+data "aws_region" "current" {}
+
 # Route Table Associations
 resource "aws_route_table_association" "public" {
   count          = length(var.public_subnets)

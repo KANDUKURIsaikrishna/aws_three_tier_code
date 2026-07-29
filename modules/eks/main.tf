@@ -26,6 +26,35 @@ resource "aws_eks_cluster" "this" {
   ]
 }
 
+# ── Admin Access Entries ───────────────────────────────────────────────────────
+# bootstrap_cluster_creator_admin_permissions (default true) only fires once, at
+# the literal CreateCluster API call — it does not retroactively grant access to
+# whoever runs `terraform apply` later, and does not survive a module refactor
+# that state-moves this resource without recreating it. These entries are the
+# persistent, re-appliable equivalent: every apply ensures every ARN in
+# var.admin_principal_arns has cluster-admin, regardless of who created the
+# cluster originally.
+
+resource "aws_eks_access_entry" "admin" {
+  for_each      = toset(var.admin_principal_arns)
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = each.value
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "admin" {
+  for_each      = toset(var.admin_principal_arns)
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = each.value
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+
+  depends_on = [aws_eks_access_entry.admin]
+}
+
 # ── OIDC Provider (enables IRSA) ──────────────────────────────────────────────
 
 data "tls_certificate" "eks" {

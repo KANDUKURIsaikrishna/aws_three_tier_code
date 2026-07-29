@@ -197,39 +197,44 @@ LAYOUT: Landscape. Three columns.
   RIGHT REGION BOX — dashed grey border, label top:
   "AWS us-west-2 — Oregon — 🟡 SECONDARY (Warm Standby)"
 
+    [VPC 170.21.0.0/16 - green border, dashed label "DB-only — no NAT/IGW"]
+    Private Subnets (2 AZs, minimal — solid box, exists once var.enable_cross_region_replica=true):
+      RDS icon "READ REPLICA — async streaming replication" (solid box)
+      Label: "replicate_source_db → primary. Not internet-routable — replication rides AWS's internal backbone, no VPC peering."
+
     Warm standby (SOLID boxes — exist NOW):
       ECR icon "REPLICA — real-time sync" (solid box)
       Secrets Manager icon "REPLICA — credentials ready" (solid box)
-      AWS Backup icon "RDS backups — 7-day retention" (solid box)
-    
+      AWS Backup icon "RDS automated backups — 7-day retention, cross-region copy" (solid box, kept as longer-retention safety net alongside the live replica)
+
     On-demand (DASHED boxes — provision on DR event):
-      EKS icon (dashed box, label: "deploy on DR event — same Terraform")
+      EKS icon (dashed box, label: "deploy on DR event — same Terraform, NOT part of this DR design")
       NLB icon (dashed box, label: "provisioned during DR")
-      RDS icon (dashed box, label: "restore from backup on DR event")
 
   [BOTTOM — Failover callout box, centre between regions]
   Numbered sequence box (grey background, orange border):
-  "Failover Sequence (Steps 1-2 automatic, 3-7 manual)
-   1. Health check fails 3× → 90s elapsed
-   2. Route53 auto-flips DNS → SECONDARY record active
-   3. Restore RDS from us-west-2 backup
-   4. terraform apply — deploy EKS in us-west-2
-   5. Update /bookstore/db-credentials in us-west-2 SM with new DB_HOST
-   6. set secondary_alb_dns in tfvars → terraform apply
-   7. ESO reads SM replica → pods get credentials
-   RPO: ~1h | RTO: ~1 day"
+  "DB Failover Runbook — scripts/dr_failover.py (all steps scripted, none automatic)
+   1. aws rds promote-read-replica — promote the us-west-2 replica
+   2. Poll describe-db-instances until status=available
+   3. Update Route53 PRIVATE zone CNAME db.bookstore.internal → new promoted endpoint (TTL 100s)
+   4. kubectl argo rollouts restart backend -n bookstore — force DNS re-resolution
+   RPO: seconds (replication lag) | RTO: minutes, exact figure TBD — measured by scripts/test_cross_region_dr.py, see docs/disaster-recovery.md
+   Note: this is DB-only DR. App compute (EKS) failover is a separate, not-yet-built concern (see dashed EKS/NLB boxes above)."
 
   [RTO/RPO TABLE - bottom right corner]
   Small table:
-  Scenario          | RPO    | RTO
-  Pod crash         | 0      | 30s
-  Node failure      | 0      | 2 min
-  RDS AZ failover   | 0      | 60-120s
-  Region failure    | ~1h    | ~1 day
+  Scenario              | RPO              | RTO
+  Pod crash             | 0                | 30s
+  Node failure          | 0                | 2 min
+  RDS AZ failover       | 0                | 60-120s
+  RDS region failure    | seconds (lag)    | minutes (scripted promote+DNS+restart, see test_cross_region_dr.py)
+  App compute (EKS) region failure | n/a   | not yet built — dashed boxes above
 
 REPLICATION ARROWS (thick orange, spanning between regions):
-  Arrow 1: RDS PRIMARY → us-west-2 backup store
-    Label: "aws_db_instance_automated_backups_replication\n7-day retention, daily"
+  Arrow 1: RDS PRIMARY → us-west-2 READ REPLICA
+    Label: "replicate_source_db, async streaming replication — continuous, not daily"
+  Arrow 1b: RDS PRIMARY → us-west-2 backup store
+    Label: "aws_db_instance_automated_backups_replication\n7-day retention, daily — longer-retention safety net alongside Arrow 1"
   Arrow 2: ECR us-west-1 → ECR us-west-2
     Label: "aws_ecr_replication_configuration\nPrefix: bookstore-*, real-time"
   Arrow 3: SM us-west-1 → SM us-west-2

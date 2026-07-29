@@ -8,7 +8,7 @@ Content-Type: text/x-shellscript; charset="us-ascii"
 set -ex
 exec >> /var/log/custom-node-setup.log 2>&1
 
-# ── node-exporter v1.8.2 as systemd ──────────────────────────────────────────
+# -- node-exporter v1.8.2 as systemd --------------------------------------
 NE_VER="1.8.2"
 curl -sL \
   "https://github.com/prometheus/node_exporter/releases/download/v$${NE_VER}/node_exporter-$${NE_VER}.linux-amd64.tar.gz" \
@@ -32,7 +32,7 @@ NE_SVC
 systemctl daemon-reload
 systemctl enable --now node_exporter
 
-# ── Fluent Bit (container logs → Loki on monitoring EC2) ─────────────────────
+# -- Fluent Bit (container logs -> Loki on monitoring EC2) -----------------
 # Single-quoted heredoc: $basearch is a yum variable (expanded by yum, not bash)
 cat > /etc/yum.repos.d/fluent-bit.repo << 'FB_REPO'
 [fluent-bit]

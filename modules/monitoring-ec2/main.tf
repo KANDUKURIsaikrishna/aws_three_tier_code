@@ -142,7 +142,7 @@ resource "aws_instance" "monitoring" { # nosemgrep: aws-ec2-has-public-ip
   subnet_id                   = var.public_subnet_id
   vpc_security_group_ids      = [aws_security_group.monitoring.id]
   iam_instance_profile        = aws_iam_instance_profile.monitoring.name
-  associate_public_ip_address = true  # intentional — SG restricts to admin_cidr_blocks, EIP needed for monitoring UIs
+  associate_public_ip_address = true # intentional — SG restricts to admin_cidr_blocks, EIP needed for monitoring UIs
 
   metadata_options {
     http_endpoint               = "enabled"

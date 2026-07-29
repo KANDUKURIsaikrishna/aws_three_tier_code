@@ -12,5 +12,7 @@ resource "helm_release" "external_secrets" {
     value = "true"
   }
 
-  depends_on = [helm_release.cert_manager]
+  # No real functional dependency on cert-manager (was serialized here only for
+  # single-node resource contention — cluster now has 2 nodes, see TF main.tf
+  # node_desired_size). Installs concurrently with cert_manager and ingress_nginx.
 }

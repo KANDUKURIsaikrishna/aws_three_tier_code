@@ -6,7 +6,7 @@ resource "random_password" "db_password" {
 
 resource "aws_secretsmanager_secret" "db_credentials" {
   name                    = "/bookstore/db-credentials"
-  recovery_window_in_days = 7
+  recovery_window_in_days = 0 # 0 = force delete on destroy, no soft-delete window — see TF-012
 
   dynamic "replica" {
     for_each = var.secondary_region != "" ? [var.secondary_region] : []
@@ -32,10 +32,10 @@ resource "aws_db_subnet_group" "rds_subnet_group" {
 }
 
 resource "aws_db_instance" "db" {
-  identifier        = var.db_identifier
-  engine            = var.db_engine
-  engine_version    = var.db_engine_version
-  instance_class    = var.db_instance_class
+  identifier            = var.db_identifier
+  engine                = var.db_engine
+  engine_version        = var.db_engine_version
+  instance_class        = var.db_instance_class
   allocated_storage     = var.db_allocated_storage
   max_allocated_storage = var.max_allocated_storage == 0 ? null : var.max_allocated_storage
 
@@ -48,7 +48,7 @@ resource "aws_db_instance" "db" {
 
   # ── Encryption at rest ────────────────────────────────────────────
   storage_encrypted = true
-  kms_key_id        = var.kms_key_arn  # leave null → uses AWS-managed key
+  kms_key_id        = var.kms_key_arn # leave null → uses AWS-managed key
 
   # ── Backups ───────────────────────────────────────────────────────
   backup_retention_period = var.backup_retention_period
@@ -61,14 +61,14 @@ resource "aws_db_instance" "db" {
   # already provide point-in-time recovery for production use.
   skip_final_snapshot       = var.skip_final_snapshot
   final_snapshot_identifier = var.skip_final_snapshot ? null : "${var.db_identifier}-final-snapshot"
-  deletion_protection = var.deletion_protection
+  deletion_protection       = var.deletion_protection
 
   # ── Performance & Monitoring ──────────────────────────────────────
   # Performance Insights not supported on db.t3.micro
-  performance_insights_enabled = false
-  monitoring_interval          = 60
-  monitoring_role_arn                   = aws_iam_role.rds_monitoring.arn
-  enabled_cloudwatch_logs_exports       = ["error", "general", "slowquery"]
+  performance_insights_enabled    = false
+  monitoring_interval             = 60
+  monitoring_role_arn             = aws_iam_role.rds_monitoring.arn
+  enabled_cloudwatch_logs_exports = ["error", "general", "slowquery"]
 
   publicly_accessible    = false
   vpc_security_group_ids = [var.db_security_group_id]
