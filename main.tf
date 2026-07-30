@@ -131,6 +131,8 @@ module "eks_addons" {
   source            = "./modules/eks-addons"
   cluster_name      = module.eks.cluster_name
   oidc_provider_arn = module.eks.oidc_provider_arn
+  oidc_provider_url = module.eks.oidc_provider_url
+  aws_region        = var.aws_region
   node_role_name    = module.eks.node_role_name
 
   depends_on = [module.eks]

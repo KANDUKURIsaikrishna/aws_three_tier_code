@@ -13,3 +13,13 @@ variable "node_role_name" {
   type        = string
 }
 
+variable "oidc_provider_url" {
+  description = "URL of the EKS cluster OIDC provider (without https://) — used for IRSA trust policy conditions"
+  type        = string
+}
+
+variable "aws_region" {
+  description = "AWS region — used to scope the external-secrets IRSA policy to this account/region"
+  type        = string
+}
+
