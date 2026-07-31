@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../base
+
+# Account ID is intentionally NOT hardcoded here.
+# CI (deploy stage) overwrites this from secrets.AWS_ACCOUNT_ID every push:
+#   kustomize edit set image bookstore-catalog-service=${ECR_REGISTRY}/bookstore-catalog-service:${SHA}
+# Placeholder 000000000000 is replaced automatically on first CI deploy.
+# For manual local deploy: replace 000000000000 with your real AWS account ID.
+images:
+- name: bookstore-catalog-service
+  newName: 000000000000.dkr.ecr.us-west-1.amazonaws.com/bookstore-catalog-service
+  newTag: latest
