@@ -63,6 +63,7 @@ jobs:
           cache-dependency-path: |
             backend/package-lock.json
             client/package-lock.json
+            services/catalog-service/package-lock.json
 
       - name: Install backend dependencies
         run: cd backend && npm ci
