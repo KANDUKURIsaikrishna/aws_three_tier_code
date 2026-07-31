@@ -47,6 +47,32 @@ module "rds" {
   secondary_region        = var.secondary_region
 }
 
+# ── Catalog Service — DB credentials ──────────────────────────────────────────
+# Own schema + own DB user inside the existing RDS instance. Full per-service
+# RDS isolation is explicitly deferred (see design spec Non-goals) — this is
+# schema-level isolation, the cheap intermediate step.
+
+resource "random_password" "catalog_db_password" {
+  length           = 32
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}?"
+}
+
+resource "aws_secretsmanager_secret" "catalog_db_credentials" {
+  name                    = "/bookstore/catalog-db-credentials"
+  recovery_window_in_days = 0 # 0 = force delete on destroy, matches modules/rds pattern
+}
+
+resource "aws_secretsmanager_secret_version" "catalog_db_credentials" {
+  secret_id = aws_secretsmanager_secret.catalog_db_credentials.id
+  secret_string = jsonencode({
+    DB_USERNAME = "catalog_user"
+    DB_PASSWORD = random_password.catalog_db_password.result
+    DB_HOST     = module.rds.rds_endpoint
+    DB_NAME     = "catalog_db"
+  })
+}
+
 # ── Route 53 ──────────────────────────────────────────────────────────────────
 # Private zone for in-cluster RDS DNS + public zone with active-passive failover.
 

@@ -14,6 +14,12 @@ output "rds_secret_arn" {
   sensitive   = true
 }
 
+output "catalog_db_secret_arn" {
+  description = "ARN of the Secrets Manager secret at /bookstore/catalog-db-credentials"
+  value       = aws_secretsmanager_secret.catalog_db_credentials.arn
+  sensitive   = true
+}
+
 output "frontend_repo_url" {
   description = "ECR repository URL for the frontend image"
   value       = module.ecr.frontend_repo_url

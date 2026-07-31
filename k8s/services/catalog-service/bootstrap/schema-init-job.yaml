@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: catalog-schema-init
+  namespace: catalog
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: schema-init
+          image: mysql:8.0
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mysql -h "$ADMIN_DB_HOST" -u "$ADMIN_DB_USERNAME" -p"$ADMIN_DB_PASSWORD" <<'SQL'
+              CREATE DATABASE IF NOT EXISTS catalog_db;
+
+              CREATE TABLE IF NOT EXISTS catalog_db.books (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                `desc` TEXT,
+                price DECIMAL(10,2) NOT NULL,
+                cover VARCHAR(1024)
+              );
+
+              INSERT INTO catalog_db.books (id, title, `desc`, price, cover)
+              SELECT id, title, `desc`, price, cover FROM test.books
+              ON DUPLICATE KEY UPDATE title = VALUES(title);
+
+              CREATE USER IF NOT EXISTS 'catalog_user'@'%' IDENTIFIED BY '$CATALOG_DB_PASSWORD';
+              GRANT ALL PRIVILEGES ON catalog_db.* TO 'catalog_user'@'%';
+              FLUSH PRIVILEGES;
+              SQL
+          env:
+            - name: ADMIN_DB_HOST
+              valueFrom:
+                secretKeyRef: { name: db-secret, key: DB_HOST }
+            - name: ADMIN_DB_USERNAME
+              valueFrom:
+                secretKeyRef: { name: db-secret, key: DB_USERNAME }
+            - name: ADMIN_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: db-secret, key: DB_PASSWORD }
+            - name: CATALOG_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: catalog-db-secret, key: DB_PASSWORD }
