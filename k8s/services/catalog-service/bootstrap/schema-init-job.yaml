@@ -16,7 +16,7 @@ spec:
             - -c
             - |
               set -eu
-              mysql -h "$ADMIN_DB_HOST" -u "$ADMIN_DB_USERNAME" -p"$ADMIN_DB_PASSWORD" <<'SQL'
+              mysql -h "$ADMIN_DB_HOST" -u "$ADMIN_DB_USERNAME" -p"$ADMIN_DB_PASSWORD" <<SQL
               CREATE DATABASE IF NOT EXISTS catalog_db;
 
               CREATE TABLE IF NOT EXISTS catalog_db.books (
