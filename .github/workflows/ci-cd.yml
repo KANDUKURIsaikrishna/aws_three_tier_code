@@ -2,9 +2,9 @@ name: DevSecOps Pipeline
 
 on:
   push:
-    branches: [main, improvements]
+    branches: [main, improvements, observability]
   pull_request:
-    branches: [main, improvements]
+    branches: [main, improvements, observability]
 
 # All secrets are stored in GitHub Secrets — never hardcoded here.
 # Required secrets:
@@ -17,6 +17,7 @@ env:
   AWS_REGION:    us-west-1
   BACKEND_REPO:  bookstore-backend
   FRONTEND_REPO: bookstore-frontend
+  CATALOG_REPO:  bookstore-catalog-service
   EKS_CLUSTER:   bookstore-eks
   K8S_NAMESPACE: bookstore
 
@@ -68,6 +69,15 @@ jobs:
 
       - name: Run backend tests
         run: cd backend && npm test
+
+      - name: Install catalog-service dependencies
+        run: cd services/catalog-service && npm ci
+
+      - name: Run catalog-service tests
+        run: cd services/catalog-service && npm test
+
+      - name: npm audit — catalog-service production deps (fail on high/critical CVEs)
+        run: cd services/catalog-service && npm audit --audit-level=high --omit=dev
 
       - name: Install frontend dependencies
         run: cd client && npm ci
@@ -135,7 +145,7 @@ jobs:
     name: "🐳 Build → Trivy Scan → Push"
     runs-on: ubuntu-latest
     needs: [sast, validate]
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/improvements'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/improvements' || github.ref == 'refs/heads/observability'
     permissions:
       id-token: write        # required for OIDC token exchange
       contents: read
@@ -206,6 +216,48 @@ jobs:
       - name: Push backend image
         run: |
           docker push ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:${{ steps.tag.outputs.tag }}
+
+      # ── Catalog service image ────────────────────────────────────────────
+      - name: Build catalog-service image (no push yet)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context:   ./services/catalog-service
+          push:      false
+          load:      true
+          tags:      ${{ env.ECR_REGISTRY }}/${{ env.CATALOG_REPO }}:${{ steps.tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      - name: Trivy — scan catalog-service (CRITICAL + HIGH = hard fail)
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2  # v0.28.0
+        with:
+          image-ref:      ${{ env.ECR_REGISTRY }}/${{ env.CATALOG_REPO }}:${{ steps.tag.outputs.tag }}
+          format:         sarif
+          output:         trivy-catalog-service.sarif
+          severity:       CRITICAL,HIGH
+          exit-code:      "1"
+          ignore-unfixed: true
+
+      - name: Show catalog-service CVEs in CI log (diagnostic on failure)
+        if: failure()
+        run: |
+          [ -f trivy-catalog-service.sarif ] && \
+            jq -r '.runs[].results[] |
+              "[" + (.level | ascii_upcase) + "] " + .ruleId +
+              ": " + (.message.text | split("\n")[0])' \
+            trivy-catalog-service.sarif \
+          || echo "trivy-catalog-service.sarif not found"
+
+      - name: Upload catalog-service Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4
+        if: always()
+        with:
+          sarif_file: trivy-catalog-service.sarif
+          category:   trivy-catalog-service
+
+      - name: Push catalog-service image
+        run: |
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.CATALOG_REPO }}:${{ steps.tag.outputs.tag }}
 
       # ── Frontend image ───────────────────────────────────────────────────
       - name: Build frontend image (no push yet)
@@ -298,6 +350,9 @@ jobs:
             bookstore-backend=${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:${TAG}
           kustomize edit set image \
             bookstore-frontend=${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:${TAG}
+          cd ../../services/catalog-service/overlays/prod
+          kustomize edit set image \
+            bookstore-catalog-service=${{ env.ECR_REGISTRY }}/${{ env.CATALOG_REPO }}:${TAG}
 
       - name: Commit and push updated image tags
         env:
@@ -305,7 +360,7 @@ jobs:
         run: |
           git config user.email "ci-bot@github-actions"
           git config user.name "GitHub Actions"
-          git add k8s/overlays/prod/kustomization.yaml
+          git add k8s/overlays/prod/kustomization.yaml k8s/services/catalog-service/overlays/prod/kustomization.yaml
           # Skips the commit if kustomization.yaml did not actually change
           git diff --staged --quiet && echo "No image tag changes." && exit 0
           git commit -m "chore: bump image tags to ${TAG}"
