@@ -1,5 +1,8 @@
 locals {
-  repos = ["${var.prefix}-frontend", "${var.prefix}-backend"]
+  repos = concat(
+    ["${var.prefix}-frontend", "${var.prefix}-backend"],
+    [for r in var.extra_repos : "${var.prefix}-${r}"]
+  )
 }
 
 resource "aws_ecr_repository" "this" {

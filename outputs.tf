@@ -24,6 +24,11 @@ output "backend_repo_url" {
   value       = module.ecr.backend_repo_url
 }
 
+output "catalog_service_repo_url" {
+  description = "ECR repository URL for the catalog-service image"
+  value       = module.ecr.repo_urls["catalog-service"]
+}
+
 output "eks_cluster_name" {
   description = "EKS cluster name"
   value       = module.eks.cluster_name

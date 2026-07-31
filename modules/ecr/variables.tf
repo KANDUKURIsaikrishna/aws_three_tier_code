@@ -14,3 +14,9 @@ variable "secondary_region" {
   type        = string
   default     = ""
 }
+
+variable "extra_repos" {
+  description = "Additional short repo names (without prefix) to create, e.g. [\"catalog-service\"]"
+  type        = list(string)
+  default     = []
+}
