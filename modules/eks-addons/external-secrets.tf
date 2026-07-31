@@ -12,13 +12,13 @@ data "aws_iam_policy_document" "external_secrets_trust" {
 
     condition {
       test     = "StringEquals"
-      variable = "${var.oidc_provider_url}:sub"
+      variable = "${replace(var.oidc_provider_url, "https://", "")}:sub"
       values   = ["system:serviceaccount:external-secrets:external-secrets-sa"]
     }
 
     condition {
       test     = "StringEquals"
-      variable = "${var.oidc_provider_url}:aud"
+      variable = "${replace(var.oidc_provider_url, "https://", "")}:aud"
       values   = ["sts.amazonaws.com"]
     }
   }

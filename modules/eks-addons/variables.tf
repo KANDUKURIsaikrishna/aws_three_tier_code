@@ -14,7 +14,7 @@ variable "node_role_name" {
 }
 
 variable "oidc_provider_url" {
-  description = "URL of the EKS cluster OIDC provider (without https://) — used for IRSA trust policy conditions"
+  description = "URL of the EKS cluster OIDC provider, WITH the https:// scheme — stripped via replace() at point of use in IRSA trust policy conditions"
   type        = string
 }
 
