@@ -12,14 +12,14 @@ collectDefaultMetrics({ register: registry });
 const httpRequests = new Counter({
   name: "http_requests_total",
   help: "Total HTTP requests",
-  labelNames: ["method", "route", "status", "service"],
+  labelNames: ["method", "route", "status"],
   registers: [registry],
 });
 
 const httpDuration = new Histogram({
   name: "http_request_duration_seconds",
   help: "HTTP request duration in seconds",
-  labelNames: ["method", "route", "status", "service"],
+  labelNames: ["method", "route", "status"],
   buckets: [0.01, 0.05, 0.1, 0.5, 1, 2],
   registers: [registry],
 });
@@ -35,8 +35,8 @@ export function createApp(db) {
     res.on("finish", () => {
       const route = req.route ? req.route.path : req.path;
       const duration = (Date.now() - start) / 1000;
-      httpRequests.labels(req.method, route, String(res.statusCode), SERVICE_NAME).inc();
-      httpDuration.labels(req.method, route, String(res.statusCode), SERVICE_NAME).observe(duration);
+      httpRequests.labels(req.method, route, String(res.statusCode)).inc();
+      httpDuration.labels(req.method, route, String(res.statusCode)).observe(duration);
     });
     next();
   });
