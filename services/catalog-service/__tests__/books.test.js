@@ -52,6 +52,11 @@ describe("POST /books", () => {
       .send({ title: "New", desc: "A book", price: 12.99, cover: "http://img" });
     expect(res.status).toBe(200);
     expect(res.body).toEqual(result);
+    expect(mockQuery).toHaveBeenCalledWith(
+      "INSERT INTO books(`title`, `desc`, `price`, `cover`) VALUES (?)",
+      [["New", "A book", 12.99, "http://img"]],
+      expect.any(Function)
+    );
   });
 });
 
@@ -76,5 +81,10 @@ describe("PUT /books/:id", () => {
       .send({ title: "Updated", desc: "Updated desc", price: 15.99, cover: "http://newimg" });
     expect(res.status).toBe(200);
     expect(res.body).toEqual(result);
+    expect(mockQuery).toHaveBeenCalledWith(
+      "UPDATE books SET `title`= ?, `desc`= ?, `price`= ?, `cover`= ? WHERE id = ?",
+      ["Updated", "Updated desc", 15.99, "http://newimg", "1"],
+      expect.any(Function)
+    );
   });
 });
