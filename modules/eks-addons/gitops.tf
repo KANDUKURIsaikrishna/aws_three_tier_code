@@ -1,3 +1,15 @@
+# Neither chart has a real functional dependency on the other, or on
+# cert-manager/external-secrets/ingress-nginx (argo-rollouts is a separate
+# project from ArgoCD; ArgoCD isn't exposed via ingress or TLS here — no
+# ingress.enabled/certificate config is set below). The depends_on chain that
+# used to serialize argocd-after-ingress-nginx and argo-rollouts-after-argocd
+# was single-node resource-contention avoidance (see TF-001/TF-006 in
+# docs/TROUBLESHOOTING.md) from before node_desired_size went to 2 (TF-014).
+# Removed to shorten apply time — all 5 Helm charts + the EBS CSI addon now
+# install concurrently. If a real apply on this node size starts timing out
+# again (TF-001-shaped failures), the fix is to re-add these two depends_on
+# lines, not to keep raising node count indefinitely.
+
 resource "helm_release" "argo_rollouts" {
   name             = "argo-rollouts"
   repository       = "https://argoproj.github.io/argo-helm"
@@ -15,8 +27,6 @@ resource "helm_release" "argo_rollouts" {
     name  = "dashboard.enabled"
     value = "false"
   }
-
-  depends_on = [helm_release.argocd]
 }
 
 resource "helm_release" "argocd" {
@@ -44,6 +54,4 @@ resource "helm_release" "argocd" {
     name  = "controller.replicas"
     value = "1"
   }
-
-  depends_on = [helm_release.ingress_nginx]
 }

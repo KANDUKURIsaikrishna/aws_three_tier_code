@@ -23,8 +23,8 @@ resource "helm_release" "ingress_nginx" {
 
   # No real functional dependency on external_secrets/cert_manager (was
   # serialized only for single-node resource contention, see external-secrets.tf
-  # comment). Installs concurrently with them — argocd still waits for this one,
-  # see gitops.tf.
+  # comment). Installs concurrently with them, and with argocd/argo-rollouts too
+  # — see gitops.tf.
 }
 
 # ── Release the NLB before destroy touches the VPC ────────────────────────────

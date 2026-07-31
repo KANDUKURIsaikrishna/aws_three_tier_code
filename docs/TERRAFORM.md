@@ -107,9 +107,11 @@ Helm-installed cluster add-ons, all via `helm_release`:
 | cert-manager | `cert-manager` | CRDs installed, single replica |
 | external-secrets | `external-secrets` | ServiceAccount explicitly named `external-secrets-sa` with an IRSA role annotation — see below |
 | ingress-nginx | `ingress-nginx` | `LoadBalancer` service type → provisions a real AWS NLB as a side effect, invisible to Terraform (see destroy notes) |
-| argocd | `argocd` | Depends on ingress-nginx |
-| argo-rollouts | `argo-rollouts` | Depends on argocd |
+| argocd | `argocd` | No `depends_on` (see below) |
+| argo-rollouts | `argo-rollouts` | No `depends_on` (see below) |
 | aws-ebs-csi-driver | (EKS addon, not Helm) | IAM policy attached to the node role first |
+
+**All 5 Helm charts + the EBS CSI addon now install concurrently, on this branch.** They used to be partially serialized (`argocd` waited on `ingress-nginx`; `argo-rollouts` waited on `argocd`) as a resource-contention workaround from when the node group was a single `t3.medium` (see TF-001/TF-006). Once `node_desired_size` went to 2 (TF-014), that workaround was never revisited — the two remaining `depends_on` lines were pure leftover, not a real functional requirement (ArgoCD isn't exposed via ingress or TLS in this config, and Argo Rollouts is an unrelated project from ArgoCD). Removed to cut apply time; the critical path through this module is now roughly `max(all 5 timeouts)` (ArgoCD's 900s) instead of the old serialized sum. **If a real apply on this node size starts hitting TF-001-shaped timeout failures again, the fix is re-adding `depends_on = [helm_release.ingress_nginx]` on `argocd` and `depends_on = [helm_release.argocd]` on `argo_rollouts`** in `modules/eks-addons/gitops.tf`, not scaling the node group further — this hasn't been verified against a real apply yet (see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) OBS-006).
 
 **The External Secrets IRSA fix** (this branch, commit `b48c3d3`): the Helm release used to install ESO with zero IRSA wiring — no IAM role, no ServiceAccount annotation — even though `k8s/base/secrets/external-secret.yaml`'s `ClusterSecretStore` already expected a ServiceAccount named exactly `external-secrets-sa`. Nothing could ever actually authenticate to Secrets Manager. Fixed with a trust-policy IAM role scoped to `/bookstore/*` in Secrets Manager, plus explicit `serviceAccount.name`/`serviceAccount.annotations` Helm `set` values:
 
@@ -123,11 +125,11 @@ condition {
 
 The `replace(..., "https://", "")` matters — the OIDC provider URL always arrives with the scheme attached, but STS populates the federated-JWT trust-condition keys *without* it. Leaving the scheme in silently breaks the `StringEquals` match (this was caught in code review before it ever touched real infra — see TROUBLESHOOTING.md).
 
-Helm install ordering used to be a real problem (all 6+ charts installing in parallel on one small node — see TF-001/TF-006 in TROUBLESHOOTING.md). Current state: cert-manager, external-secrets, and ingress-nginx install concurrently (no real dependency between them — the old serialization was a resource-contention workaround from the single-node era, removed once `node_desired_size` went to 2), argocd waits for ingress-nginx, argo-rollouts waits for argocd.
+Helm install ordering used to be a real problem (all 6+ charts installing in parallel on one small node — see TF-001/TF-006 in TROUBLESHOOTING.md). Current state: all 5 charts install fully concurrently — see the parallel-execution note above.
 
 ## Module: `monitoring-ec2`
 
-One `t3.small` EC2 instance with an Elastic IP, running Prometheus + Grafana + Loki + Alertmanager + kube-state-metrics via Docker Compose (user-data script templates the entire `docker-compose.yml` and configs at boot — see [`KUBERNETES.md`](KUBERNETES.md) for what it actually scrapes). Needs `depends_on = [module.eks_addons]` at the call site because it reads `module.eks_addons.grafana_admin_secret_arn`.
+One `t3.small` EC2 instance with an Elastic IP, running Prometheus + Grafana + Loki + Alertmanager + kube-state-metrics via Docker Compose (user-data script templates the entire `docker-compose.yml` and configs at boot — see [`KUBERNETES.md`](KUBERNETES.md) for what it actually scrapes). It reads `module.eks_addons.grafana_admin_secret_arn`, but the call site in root `main.tf` **no longer has a blanket `depends_on = [module.eks_addons]`** — that used to force this EC2 to wait for every Helm chart in `eks-addons` to finish (up to 900s for ArgoCD alone) when it only actually needs the fast `grafana_admin` secret, which Terraform already tracks as a dependency via the direct output reference. It now starts as soon as `module.eks` is ready, in parallel with all of `eks-addons`.
 
 The EIP is created as a **root-level resource** (`aws_eip.monitoring` in `main.tf`), not inside the module, specifically to avoid a circular dependency: its `public_ip` is needed by `module.eks` (for the Fluent Bit config in node user-data) *and* by `module.monitoring_ec2` itself, and creating it as a plain root resource means both can reference the same known-at-plan-time value without depending on each other.
 

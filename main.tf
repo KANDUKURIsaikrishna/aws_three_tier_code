@@ -149,7 +149,14 @@ module "monitoring_ec2" {
   grafana_admin_secret_name = "/bookstore/grafana-admin"
   admin_cidr_blocks         = var.monitoring_admin_cidr
 
-  depends_on = [module.eks_addons]
+  # No blanket depends_on module.eks_addons here on purpose. This module only
+  # needs module.eks (cluster_name, eks_node_sg_id) and the grafana secret's
+  # ARN — the latter is already an implicit dependency via the reference above,
+  # and that secret (random_password + aws_secretsmanager_secret) is one of the
+  # fastest resources in eks_addons, not gated on any of its slow Helm installs
+  # (cert-manager/external-secrets/ingress-nginx/argocd/argo-rollouts, up to
+  # 900s timeout each). A module-level depends_on would force this EC2 to wait
+  # for ALL of those regardless, which it doesn't actually need.
 }
 
 # ── EKS Add-ons ────────────────────────────────────────────────────────────────

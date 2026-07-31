@@ -41,9 +41,18 @@ Everything above lives in one EKS cluster (`bookstore-eks`, us-west-1), one `boo
 
 ## Terraform module graph
 
+`network → security → acm → rds → route53 → ecr → eks → eks-addons → monitoring-ec2` is the module *call* order in `main.tf`, but that's not the real dependency graph — Terraform parallelizes anything not actually connected by a resource/output reference, regardless of where it's written in the file. The real shape:
+
 ```
-network → security → acm → rds → route53 → ecr → eks → eks-addons → monitoring-ec2
+network ──┬─→ security ──┬─→ rds ──→ route53
+          │              └─→ eks ──┬─→ eks-addons ─────┐
+          │                        └─→ monitoring-ec2 ←┘ (needs eks + the
+acm (independent)                                         eks-addons Grafana
+ecr  (independent)                                         secret only, not
+iam.tf / cloudtrail.tf / guardduty.tf (independent)         any Helm install)
 ```
+
+`acm`, `ecr`, and the root `iam.tf`/`cloudtrail.tf`/`guardduty.tf` resources have no dependency on `network` at all and run fully in parallel with it. `rds` and `eks` both depend only on `network`+`security`, not on each other, so they provision concurrently — this is why a full stand-up takes roughly `max(RDS time, EKS time)` for that stage, not the sum. `monitoring-ec2` used to have a blanket `depends_on = [module.eks_addons]` forcing it to wait for every Helm chart in `eks-addons` (up to 900s for ArgoCD) even though it only needs the fast Grafana secret — that's been removed; see [`TERRAFORM.md`](TERRAFORM.md#module-monitoring-ec2). Full detail on what runs when: [`TERRAFORM.md`](TERRAFORM.md).
 
 | Module | Creates | Depends on |
 |---|---|---|

@@ -198,6 +198,20 @@ Not a bug — a process trap. If you skip Terraform state bootstrap (see [`TERRA
 
 `.github/workflows/ci-cd.yml`'s `build-and-push` job's `if` condition was updated to include `refs/heads/observability` so this branch could actually build/push images. `iam.tf`'s GitHub OIDC role trust policy — the thing that lets the job authenticate to AWS at all — was **not** updated to match; it still only trusts `refs/heads/main` and `refs/heads/improvements`. Until that trust policy is updated, this job will pass its own `if` check, get all the way to the "Configure AWS credentials" step, and fail there with an OIDC/AWS auth error that has nothing obviously to do with the branch-trigger change that actually caused it. Fix (not yet applied): add `"repo:${var.github_repo}:ref:refs/heads/observability"` to the `StringLike` condition's `sub` list in `iam.tf`.
 
+### OBS-006 — Removed two Terraform `depends_on` chains to shorten `apply` time (not yet verified against a real apply)
+
+**What changed, and why:** three edits to cut the critical path of a fresh `terraform apply`:
+
+1. `main.tf`'s `module "monitoring_ec2"` call had `depends_on = [module.eks_addons]` — a blanket wait on every Helm chart in `eks-addons` (up to 900s for ArgoCD alone), even though `monitoring-ec2` only actually needs `module.eks`'s outputs and the fast `grafana_admin` Secrets Manager entry (a `random_password` + two `aws_secretsmanager_secret*` resources, not gated on any Helm install). Removed — the real dependency on the Grafana secret is already expressed via the direct output reference (`grafana_admin_secret_arn = module.eks_addons.grafana_admin_secret_arn`), so Terraform still waits for exactly that one resource, not the whole module.
+2. `modules/eks-addons/gitops.tf`'s `argocd` had `depends_on = [helm_release.ingress_nginx]`. Removed.
+3. Same file's `argo_rollouts` had `depends_on = [helm_release.argocd]`. Removed.
+
+Both (2) and (3) were leftover from the single-node resource-contention era (TF-001/TF-006) — they predate `node_desired_size` going to 2 (TF-014) and were never revisited after that fix landed. Neither chart has a real functional dependency on the other: ArgoCD isn't configured with `ingress.enabled` or any TLS/certificate integration in this Helm `set` block, so it has no resource-level reason to wait on ingress-nginx; Argo Rollouts is a separate CRD/controller from ArgoCD with no shared resources either.
+
+**Why this is flagged as a troubleshooting entry, not just a changelog line:** this is exactly the shape of change that caused TF-001 and TF-006 in the first place — more Helm charts installing concurrently on a resource-constrained node. The mitigating fact is the node group is now 2×`t3.medium` instead of 1×, which is the actual fix that resolved those incidents; this change is a bet that the same fix leaves enough headroom for the previously-serialized charts too. **It has not been verified against a real `terraform apply`** (Task 9 of the microservices plan is on hold — see [Plan 1](superpowers/plans/2026-07-30-catalog-service.md)).
+
+**If a real apply hits TF-001-shaped timeout failures after this change:** re-add both `depends_on` lines in `modules/eks-addons/gitops.tf` (`argocd` → `[helm_release.ingress_nginx]`, `argo_rollouts` → `[helm_release.argocd]`). Do not reflexively scale the node group further first — confirm the timeout is actually resource contention (check `kubectl top nodes`/`kubectl describe pod` for `Pending`/`Insufficient cpu` events during the failing apply) before assuming that's the cause.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
