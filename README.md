@@ -2,6 +2,20 @@
 
 A production-grade, cloud-native bookstore application deployed on AWS using a classic three-tier architecture. The infrastructure is fully codified in Terraform, containerised with Docker, orchestrated on Kubernetes (EKS), and protected by a DevSecOps CI/CD pipeline.
 
+> **Note:** this README describes the original monolith. As of the `observability` branch, a microservices split is in progress alongside it (`services/catalog-service/` is live; more planned) and monitoring has moved off-cluster onto a dedicated EC2 instance. The docs below reflect the actual current state — start there if anything here seems out of date.
+
+## Documentation
+
+| Doc | Covers |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System-level view: current state, module graph, region layout, the microservices platform in progress |
+| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | How to actually stand this up from zero, step by step |
+| [`docs/TERRAFORM.md`](docs/TERRAFORM.md) | Every Terraform module in depth |
+| [`docs/KUBERNETES.md`](docs/KUBERNETES.md) | Manifests, Kustomize layout, ArgoCD wiring |
+| [`docs/CICD.md`](docs/CICD.md) | The GitHub Actions pipeline, job by job |
+| [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Real errors hit, root causes, fixes |
+| [`docs/FUTURE_IMPROVEMENTS.md`](docs/FUTURE_IMPROVEMENTS.md) | What's next, known gaps, longer-term roadmap |
+
 ---
 
 ## Table of Contents
