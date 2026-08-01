@@ -242,6 +242,24 @@ until apply, so Terraform cannot predict how many instances will be created.
 
 **General lesson:** any value that flows through a `depends_on`-gated data source (deferred-to-apply-time reads, the whole point of that pattern — see OBS-007's ALB discovery) can never safely appear inside a `count`/`for_each` condition anywhere downstream, even indirectly through a module boundary. Grep for `count.*var\.` or `for_each.*var\.` on any variable whose value now originates from a data source before wiring one up.
 
+### OBS-009 — CNAME not permitted at zone apex ✅ RESOLVED
+
+**Symptom**, hit on the same real `terraform apply` that surfaced OBS-008 (the first one this project ever completed against a fresh account):
+```
+Error: creating Route53 Record: operation error Route 53: ChangeResourceRecordSets,
+  ... InvalidChangeBatch: [RRSet of type CNAME with DNS name b17facebook.xyz.
+  is not permitted at apex in zone b17facebook.xyz.]
+  with module.route53.aws_route53_record.primary[0]
+```
+
+**Root cause:** `aws_route53_record.primary` pointed `var.domain` (the bare apex, e.g. `b17facebook.xyz`, not a subdomain) directly at the NLB hostname with `type = "CNAME"`. DNS forbids a CNAME at the zone apex — the apex needs NS/SOA records too, and a CNAME must be the *only* record for its name, which is incompatible. This is a genuine DNS-protocol-level restriction, not an AWS quirk, and not something this session's changes introduced — it's a **pre-existing bug that simply never got apply-tested before now**, since Task 9 (real deployment) was on hold for this entire project until this apply.
+
+**Fix:** Route53's ALIAS record type — AWS-specific, behaves like a CNAME but is legal at the apex. `modules/route53/main.tf`'s `primary` and `primary_cf` records switched from `type = "CNAME"` + `records`/`ttl` to `type = "A"` + an `alias` block. The NLB's hosted zone ID comes from `data "aws_lb_hosted_zone_id" { load_balancer_type = "network" }` (region-correct, not hardcoded — resolved to `Z24FKFUX50B4VW` for us-west-1 on this apply); CloudFront's is the fixed, AWS-wide constant `Z2FDTNDATAQYW2` (same in every account and region — [AWS docs](https://docs.aws.amazon.com/general/latest/gr/cf_region.html)).
+
+`aws_route53_record.secondary` (DR failover) was **left as CNAME**, deliberately — it's unreachable today (`count = 0`, no secondary-region EKS cluster/NLB exists yet, see [`ARCHITECTURE.md`](ARCHITECTURE.md#region-layout)) and fixing it correctly needs a secondary-region-scoped `hosted_zone_id` lookup this module doesn't have provider wiring for. Don't copy the CNAME pattern for it once `secondary_alb_dns` becomes real — give it the same ALIAS treatment, pointed at the *secondary* region's NLB zone ID, not the primary one.
+
+Verified against the real, partially-applied stack (RDS, secrets, and the private RDS DNS record already existed from the failed apply): `terraform plan` came back clean, `Plan: 5 to add, 0 to change, 1 to destroy` — the one "destroy" is `null_resource.wait_for_alb_hostname` replacing itself (its trigger is `timestamp()`, by design, re-checked every apply — it's not a real AWS resource, "destroying" it does nothing).
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
