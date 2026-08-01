@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: gateway
+data:
+  APP_PORT: "3000"
+  CATALOG_SERVICE_URL: "http://catalog-service.catalog.svc.cluster.local"
+  USER_SERVICE_URL: "http://user-service.user.svc.cluster.local"
+  ORDER_SERVICE_URL: "http://order-service.order.svc.cluster.local"
