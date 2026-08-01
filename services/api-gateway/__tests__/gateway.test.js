@@ -173,3 +173,13 @@ describe("invalid token handling", () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe("GET /metrics label cardinality", () => {
+  it("collapses a parameterized path to its known route prefix instead of a raw label", async () => {
+    await request(app).get("/books/123");
+    const res = await request(app).get("/metrics");
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('route="/books/123"');
+    expect(res.text).toContain('route="/books"');
+  });
+});

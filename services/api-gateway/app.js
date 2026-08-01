@@ -26,6 +26,16 @@ const httpDuration = new Histogram({
   registers: [registry],
 });
 
+const KNOWN_PREFIXES = ["/books", "/auth", "/users", "/orders", "/cart", "/health", "/metrics"];
+
+// Collapse raw request paths (e.g. /books/123) down to their known mount
+// point (e.g. /books) so the Prometheus "route" label stays bounded to a
+// fixed, small set of values instead of growing per unique resource id.
+function routeLabel(path) {
+  const match = KNOWN_PREFIXES.find((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+  return match || "/other";
+}
+
 function verifyJwt(jwtSecret) {
   return (req, res, next) => {
     const header = req.headers.authorization;
@@ -34,7 +44,7 @@ function verifyJwt(jwtSecret) {
     }
     const token = header.slice("Bearer ".length);
     try {
-      const decoded = jwt.verify(token, jwtSecret);
+      const decoded = jwt.verify(token, jwtSecret, { algorithms: ["HS256"] });
       req.headers["x-user-id"] = String(decoded.userId);
       next();
     } catch {
@@ -69,8 +79,9 @@ export function createApp(jwtSecret, targets) {
     const start = Date.now();
     res.on("finish", () => {
       const duration = (Date.now() - start) / 1000;
-      httpRequests.labels(req.method, req.path, String(res.statusCode), SERVICE_NAME).inc();
-      httpDuration.labels(req.method, req.path, String(res.statusCode), SERVICE_NAME).observe(duration);
+      const route = routeLabel(req.path);
+      httpRequests.labels(req.method, route, String(res.statusCode), SERVICE_NAME).inc();
+      httpDuration.labels(req.method, route, String(res.statusCode), SERVICE_NAME).observe(duration);
     });
     next();
   });
