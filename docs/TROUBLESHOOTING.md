@@ -425,5 +425,39 @@ Not a bug — an operational decision, recorded here because it changes destroy 
 
 ## Related
 
+### OBS-019 — `prom-client` in `devDependencies`, missing from every production backend image ever built
+
+**Symptom**, once OBS-017's DB_HOST fix finally let a real `terraform apply` land and the backend Rollout actually tried to start:
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'prom-client' imported from /app/app.js
+Node.js v22.23.2
+```
+`backend` pod stuck in `CrashLoopBackOff` — not a DB issue at all, despite arriving right after a batch of DB-connectivity fixes.
+
+**Root cause:** `backend/app.js` imports `prom-client` unconditionally at module load (the `/metrics` endpoint, added during this branch's observability work) — genuine runtime code, not a dev/test-only dependency. But `backend/package.json` listed it under `devDependencies`, and `backend/Dockerfile` builds with `npm ci --omit=dev`. Every production image built from this repo has therefore been missing the package the app can't start without. This had never been caught because the backend pod had never previously gotten far enough to hit a real `import` at process start — it was blocked first by OBS-005 (IRSA), then OBS-017 (DB_HOST) — this is the first time it actually ran.
+
+**Fix:** moved `prom-client` to `dependencies` in `backend/package.json`, regenerated `backend/package-lock.json` via `npm install --package-lock-only` (flips the `dev` flag on `prom-client` and its own sub-dependency tree, e.g. `@opentelemetry/api`, `bintrees`, `tdigest`). Verified before committing: ran `npm ci --omit=dev` against the new lockfile in a clean tmpdir (mirrors the Dockerfile's `deps` stage exactly) and confirmed both that `node_modules/prom-client` exists and that `import('prom-client')` resolves.
+
+**Status:** fixed and committed. Needs a new backend image — the currently-deployed tag (`1dc8bc38`) predates this fix. `observability` is a CI push-trigger branch (`.github/workflows/ci-cd.yml`), so pushing this commit builds one automatically; no manual `docker build`/`push` needed.
+
+### OBS-020 — RDS has been empty this entire project's history; `test.books` was never created
+
+**Symptom**, hit by the `catalog-schema-init` hook (which migrates from `test.books` into `catalog_db.books`) once OBS-017 let it actually reach RDS:
+```
+ERROR 1146 (42S02) at line 11: Table 'test.books' doesn't exist
+```
+
+**Root cause:** the schema+seed SQL (`CREATE DATABASE`/`CREATE TABLE books`/two seed `INSERT`s) has only ever existed in `k8s/base/database/mysql-init-configmap.yaml` — a ConfigMap mounted by the in-cluster MySQL StatefulSet (`mysql-statefulset.yaml`) that's dead code today (RDS replaced it, confirmed: neither file is referenced by `k8s/base/kustomization.yaml`'s `resources:` list). When the project migrated to RDS, this initialization SQL never got ported over — RDS has been provisioned and empty since. `backend/app.js`'s `/books` route only ever does `SELECT * FROM books`; nothing in the old monolith path ever issued a `CREATE TABLE`. Consistent with OBS-017's finding that no DB connection in this project's history had ever actually succeeded end-to-end before this session — the missing table was simply never reached.
+
+**Fix:** added `k8s/base/database/schema-init-job.yaml`, an ArgoCD PreSync hook Job for the `bookstore` Application, following the exact pattern already proven for `catalog-service` (`k8s/services/catalog-service/base/schema-init-job.yaml`): same `hook-delete-policy: BeforeHookCreation,HookSucceeded` (OBS-015), same pod `securityContext`/container `securityContext` (Semgrep gate), same escaped-backtick heredoc approach for the `` `desc` `` column (OBS-017) — verified locally with the same capture-and-diff heredoc simulation before committing. Idempotent via `WHERE NOT EXISTS (SELECT 1 FROM test.books WHERE title = ...)` rather than catalog's `ON DUPLICATE KEY UPDATE`, since `books.title` has no unique constraint to key off of (unlike catalog's `id`-based migration).
+
+Two supporting fixes needed alongside it:
+- Labeled the hook pod `app: backend` — matches `network-policy.yaml`'s existing `backend-policy` `podSelector`, so its already-present egress rule to the RDS CIDR on port 3306 applies without writing a new NetworkPolicy.
+- Added the same `argocd.argoproj.io/hook: PreSync` + `sync-wave: "-1"` annotation to `db-secret`'s `ExternalSecret` (`k8s/base/secrets/external-secret.yaml`) that catalog's `admin-db-secret`/`catalog-db-secret` already carry — without it this Job would hit the exact `CreateContainerConfigError` race OBS-013 already found and fixed once for catalog-service.
+
+**Status:** fixed and committed, not yet verified against a real ArgoCD sync as of this entry.
+
+## Related
+
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
 - [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) — OBS-005 and other known gaps that should get fixed properly rather than worked around
