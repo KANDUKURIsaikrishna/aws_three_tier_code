@@ -32,18 +32,32 @@ resource "aws_route53_health_check" "primary" {
   tags = { Name = "bookstore-primary-health" }
 }
 
-# NLB's Route53 hosted zone ID — an AWS-published, region-specific constant
-# (distinct from the zone this module creates). Needed to alias the apex
-# domain at the NLB: DNS forbids a CNAME at a zone apex (the apex needs
-# NS/SOA records too, and CNAME must be the only record for its name), and
-# Route53's ALIAS record type is the AWS-specific workaround — it behaves
-# like a CNAME but is legal at the apex. Scoped to var.aws_region implicitly
-# via this module's (default) provider.
-data "aws_lb_hosted_zone_id" "nlb" {
-  load_balancer_type = "network"
-}
+# The ingress-nginx LB's Route53 hosted zone ID — an AWS-published,
+# region-specific constant (distinct from the zone this module creates).
+# Needed to alias the apex domain at the LB: DNS forbids a CNAME at a zone
+# apex (the apex needs NS/SOA records too, and CNAME must be the only record
+# for its name), and Route53's ALIAS record type is the AWS-specific
+# workaround — it behaves like a CNAME but is legal at the apex. Scoped to
+# var.aws_region implicitly via this module's (default) provider.
+#
+# Classic ELB, NOT an NLB — despite this whole project historically calling
+# this an "NLB" (docs included), it isn't one. No aws-load-balancer-controller
+# is installed (modules/eks-addons has no such helm_release), and
+# modules/eks-addons/ingress.tf never sets the
+# service.beta.kubernetes.io/aws-load-balancer-type: nlb annotation on
+# ingress-nginx's Service. On EKS, a plain `type: LoadBalancer` Service with
+# neither of those falls back to the legacy in-tree cloud provider's Classic
+# ELB. Confirmed by two real Route53 errors in sequence: first "the alias
+# target name does not lie within the target zone" when this used
+# aws_lb_hosted_zone_id (load_balancer_type="network") — proving it's not an
+# NLB — then that same data source rejecting "classic" outright
+# (`expected load_balancer_type to be one of ["application" "network"]`) —
+# aws_lb_hosted_zone_id only covers ELBv2 (ALB/NLB), not the classic v1 ELB
+# this cluster actually creates. aws_elb_hosted_zone_id is the correct,
+# separate data source for that. See TROUBLESHOOTING OBS-010.
+data "aws_elb_hosted_zone_id" "ingress_lb" {}
 
-# Direct-to-ALB record — active when CloudFront is disabled.
+# Direct-to-ingress-LB record — active when CloudFront is disabled.
 # primary_alb_dns is auto-discovered within the same apply (root argocd.tf's
 # kubernetes_service data source) unless var.primary_alb_dns overrides it.
 #
@@ -53,7 +67,7 @@ data "aws_lb_hosted_zone_id" "nlb" {
 # an unknown value ("Invalid count argument" at plan). enable_cloudfront alone
 # (a plain bool, always known) is what gates this record's existence; the
 # upstream null_resource.wait_for_alb_hostname (argocd.tf) already hard-fails
-# the apply if the NLB hostname never actually shows up, so by the time this
+# the apply if the LB hostname never actually shows up, so by the time this
 # resource applies, alias.name = var.primary_alb_dns is guaranteed non-empty.
 resource "aws_route53_record" "primary" {
   count   = var.enable_cloudfront ? 0 : 1
@@ -63,7 +77,7 @@ resource "aws_route53_record" "primary" {
 
   alias {
     name                   = var.primary_alb_dns
-    zone_id                = data.aws_lb_hosted_zone_id.nlb.id
+    zone_id                = data.aws_elb_hosted_zone_id.ingress_lb.id
     evaluate_target_health = true
   }
 
@@ -74,16 +88,18 @@ resource "aws_route53_record" "primary" {
 
 # Still CNAME, not ALIAS — genuinely fine for now, NOT a bug: this record only
 # ever gets created once var.secondary_alb_dns is non-empty (count below), and
-# that only happens once a secondary-region EKS cluster + NLB actually exist,
-# which they don't yet (see ARCHITECTURE.md — DR is backup-level only today).
-# When that day comes, this needs the SAME apex-alias treatment as `primary`
-# above, but pointed at the secondary region's NLB hosted zone ID — which is
-# region-specific and NOT the same value as data.aws_lb_hosted_zone_id.nlb
+# that only happens once a secondary-region EKS cluster + ingress LB actually
+# exist, which they don't yet (see ARCHITECTURE.md — DR is backup-level only
+# today). When that day comes, this needs the SAME apex-alias treatment as
+# `primary` above, but pointed at the secondary region's LB hosted zone ID —
+# region-specific and NOT the same value as data.aws_elb_hosted_zone_id.ingress_lb
 # above (that one resolves against var.aws_region, the primary region, via
-# this module's default provider). Wiring a second, secondary-region-scoped
-# provider through this module is real work, deliberately deferred until
-# there's an actual secondary NLB to point at — don't copy today's CNAME
-# pattern for this once secondary_alb_dns is real; fix it properly then.
+# this module's default provider — and confirm the secondary cluster's ingress
+# is the same LB type, classic, before reusing this pattern; don't assume it).
+# Wiring a second, secondary-region-scoped provider through this module is
+# real work, deliberately deferred until there's an actual secondary LB to
+# point at — don't copy today's CNAME pattern for this once secondary_alb_dns
+# is real; fix it properly then.
 resource "aws_route53_record" "secondary" {
   count   = var.secondary_alb_dns != "" ? 1 : 0
   zone_id = aws_route53_zone.public.zone_id
@@ -97,11 +113,12 @@ resource "aws_route53_record" "secondary" {
 }
 
 # CloudFront record — active when enable_cloudfront=true.
-# Replaces the direct-to-ALB primary record; CloudFront becomes the entry point.
-# Same apex-CNAME problem as `primary` above, same ALIAS fix. CloudFront's
-# hosted zone ID is a fixed, AWS-wide constant — same value in every account,
-# every region (https://docs.aws.amazon.com/general/latest/gr/cf_region.html),
-# unlike the NLB's, which is region-specific and comes from a data source.
+# Replaces the direct-to-ingress-LB primary record; CloudFront becomes the
+# entry point. Same apex-CNAME problem as `primary` above, same ALIAS fix.
+# CloudFront's hosted zone ID is a fixed, AWS-wide constant — same value in
+# every account, every region
+# (https://docs.aws.amazon.com/general/latest/gr/cf_region.html), unlike the
+# ingress LB's, which is region-specific and comes from a data source.
 resource "aws_route53_record" "primary_cf" {
   count   = var.enable_cloudfront && var.cloudfront_domain != "" ? 1 : 0
   zone_id = aws_route53_zone.public.zone_id
