@@ -164,11 +164,11 @@ describe("POST /orders (direct, no cart)", () => {
     expect(res.body).toEqual({ error: "book_id and quantity are required" });
   });
 
-  it("rejects a book_id of 0", async () => {
+  it("rejects a negative book_id", async () => {
     const res = await request(app)
       .post("/orders")
       .set("X-User-Id", "3")
-      .send({ book_id: 0, quantity: 1 });
+      .send({ book_id: -5, quantity: 1 });
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: "book_id and quantity are required" });
   });
