@@ -28,6 +28,10 @@ spec:
             namespace: catalog
           - service: user-service
             namespace: user
+          - service: notification-service
+            namespace: notification
+          - service: order-service
+            namespace: order
 
   template:
     metadata:
