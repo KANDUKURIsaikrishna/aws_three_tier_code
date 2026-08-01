@@ -17,7 +17,7 @@ Explicitly **not** in scope for this platform, by deliberate design-spec decisio
 
 These aren't "nice to haves" — they're specific, already-identified problems with a clear fix, listed roughly in the order they'd bite you.
 
-1. **CI's OIDC trust policy doesn't cover the `observability` branch.** `iam.tf`'s GitHub OIDC role only trusts `refs/heads/main` and `refs/heads/improvements` — but `.github/workflows/ci-cd.yml`'s `build-and-push` job was updated to run on `observability` too. Right now, that job will pass its `if` check and then fail at AWS auth with no obvious link back to the actual cause. Fix: add the branch to `iam.tf`'s `StringLike` condition — see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) OBS-005. Do this **before** relying on CI to build/push catalog-service images.
+1. ~~**CI's OIDC trust policy doesn't cover the `observability` branch.**~~ **Fixed** — see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) OBS-005. Requires a `terraform apply` to actually take effect if you're reading this before that's run.
 
 2. **`ApplicationSet`'s `targetRevision: observability` is tracked only by a code comment.** Once the microservices branch merges to `main`, nothing forces `k8s/argocd/applicationset-microservices.yaml` to switch back — and every future service added to the `elements` list inherits whatever `targetRevision` is already there. Worth either a tracked issue, or a cheap CI check that fails if any `k8s/argocd/*.yaml` on `main` references a non-`main` `targetRevision`.
 

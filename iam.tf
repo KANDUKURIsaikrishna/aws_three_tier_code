@@ -28,6 +28,11 @@ resource "aws_iam_role" "github_oidc" {
           "token.actions.githubusercontent.com:sub" = [
             "repo:${var.github_repo}:ref:refs/heads/main",
             "repo:${var.github_repo}:ref:refs/heads/improvements",
+            # ci-cd.yml's build-and-push job runs on observability too (see
+            # CICD.md), but this trust policy was never updated to match —
+            # confirmed live: images could never actually push from this
+            # branch until this line existed. See TROUBLESHOOTING.md OBS-005.
+            "repo:${var.github_repo}:ref:refs/heads/observability",
           ]
         }
       }
