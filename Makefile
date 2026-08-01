@@ -34,6 +34,7 @@ MONITORING_KEY = .monitoring-ssh-key.pem
 # locally (mode 400, required by ssh/scp). Re-run any time it goes missing —
 # idempotent, just re-reads the same state-stored key, doesn't regenerate it.
 monitoring-key:
+	@rm -f $(MONITORING_KEY)
 	terraform output -raw monitoring_ssh_private_key > $(MONITORING_KEY)
 	chmod 400 $(MONITORING_KEY)
 
