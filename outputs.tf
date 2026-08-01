@@ -40,6 +40,16 @@ output "user_service_repo_url" {
   value       = module.ecr.repo_urls["user-service"]
 }
 
+output "order_service_repo_url" {
+  description = "ECR repository URL for the order-service image"
+  value       = module.ecr.repo_urls["order-service"]
+}
+
+output "notification_service_repo_url" {
+  description = "ECR repository URL for the notification-service image"
+  value       = module.ecr.repo_urls["notification-service"]
+}
+
 output "eks_cluster_name" {
   description = "EKS cluster name"
   value       = module.eks.cluster_name
