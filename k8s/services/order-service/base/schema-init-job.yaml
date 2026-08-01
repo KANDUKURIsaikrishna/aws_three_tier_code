@@ -1,0 +1,86 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: order-schema-init
+  namespace: order
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: order-service
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      restartPolicy: Never
+      containers:
+        - name: schema-init
+          image: mysql:8.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mysql -h "$ADMIN_DB_HOST" -u "$ADMIN_DB_USERNAME" -p"$ADMIN_DB_PASSWORD" <<SQL
+              CREATE DATABASE IF NOT EXISTS order_db;
+
+              CREATE TABLE IF NOT EXISTS order_db.orders (
+                id         INT AUTO_INCREMENT PRIMARY KEY,
+                user_id    INT NOT NULL,
+                book_id    INT NOT NULL,
+                quantity   INT NOT NULL,
+                status     VARCHAR(50) NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+              );
+
+              CREATE TABLE IF NOT EXISTS order_db.cart_items (
+                id         INT AUTO_INCREMENT PRIMARY KEY,
+                user_id    INT NOT NULL,
+                book_id    INT NOT NULL,
+                quantity   INT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_user_book (user_id, book_id)
+              );
+
+              CREATE USER IF NOT EXISTS 'order_service_user'@'%' IDENTIFIED BY '$ORDER_DB_PASSWORD';
+              GRANT ALL PRIVILEGES ON order_db.* TO 'order_service_user'@'%';
+              FLUSH PRIVILEGES;
+              SQL
+          env:
+            - name: ADMIN_DB_HOST
+              valueFrom:
+                secretKeyRef: { name: admin-db-secret, key: DB_HOST }
+            - name: ADMIN_DB_USERNAME
+              valueFrom:
+                secretKeyRef: { name: admin-db-secret, key: DB_USERNAME }
+            - name: ADMIN_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: admin-db-secret, key: DB_PASSWORD }
+            - name: ORDER_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: order-db-secret, key: DB_PASSWORD }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

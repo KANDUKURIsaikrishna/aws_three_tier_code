@@ -1,0 +1,42 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: order
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: order-service-policy
+  namespace: order
+spec:
+  podSelector:
+    matchLabels:
+      app: order-service
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - {} # tightened in a later plan once api-gateway exists and owns ingress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 170.20.0.0/16
+      ports:
+        - port: 3306
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: notification
+      ports:
+        - port: 3000
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

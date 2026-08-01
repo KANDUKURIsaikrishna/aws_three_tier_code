@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-config
+  namespace: order
+data:
+  DB_PORT: "3306"
+  DB_NAME: "order_db"
+  APP_PORT: "3000"
+  NOTIFICATION_SERVICE_URL: "http://notification-service.notification.svc.cluster.local"
