@@ -127,3 +127,15 @@ output "jwt_secret_arn" {
   value       = aws_secretsmanager_secret.jwt_secret.arn
   sensitive   = true
 }
+
+output "order_db_secret_arn" {
+  description = "ARN of the Secrets Manager secret at /bookstore/order-db-credentials"
+  value       = aws_secretsmanager_secret.order_db_credentials.arn
+  sensitive   = true
+}
+
+output "notification_db_secret_arn" {
+  description = "ARN of the Secrets Manager secret at /bookstore/notification-db-credentials"
+  value       = aws_secretsmanager_secret.notification_db_credentials.arn
+  sensitive   = true
+}

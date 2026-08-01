@@ -118,6 +118,52 @@ resource "aws_secretsmanager_secret_version" "jwt_secret" {
   })
 }
 
+# ── Order Service — DB credentials ────────────────────────────────────────────
+
+resource "random_password" "order_db_password" {
+  length           = 32
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}?"
+}
+
+resource "aws_secretsmanager_secret" "order_db_credentials" {
+  name                    = "/bookstore/order-db-credentials"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "order_db_credentials" {
+  secret_id = aws_secretsmanager_secret.order_db_credentials.id
+  secret_string = jsonencode({
+    DB_USERNAME = "order_service_user"
+    DB_PASSWORD = random_password.order_db_password.result
+    DB_HOST     = module.rds.rds_endpoint
+    DB_NAME     = "order_db"
+  })
+}
+
+# ── Notification Service — DB credentials ─────────────────────────────────────
+
+resource "random_password" "notification_db_password" {
+  length           = 32
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}?"
+}
+
+resource "aws_secretsmanager_secret" "notification_db_credentials" {
+  name                    = "/bookstore/notification-db-credentials"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "notification_db_credentials" {
+  secret_id = aws_secretsmanager_secret.notification_db_credentials.id
+  secret_string = jsonencode({
+    DB_USERNAME = "notification_service_user"
+    DB_PASSWORD = random_password.notification_db_password.result
+    DB_HOST     = module.rds.rds_endpoint
+    DB_NAME     = "notification_db"
+  })
+}
+
 # ── Route 53 ──────────────────────────────────────────────────────────────────
 # Private zone for in-cluster RDS DNS + public zone with active-passive failover.
 
