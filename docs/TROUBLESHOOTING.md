@@ -457,6 +457,35 @@ Two supporting fixes needed alongside it:
 
 **Status:** fixed and committed, not yet verified against a real ArgoCD sync as of this entry.
 
+### OBS-021 — `backend-schema-init` never got a pod: `bookstore-quota` rejected it for missing resources
+
+**Symptom:** the Job (from OBS-020) sat `Running 0/1` for 15+ minutes with **zero actual pods** — `kubectl get pods -n bookstore` never showed it at all:
+```
+Warning  FailedCreate  ...  job-controller  Error creating: pods "backend-schema-init-..." is forbidden: failed quota:
+bookstore-quota: must specify limits.cpu for: schema-init; limits.memory for: schema-init;
+requests.cpu for: schema-init; requests.memory for: schema-init
+```
+
+**Root cause:** `k8s/base/quota.yaml`'s `bookstore-quota` `ResourceQuota` requires every container created in the `bookstore` namespace to declare `requests`/`limits` for both cpu and memory — a Kubernetes-enforced admission rule, not a soft default. `schema-init-job.yaml`'s container never set any (it was modeled directly on catalog-service's version, which has no equivalent quota in the `catalog` namespace and so never hit this). Every pod-create attempt was rejected outright; `backoffLimit` never even got a chance to count against real attempts since none of them became real pods.
+
+**Fix:** added a `resources` block to the container, matching what `backend`'s own Rollout container already uses (`k8s/base/backend/rollout.yaml`): `requests: {cpu: 50m, memory: 64Mi}`, `limits: {cpu: 250m, memory: 128Mi}`.
+
+**Status:** fixed and committed, not yet re-verified against a real sync as of this entry.
+
+### OBS-022 — `catalog-schema-init` races `backend-schema-init` across two independent ArgoCD Applications
+
+**Symptom**, once OBS-021 let `backend-schema-init` actually run:
+```
+ERROR 1146 (42S02) at line 11: Table 'test.books' doesn't exist
+```
+still hit by `catalog-schema-init`, even though the Job that creates `test.books` (OBS-020) had, by then, already been fixed and pushed.
+
+**Root cause:** ArgoCD's `sync-wave` ordering only applies to hooks **within a single Application's sync**. `backend-schema-init` (creates `test.books`) lives in the `bookstore` Application; `catalog-schema-init` (migrates *from* `test.books`) lives in the separate `catalog-service` Application. Nothing orders one Application's sync relative to the other's — both were triggered by the same manual `argocd.argoproj.io/refresh=hard` + patched `operation.sync` in this session, and `catalog-service`'s hook simply won the race on that particular sync. This isn't a one-time fluke; it can recur on any future sync where timing happens to favor `catalog-service`.
+
+**Fix:** rather than trying to force cross-Application ordering (no clean mechanism for it short of an App-of-Apps restructure, deliberately not undertaken here), made the migration self-guarding: replaced the bare `INSERT INTO catalog_db.books ... SELECT ... FROM test.books` with a dynamic-SQL block that checks `information_schema.tables` for `test.books` first and no-ops (`SELECT 1`) if it isn't there yet, instead of hard-failing. Idempotent by design (same as the rest of this script) — a sync that skips the migration today will pick it up cleanly on a later sync once `test.books` actually exists, no manual intervention needed. Verified the heredoc/backtick handling locally before committing (same capture-and-diff method as OBS-017); the dynamic SQL itself (`SET`/`IF`/`PREPARE`/`EXECUTE`/`DEALLOCATE`) is standard MySQL 8.0 syntax, reviewed but not executed against a live server (no local MySQL available in this session's environment).
+
+**Status:** fixed and committed, not yet re-verified against a real sync as of this entry.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
