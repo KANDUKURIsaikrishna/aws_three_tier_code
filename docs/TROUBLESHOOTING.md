@@ -558,6 +558,20 @@ A timeout, not an auth failure — the connection never got a response at all.
 
 **Status:** fixed and committed, not yet applied as of this entry.
 
+### OBS-028 — `gh run rerun --failed` can't recover from a partial `build-and-push` failure: immutable ECR tags reject the retry
+
+**Symptom**, hit deploying order-service/notification-service before their ECR repos existed yet (Terraform hadn't been applied): the `build-and-push` job failed at `Push notification-service image` with `name unknown: The repository with name 'bookstore-notification-service' does not exist in the registry` — expected, since `terraform apply` hadn't run yet. But `backend`, `catalog-service`, and `user-service`'s pushes, earlier in the same job, had already succeeded under image tag `4cf13de7` before the job aborted on the missing repo. After running `terraform apply` to create the missing repos, re-running just the failed job (`gh run rerun <id> --failed`) failed again — this time on the very first push, `backend`:
+```
+tag invalid: The image tag '4cf13de7' already exists in the 'bookstore-backend' repository
+and cannot be overwritten because the tag is immutable.
+```
+
+**Root cause:** `modules/ecr/main.tf` sets `image_tag_mutability = "IMMUTABLE"` on every repo (deliberate — prevents a compromised or buggy CI run from silently overwriting a previously-deployed image under the same tag, a real supply-chain protection). The image tag is derived from the git SHA (`${GITHUB_SHA::8}` in `ci-cd.yml`'s "Derive image tag" step), so `gh run rerun` — which replays the exact same job against the exact same commit — always regenerates the exact same tag. That's fine when the whole job failed before any push succeeded, but this job's `build-and-push` steps are sequential per-service, not atomic — a partial failure (some services' images already pushed, later ones not) leaves the run in a state no rerun of the *same commit* can ever get past, since the tag collision on the already-pushed services is permanent and by design un-overridable.
+
+**Fix:** there isn't one at the workflow level worth making — this is the immutable-tag protection working as intended, just surfaced in an unfamiliar way (a *partial* failure, not a full one). The actual fix is operational: push a new commit (even a docs-only one, as this entry itself is) to get a new SHA-derived tag, which then pushes cleanly for every service, including the ones that "succeeded" under the stale tag — they simply get re-pushed under the new tag too, harmlessly.
+
+**Status:** not a bug to fix in code. Recorded here so a future partial `build-and-push` failure isn't mistaken for something `gh run rerun` should be able to fix — it can't, once any image in the same run has already landed under an immutable tag. Push a new commit instead.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
