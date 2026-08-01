@@ -345,5 +345,21 @@ Warning  Failed  12m (x12 over 14m)  kubelet  spec.containers{schema-init}: Erro
 
 ## Related
 
+### OBS-014 — Pinned `trivy-action` SHA broke via an unpinned transitive dependency ✅ RESOLVED
+
+**Symptom**, hit on the CI run right after OBS-005/OBS-013 were fixed — first time `build-and-push` ever actually started on this branch:
+```
+##[error]Unable to resolve action `aquasecurity/setup-trivy@v0.2.1`, unable to find version `v0.2.1`
+```
+Failed at the generic "Set up job" step, before any of this workflow's own steps ran — nothing to do with our code, Docker, AWS, or Trivy's actual scan logic.
+
+**Root cause:** `aquasecurity/trivy-action@915b19b...` (pinned, tagged `v0.28.0`) is a composite action whose own `action.yaml` calls `uses: aquasecurity/setup-trivy@v0.2.1` — by a **mutable tag**, not a hash. This repo pins its own direct action references to commit SHAs specifically to prevent exactly this class of problem (see CI-001) — but that protection doesn't extend through a composite action's *own* internal `uses:` lines, which are entirely outside this repo's control. At some point upstream, the `aquasecurity/setup-trivy` project deleted or moved the `v0.2.1` tag, and every consumer of that specific `trivy-action` version broke simultaneously, with no code change on this end.
+
+**Fix:** bumped to `trivy-action@ed142fd...` (`v0.36.0`) in both `ci-cd.yml` (3 occurrences) and `terraform.yml` (1 occurrence, same stale pin, would have broken identically on its next run). Verified *before* bumping, not just assumed: fetched `v0.36.0`'s `action.yaml` directly (`gh api repos/aquasecurity/trivy-action/contents/action.yaml?ref=...`) and confirmed it pins `setup-trivy` by commit hash too (`aquasecurity/setup-trivy@3fb12ec... # v0.2.6`) — this version won't break the same way again, versus blindly bumping to whatever's newest and hoping.
+
+**General lesson:** pinning a third-party Action to a commit SHA protects against that Action's tag being repointed, but says nothing about *that Action's own dependencies* — a composite action can still break out from under you if it references something else by a mutable tag internally. Periodically checking whether pinned actions have newer stable releases (not just reactively, after a break) would catch this class of issue before it blocks a real deploy.
+
+## Related
+
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
 - [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) — OBS-005 and other known gaps that should get fixed properly rather than worked around
