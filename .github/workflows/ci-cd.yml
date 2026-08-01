@@ -19,6 +19,8 @@ env:
   FRONTEND_REPO: bookstore-frontend
   CATALOG_REPO:  bookstore-catalog-service
   USER_REPO:     bookstore-user-service
+  ORDER_REPO:    bookstore-order-service
+  NOTIFICATION_REPO: bookstore-notification-service
   EKS_CLUSTER:   bookstore-eks
   K8S_NAMESPACE: bookstore
 
@@ -66,6 +68,8 @@ jobs:
             client/package-lock.json
             services/catalog-service/package-lock.json
             services/user-service/package-lock.json
+            services/notification-service/package-lock.json
+            services/order-service/package-lock.json
 
       - name: Install backend dependencies
         run: cd backend && npm ci
@@ -90,6 +94,24 @@ jobs:
 
       - name: npm audit — user-service production deps (fail on high/critical CVEs)
         run: cd services/user-service && npm audit --audit-level=high --omit=dev
+
+      - name: Install notification-service dependencies
+        run: cd services/notification-service && npm ci
+
+      - name: Run notification-service tests
+        run: cd services/notification-service && npm test
+
+      - name: npm audit — notification-service production deps (fail on high/critical CVEs)
+        run: cd services/notification-service && npm audit --audit-level=high --omit=dev
+
+      - name: Install order-service dependencies
+        run: cd services/order-service && npm ci
+
+      - name: Run order-service tests
+        run: cd services/order-service && npm test
+
+      - name: npm audit — order-service production deps (fail on high/critical CVEs)
+        run: cd services/order-service && npm audit --audit-level=high --omit=dev
 
       - name: Install frontend dependencies
         run: cd client && npm ci
@@ -314,6 +336,90 @@ jobs:
         run: |
           docker push ${{ env.ECR_REGISTRY }}/${{ env.USER_REPO }}:${{ steps.tag.outputs.tag }}
 
+      # ── Notification service image ───────────────────────────────────────
+      - name: Build notification-service image (no push yet)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context:   ./services/notification-service
+          push:      false
+          load:      true
+          tags:      ${{ env.ECR_REGISTRY }}/${{ env.NOTIFICATION_REPO }}:${{ steps.tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      - name: Trivy — scan notification-service (CRITICAL + HIGH = hard fail)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref:      ${{ env.ECR_REGISTRY }}/${{ env.NOTIFICATION_REPO }}:${{ steps.tag.outputs.tag }}
+          format:         sarif
+          output:         trivy-notification-service.sarif
+          severity:       CRITICAL,HIGH
+          exit-code:      "1"
+          ignore-unfixed: true
+
+      - name: Show notification-service CVEs in CI log (diagnostic on failure)
+        if: failure()
+        run: |
+          [ -f trivy-notification-service.sarif ] && \
+            jq -r '.runs[].results[] |
+              "[" + (.level | ascii_upcase) + "] " + .ruleId +
+              ": " + (.message.text | split("\n")[0])' \
+            trivy-notification-service.sarif \
+          || echo "trivy-notification-service.sarif not found"
+
+      - name: Upload notification-service Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4
+        if: always()
+        with:
+          sarif_file: trivy-notification-service.sarif
+          category:   trivy-notification-service
+
+      - name: Push notification-service image
+        run: |
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.NOTIFICATION_REPO }}:${{ steps.tag.outputs.tag }}
+
+      # ── Order service image ──────────────────────────────────────────────
+      - name: Build order-service image (no push yet)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context:   ./services/order-service
+          push:      false
+          load:      true
+          tags:      ${{ env.ECR_REGISTRY }}/${{ env.ORDER_REPO }}:${{ steps.tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      - name: Trivy — scan order-service (CRITICAL + HIGH = hard fail)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref:      ${{ env.ECR_REGISTRY }}/${{ env.ORDER_REPO }}:${{ steps.tag.outputs.tag }}
+          format:         sarif
+          output:         trivy-order-service.sarif
+          severity:       CRITICAL,HIGH
+          exit-code:      "1"
+          ignore-unfixed: true
+
+      - name: Show order-service CVEs in CI log (diagnostic on failure)
+        if: failure()
+        run: |
+          [ -f trivy-order-service.sarif ] && \
+            jq -r '.runs[].results[] |
+              "[" + (.level | ascii_upcase) + "] " + .ruleId +
+              ": " + (.message.text | split("\n")[0])' \
+            trivy-order-service.sarif \
+          || echo "trivy-order-service.sarif not found"
+
+      - name: Upload order-service Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4
+        if: always()
+        with:
+          sarif_file: trivy-order-service.sarif
+          category:   trivy-order-service
+
+      - name: Push order-service image
+        run: |
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ORDER_REPO }}:${{ steps.tag.outputs.tag }}
+
       # ── Frontend image ───────────────────────────────────────────────────
       - name: Build frontend image (no push yet)
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
@@ -407,6 +513,10 @@ jobs:
             kustomize edit set image bookstore-catalog-service=${{ env.ECR_REGISTRY }}/${{ env.CATALOG_REPO }}:${TAG})
           (cd k8s/services/user-service/overlays/prod && \
             kustomize edit set image bookstore-user-service=${{ env.ECR_REGISTRY }}/${{ env.USER_REPO }}:${TAG})
+          (cd k8s/services/notification-service/overlays/prod && \
+            kustomize edit set image bookstore-notification-service=${{ env.ECR_REGISTRY }}/${{ env.NOTIFICATION_REPO }}:${TAG})
+          (cd k8s/services/order-service/overlays/prod && \
+            kustomize edit set image bookstore-order-service=${{ env.ECR_REGISTRY }}/${{ env.ORDER_REPO }}:${TAG})
 
       - name: Commit and push updated image tags
         env:
@@ -416,7 +526,9 @@ jobs:
           git config user.name "GitHub Actions"
           git add k8s/overlays/prod/kustomization.yaml \
                   k8s/services/catalog-service/overlays/prod/kustomization.yaml \
-                  k8s/services/user-service/overlays/prod/kustomization.yaml
+                  k8s/services/user-service/overlays/prod/kustomization.yaml \
+                  k8s/services/notification-service/overlays/prod/kustomization.yaml \
+                  k8s/services/order-service/overlays/prod/kustomization.yaml
           # Skips the commit if kustomization.yaml did not actually change
           git diff --staged --quiet && echo "No image tag changes." && exit 0
           git commit -m "chore: bump image tags to ${TAG}"
