@@ -1,0 +1,99 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Monolith DB schema bootstrap — ArgoCD PreSync hook, same pattern as
+# k8s/services/catalog-service/base/schema-init-job.yaml (see OBS-013,
+# OBS-015, OBS-017 in TROUBLESHOOTING.md for why hook-delete-policy and the
+# securityContext/labels below look the way they do).
+#
+# Why this exists: the in-cluster MySQL StatefulSet under this same directory
+# (mysql-statefulset.yaml, mysql-init-configmap.yaml) is dead code — RDS
+# replaced it — but its init.sql (CREATE DATABASE/TABLE + seed rows) never
+# got ported over when that happened. RDS has been provisioned empty this
+# whole time; backend's `SELECT * FROM books` has never had a real table to
+# read from. This Job is that missing migration, run against the real RDS
+# instance instead of a throwaway in-cluster container.
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: backend-schema-init
+  namespace: bookstore
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      # Matches network-policy.yaml's backend-policy podSelector — without
+      # this label the namespace's default-deny-all NetworkPolicy blocks
+      # this pod's egress to RDS (port 3306).
+      labels:
+        app: backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      restartPolicy: Never
+      containers:
+        - name: schema-init
+          image: mysql:8.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mysql -h "$DB_HOST" -u "$DB_USERNAME" -p"$DB_PASSWORD" <<SQL
+              CREATE DATABASE IF NOT EXISTS test;
+
+              CREATE TABLE IF NOT EXISTS test.books (
+                id     INT NOT NULL AUTO_INCREMENT,
+                title  VARCHAR(300) NOT NULL,
+                \`desc\` VARCHAR(500) NOT NULL,
+                price  FLOAT NOT NULL,
+                cover  VARCHAR(500) NOT NULL,
+                PRIMARY KEY (id)
+              );
+
+              INSERT INTO test.books (title, \`desc\`, price, cover)
+              SELECT * FROM (SELECT
+                'The Great Gatsby' AS title,
+                'A novel by F. Scott Fitzgerald' AS \`desc\`,
+                12.99 AS price,
+                'https://covers.openlibrary.org/b/id/8432472-L.jpg' AS cover
+              ) AS seed1
+              WHERE NOT EXISTS (SELECT 1 FROM test.books WHERE title = 'The Great Gatsby');
+
+              INSERT INTO test.books (title, \`desc\`, price, cover)
+              SELECT * FROM (SELECT
+                'To Kill a Mockingbird' AS title,
+                'A novel by Harper Lee' AS \`desc\`,
+                10.99 AS price,
+                'https://covers.openlibrary.org/b/id/8810494-L.jpg' AS cover
+              ) AS seed2
+              WHERE NOT EXISTS (SELECT 1 FROM test.books WHERE title = 'To Kill a Mockingbird');
+              SQL
+          env:
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef: { name: db-secret, key: DB_HOST }
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef: { name: db-secret, key: DB_USERNAME }
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: db-secret, key: DB_PASSWORD }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
