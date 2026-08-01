@@ -361,5 +361,34 @@ Failed at the generic "Set up job" step, before any of this workflow's own steps
 
 ## Related
 
+### OBS-015 — PreSync hook with only `HookSucceeded` gets stuck forever once it fails once ✅ RESOLVED
+
+**Symptom:** after OBS-013's fix landed and a new image/tag round went out, `catalog-service`'s Application stayed `Running: waiting for completion of hook batch/Job/catalog-schema-init` indefinitely across multiple sync attempts and pushes — `kubectl get pods -n catalog` kept showing the exact same `catalog-schema-init-rcpw7` pod, unchanged, for over an hour, well past when the secrets that used to block it (OBS-013) were fixed.
+
+**Root cause:** `argocd.argoproj.io/hook-delete-policy: HookSucceeded` only deletes the hook resource when it **succeeds**. This Job's very first run happened before OBS-013's fix landed, so it failed (`CreateContainerConfigError`) and was never cleaned up. Every sync attempt after that — including ones on commits that would have fixed the underlying secret-ordering problem — saw a same-name `Job` resource already existing in a non-terminal state and just kept waiting on *that one*, never deleting it and never creating a fresh attempt. A permanently-broken hook doesn't retry; it wedges the Application forever, silently, since ArgoCD reports this as "Running," not as an error.
+
+**Fix:** `argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded` — `BeforeHookCreation` deletes whatever hook resource already exists (success or failure) right before creating a new one for the current sync attempt, which is what this Job's own idempotent-SQL design already assumed would happen. Also manually deleted the specific stuck Job to unblock immediately rather than waiting for another full push/CI/sync round.
+
+**General lesson:** for any hook whose work is meant to be safely re-run every sync (idempotent SQL, idempotent API calls, etc.), `hook-delete-policy` needs `BeforeHookCreation` specifically — `HookSucceeded` alone is a trap that only reveals itself the first time the hook actually fails, which for something gating a fresh service's very first deploy is likely to be immediately.
+
+### OBS-016 — `backend` Rollout: `InvalidSpec`, `AnalysisTemplate` metric with `interval` but no `count`, plus a dead in-cluster Prometheus address ✅ RESOLVED
+
+**Symptom**, discovered while checking why `bookstore`'s `frontend` pods came up fine (new image pulled, `Running`) but `backend` had zero pods at all after 67 minutes:
+```
+Message: The Rollout "backend" is invalid: spec.strategy.canary.steps[1].analysis.templates:
+  Invalid value: "error-rate": AnalysisTemplate error-rate has metric error-rate which runs
+  indefinitely. Invalid value for count: <nil>
+Phase: Degraded
+```
+An `InvalidSpec` Rollout creates **no pods, no ReplicaSet, nothing** — worse than a normal failing deployment, since there isn't even a failing pod to look at.
+
+**Root cause, two independent bugs in the same file** (`k8s/base/monitoring/analysis-template.yaml`), neither ever caught because this Rollout+AnalysisTemplate combination had never been validated against a live Argo Rollouts controller before this session's Task 9:
+1. The `error-rate` metric set `interval: 30s` but no `count` — Argo Rollouts requires a bounded number of measurements for an interval-based metric; without it, the metric "runs indefinitely," which Rollouts rejects outright as an invalid spec, not a runtime failure.
+2. The Prometheus `address` pointed at `kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090` — an in-cluster Service name that hasn't existed since TF-006 moved monitoring to a standalone EC2 instance (see [`ARCHITECTURE.md`](ARCHITECTURE.md#why-monitoring-runs-on-ec2-not-in-the-cluster)). This one wouldn't have blocked the Rollout from creating pods (it's a runtime concern, not a spec-validity one), but the analysis step would have failed to connect the moment it actually ran, most likely aborting the canary.
+
+**Fix:** added `count: 2` (roughly matches the Rollout's own pause durations at each analysis step), and pointed `address` at the real EC2 Prometheus (`terraform output prometheus_url`). The query's own `... or vector(0)` / `... or vector(1)` fallbacks mean it now returns a benign 0%-error-rate result even though the EC2 Prometheus doesn't actually scrape `nginx_ingress_controller_requests` yet (ingress-nginx metrics scraping was never wired up — ties into the observability-extension work already tracked in [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md)). This unblocks the Rollout; it does not yet make the canary analysis meaningful — that's real follow-up work, not something papered over here.
+
+## Related
+
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
 - [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) — OBS-005 and other known gaps that should get fixed properly rather than worked around

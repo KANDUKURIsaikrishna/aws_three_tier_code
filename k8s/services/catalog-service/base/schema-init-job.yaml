@@ -22,7 +22,16 @@ metadata:
   namespace: catalog
   annotations:
     argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    # BeforeHookCreation added after a real stuck-forever incident: with only
+    # HookSucceeded, a hook that FAILS is never cleaned up (that policy only
+    # fires on success) — every subsequent sync just keeps waiting on the
+    # same permanently-broken Job instead of retrying, since ArgoCD sees a
+    # same-name hook resource already exists. BeforeHookCreation deletes the
+    # previous hook resource before creating a new one on every sync attempt,
+    # regardless of whether it previously succeeded or failed — matches this
+    # Job's own idempotent-SQL design intent (safe to actually re-run every
+    # sync). See TROUBLESHOOTING.md OBS-015.
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:
   backoffLimit: 2
   template:
