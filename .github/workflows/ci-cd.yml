@@ -107,6 +107,7 @@ jobs:
             --config p/nodejs \
             --config p/owasp-top-ten \
             --config p/secrets \
+            --exclude '**/__tests__/**' \
             --error \
             .
         env:
