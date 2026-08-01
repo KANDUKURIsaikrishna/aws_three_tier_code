@@ -33,11 +33,19 @@ resource "aws_route53_health_check" "primary" {
 }
 
 # Direct-to-ALB record — active when CloudFront is disabled.
-# primary_alb_dns is set after first apply once the NLB is provisioned:
-#   kubectl get svc -n ingress-nginx ingress-nginx-controller \
-#     -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+# primary_alb_dns is auto-discovered within the same apply (root argocd.tf's
+# kubernetes_service data source) unless var.primary_alb_dns overrides it.
+#
+# count deliberately does NOT check `var.primary_alb_dns != ""` — that value
+# is now sourced from a data source read gated on module.eks_addons, so it's
+# unknown at plan time, and Terraform can't evaluate a count expression against
+# an unknown value ("Invalid count argument" at plan). enable_cloudfront alone
+# (a plain bool, always known) is what gates this record's existence; the
+# upstream null_resource.wait_for_alb_hostname (argocd.tf) already hard-fails
+# the apply if the NLB hostname never actually shows up, so by the time this
+# resource applies, records = [var.primary_alb_dns] is guaranteed non-empty.
 resource "aws_route53_record" "primary" {
-  count   = !var.enable_cloudfront && var.primary_alb_dns != "" ? 1 : 0
+  count   = var.enable_cloudfront ? 0 : 1
   zone_id = aws_route53_zone.public.zone_id
   name    = var.domain
   type    = "CNAME"
@@ -63,8 +71,11 @@ resource "aws_route53_record" "secondary" {
 
 # CloudFront record — active when enable_cloudfront=true.
 # Replaces the direct-to-ALB primary record; CloudFront becomes the entry point.
+# Same reasoning as aws_route53_record.primary above: no `primary_alb_dns != ""`
+# in count — that value can be unknown at plan time now. cloudfront_domain is
+# what this record actually uses, so that's the only real gate needed.
 resource "aws_route53_record" "primary_cf" {
-  count   = var.enable_cloudfront && var.primary_alb_dns != "" && var.cloudfront_domain != "" ? 1 : 0
+  count   = var.enable_cloudfront && var.cloudfront_domain != "" ? 1 : 0
   zone_id = aws_route53_zone.public.zone_id
   name    = var.domain
   type    = "CNAME"
