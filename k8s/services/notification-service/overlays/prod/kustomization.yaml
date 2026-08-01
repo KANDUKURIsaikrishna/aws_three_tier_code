@@ -10,5 +10,5 @@ resources:
 # Placeholder 000000000000 is replaced automatically on first CI deploy.
 images:
 - name: bookstore-notification-service
-  newName: 000000000000.dkr.ecr.us-west-1.amazonaws.com/bookstore-notification-service
-  newTag: latest
+  newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-notification-service
+  newTag: 564d29e1

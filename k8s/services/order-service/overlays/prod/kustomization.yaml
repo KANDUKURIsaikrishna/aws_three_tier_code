@@ -6,5 +6,5 @@ resources:
 
 images:
 - name: bookstore-order-service
-  newName: 000000000000.dkr.ecr.us-west-1.amazonaws.com/bookstore-order-service
-  newTag: latest
+  newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-order-service
+  newTag: 564d29e1
