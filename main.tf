@@ -73,6 +73,51 @@ resource "aws_secretsmanager_secret_version" "catalog_db_credentials" {
   })
 }
 
+# ── User Service — DB credentials ─────────────────────────────────────────────
+
+resource "random_password" "user_db_password" {
+  length           = 32
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}?"
+}
+
+resource "aws_secretsmanager_secret" "user_db_credentials" {
+  name                    = "/bookstore/user-db-credentials"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "user_db_credentials" {
+  secret_id = aws_secretsmanager_secret.user_db_credentials.id
+  secret_string = jsonencode({
+    DB_USERNAME = "user_service_user"
+    DB_PASSWORD = random_password.user_db_password.result
+    DB_HOST     = module.rds.rds_endpoint
+    DB_NAME     = "user_db"
+  })
+}
+
+# ── Shared JWT signing secret ──────────────────────────────────────────────────
+# user-service issues tokens; api-gateway and order-service (built in later
+# plans) each add their own ExternalSecret reading this same entry to verify
+# them. HS256 (symmetric) — one shared secret, not a keypair.
+
+resource "random_password" "jwt_secret" {
+  length  = 64
+  special = false # JWT secret goes straight into an env var; avoid shell-metacharacter escaping issues
+}
+
+resource "aws_secretsmanager_secret" "jwt_secret" {
+  name                    = "/bookstore/jwt-secret"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "jwt_secret" {
+  secret_id = aws_secretsmanager_secret.jwt_secret.id
+  secret_string = jsonencode({
+    JWT_SECRET = random_password.jwt_secret.result
+  })
+}
+
 # ── Route 53 ──────────────────────────────────────────────────────────────────
 # Private zone for in-cluster RDS DNS + public zone with active-passive failover.
 

@@ -105,3 +105,15 @@ output "cloudfront_domain" {
   description = "CloudFront distribution domain (null when enable_cloudfront=false)"
   value       = try(aws_cloudfront_distribution.frontend[0].domain_name, null)
 }
+
+output "user_db_secret_arn" {
+  description = "ARN of the Secrets Manager secret at /bookstore/user-db-credentials"
+  value       = aws_secretsmanager_secret.user_db_credentials.arn
+  sensitive   = true
+}
+
+output "jwt_secret_arn" {
+  description = "ARN of the Secrets Manager secret at /bookstore/jwt-secret"
+  value       = aws_secretsmanager_secret.jwt_secret.arn
+  sensitive   = true
+}
