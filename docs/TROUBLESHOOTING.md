@@ -486,6 +486,31 @@ still hit by `catalog-schema-init`, even though the Job that creates `test.books
 
 **Status:** fixed and committed, not yet re-verified against a real sync as of this entry.
 
+### OBS-023 — ArgoCD repo-server served a stale (pre-fix) manifest for the schema-init hook across two separate hard-refresh cycles
+
+**Symptom:** after OBS-021's quota fix was committed and pushed, `backend-schema-init` kept getting recreated with `resources: {}` — the exact same quota rejection as before — even though `status.sync.revision` on the `bookstore` Application correctly showed the new commit, and `kubectl kustomize` against that exact commit (verified via `git show <sha>:...` and a throwaway `git worktree`) produced the correct manifest with `resources` populated. This persisted across two independent `argocd.argoproj.io/refresh=hard` + forced-resync cycles.
+
+**Root cause (confirmed, not just suspected):** compared `kubectl apply --dry-run=server` of the exact same manifest via plain `kubectl` against what ArgoCD actually submitted (visible in the Job's `.metadata.managedFields` — the ArgoCD field manager's entry had no `f:resources` key at all, meaning it never sent that field in its server-side apply request). Plain `kubectl apply -f` of the identical YAML created the Job correctly, with `resources` populated, on the first try — ruling out a cluster-side admission webhook or the YAML itself. This isolates the bug to ArgoCD's repo-server: it served an internally-cached manifest generation for this hook resource that predated the fix, and `refresh=hard` did not reliably invalidate that cache for this specific resource across two attempts.
+
+**Workaround used to unblock:** deleted the stuck Job, stripped its `argocd.argoproj.io/hook-finalizer` (same technique as OBS-015) so the delete actually completed, then applied the correct manifest directly with `kubectl apply -f` (bypassing ArgoCD for this one hook run only). The Job completed successfully; ArgoCD's `BeforeHookCreation` policy cleaned it up on the next reconcile like any other successful hook run, so no orphaned state was left behind.
+
+**Status:** unblocked for this run via the workaround above. The underlying repo-server staleness is NOT fixed — it's an ArgoCD-side caching behavior, not something in this repo's manifests. If this recurs, try `kubectl rollout restart deployment argocd-repo-server -n argocd` (not yet tested) before reaching for the manual-apply workaround again. Worth a real root-cause dig if it keeps happening (single repo-server replica, so not a stale-replica-behind-a-LB issue — more likely a manifest-generation cache TTL or key that doesn't fully bust on `refresh=hard` for `PreSync` hook resources specifically).
+
+### OBS-024 — Backend Rollout's canary analysis aborts: monitoring EC2's whole stack (Prometheus/Grafana/Alertmanager) unreachable
+
+**Symptom**, once OBS-020/021/023 got a real, working backend pod running for the first time:
+```
+Metric "error-rate" assessed Error due to consecutiveErrors (5) > consecutiveErrorLimit (4):
+"Error Message: Post \"http://13.57.1.221:9090/api/v1/query\": dial tcp 13.57.1.221:9090: connect: connection refused"
+```
+`Rollout aborted update to revision 2` — the new (working, prom-client-fixed) pod came up and passed its own readiness probe, but the canary's background `AnalysisRun` couldn't reach Prometheus at all, so Argo Rollouts aborted the promotion. `Stable RS` stayed pinned to the OLD, crashlooping ReplicaSet.
+
+**Root cause:** confirmed live — `curl` to all three monitoring ports (`9090` Prometheus, `3000` Grafana, `9093` Alertmanager) at `13.57.1.221` returned connection failures from **outside** the cluster too (not a cluster-networking/SecurityGroup issue — the SG explicitly allows all three from `0.0.0.0/0`, verified via `aws ec2 describe-security-groups`). The EC2 instance itself (`i-044d178aab2c55cd2`, `bookstore-monitoring`) is `running` per `aws ec2 describe-instances`, so this looks like the Docker Compose monitoring stack on the box has stopped or crashed, not an instance-level or network-level failure. SSM Session Manager isn't registered for this instance (`aws ssm describe-instance-information` returned empty), so remote diagnosis needs actual SSH access — `make monitoring-status` / `make monitoring-logs` (both require SSH, per `DEPLOYMENT.md`).
+
+**Important — this is NOT a production outage.** Kubernetes Services only route to pods that pass readiness; the crashlooping old pod (`0/1 Ready`) was never actually receiving traffic despite being nominally "Stable" in the Rollout's bookkeeping. Verified directly: `curl` through `svc/backend-service` returned real data from the new, healthy pod. Real user-facing impact of this bug is zero right now — it only blocks the Rollout's own promotion bookkeeping (and, by extension, any *future* backend deploy's canary analysis, until monitoring is back).
+
+**Status:** NOT fixed — needs SSH access to `bookstore-monitoring` to diagnose (`make monitoring-status`, `make monitoring-logs`, or `docker compose ps`/`docker compose logs` directly on the box) and restart whatever's down. Once monitoring is back, retry the aborted rollout (`kubectl argo rollouts retry rollout backend -n bookstore` if the plugin's installed, or `kubectl annotate rollout backend -n bookstore kubectl.kubernetes.io/restartedAt="$(date -u +%Y-%m-%dT%H:%M:%SZ)" --overwrite` otherwise) — no point retrying before then, since the same abort will just recur.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
