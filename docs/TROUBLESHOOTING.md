@@ -223,6 +223,25 @@ Three previously-manual `DEPLOYMENT.md` steps got automated: applying `k8s/argoc
 
 **Not yet verified against a real apply** — same caveat as OBS-006, Task 9 is on hold.
 
+### OBS-008 — `Invalid count argument` on `aws_route53_record.primary` (caught by a real `terraform plan`) ✅ RESOLVED
+
+**Symptom:**
+```
+Error: Invalid count argument
+  on modules/route53/main.tf line 40, in resource "aws_route53_record" "primary":
+  40:   count   = !var.enable_cloudfront && var.primary_alb_dns != "" ? 1 : 0
+The "count" value depends on resource attributes that cannot be determined
+until apply, so Terraform cannot predict how many instances will be created.
+```
+
+**Root cause:** OBS-007's ALB auto-discovery made `primary_alb_dns` (as passed into `module.route53`) sourced from `data.kubernetes_service.ingress_nginx`'s status, which is unknown at `plan` time on a fresh apply (the data source itself is gated behind `null_resource.wait_for_alb_hostname`, deferring the read to apply time). `aws_route53_record.primary`'s `count = !var.enable_cloudfront && var.primary_alb_dns != "" ? 1 : 0` needs to evaluate `primary_alb_dns != ""` to compute `count`, and Terraform categorically cannot compute `count`/`for_each` against a value that isn't known until apply — this is a hard Terraform limitation, not a bug in the data source or the null_resource.
+
+`aws_route53_record.primary_cf` had the identical structural bug (`var.enable_cloudfront && var.primary_alb_dns != "" && var.cloudfront_domain != ""`) but didn't surface it in this plan — with `enable_cloudfront` defaulting `false`, `false && (unknown)` short-circuits to a statically-known `false` without needing to resolve the unknown operand. It would have broken the same way the moment anyone set `enable_cloudfront = true`.
+
+**Fix:** Removed `var.primary_alb_dns != ""` from both `count` expressions (`modules/route53/main.tf`) — gate only on `enable_cloudfront`/`cloudfront_domain`, both plain vars that stay known at plan time. Safe because `null_resource.wait_for_alb_hostname` (no `|| true` on its `local-exec`, unlike this repo's destroy-time cleanup null_resources) already hard-fails the whole apply if the NLB hostname never appears — by the time `aws_route53_record.primary` actually applies, `records = [var.primary_alb_dns]` is guaranteed non-empty, so there's no real scenario left where skipping this record on emptiness was doing useful work. Verified against a real `terraform plan`: `Plan: 104 to add, 0 to change, 0 to destroy`, no errors.
+
+**General lesson:** any value that flows through a `depends_on`-gated data source (deferred-to-apply-time reads, the whole point of that pattern — see OBS-007's ALB discovery) can never safely appear inside a `count`/`for_each` condition anywhere downstream, even indirectly through a module boundary. Grep for `count.*var\.` or `for_each.*var\.` on any variable whose value now originates from a data source before wiring one up.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
