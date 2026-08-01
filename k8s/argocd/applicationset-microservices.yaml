@@ -26,6 +26,8 @@ spec:
         elements:
           - service: catalog-service
             namespace: catalog
+          - service: user-service
+            namespace: user
 
   template:
     metadata:
