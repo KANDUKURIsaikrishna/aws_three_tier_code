@@ -83,9 +83,24 @@ spec:
                 cover VARCHAR(1024)
               );
 
-              INSERT INTO catalog_db.books (id, title, \`desc\`, price, cover)
-              SELECT id, title, \`desc\`, price, cover FROM test.books
-              ON DUPLICATE KEY UPDATE title = VALUES(title);
+              -- test.books (the legacy monolith DB) is created by a PreSync
+              -- hook in a SEPARATE ArgoCD Application (bookstore's
+              -- database/schema-init-job.yaml). sync-wave only orders hooks
+              -- WITHIN one Application's sync — there is no ordering
+              -- guarantee across two different Applications, so this hook
+              -- can legitimately run before that one on any given sync.
+              -- Guarded with a dynamic-SQL existence check instead of a bare
+              -- INSERT...SELECT so a missing source table skips the
+              -- migration instead of hard-failing (ERROR 1146) and burning
+              -- backoffLimit — self-heals on the next sync once bookstore's
+              -- hook has actually run. See TROUBLESHOOTING.md OBS-020/021.
+              SET @src_exists := (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 'books');
+              SET @migrate_sql := IF(@src_exists > 0,
+                'INSERT INTO catalog_db.books (id, title, \`desc\`, price, cover) SELECT id, title, \`desc\`, price, cover FROM test.books ON DUPLICATE KEY UPDATE title = VALUES(title)',
+                'SELECT 1');
+              PREPARE migrate_stmt FROM @migrate_sql;
+              EXECUTE migrate_stmt;
+              DEALLOCATE PREPARE migrate_stmt;
 
               CREATE USER IF NOT EXISTS 'catalog_user'@'%' IDENTIFIED BY '$CATALOG_DB_PASSWORD';
               GRANT ALL PRIVILEGES ON catalog_db.* TO 'catalog_user'@'%';
