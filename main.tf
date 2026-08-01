@@ -188,7 +188,7 @@ module "ecr" {
   prefix                = "bookstore"
   image_retention_count = 10
   secondary_region      = var.secondary_region
-  extra_repos           = ["catalog-service", "user-service", "order-service", "notification-service"]
+  extra_repos           = ["catalog-service", "user-service", "order-service", "notification-service", "api-gateway"]
 }
 
 # ── EKS ────────────────────────────────────────────────────────────────────────

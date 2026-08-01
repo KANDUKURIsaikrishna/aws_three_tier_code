@@ -50,6 +50,11 @@ output "notification_service_repo_url" {
   value       = module.ecr.repo_urls["notification-service"]
 }
 
+output "api_gateway_repo_url" {
+  description = "ECR repository URL for the api-gateway image"
+  value       = module.ecr.repo_urls["api-gateway"]
+}
+
 output "eks_cluster_name" {
   description = "EKS cluster name"
   value       = module.eks.cluster_name
