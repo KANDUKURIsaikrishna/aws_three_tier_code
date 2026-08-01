@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: user-config
+  namespace: user
+data:
+  DB_PORT: "3306"
+  DB_NAME: "user_db"
+  APP_PORT: "3000"
