@@ -11,5 +11,5 @@ resources:
 # For manual local deploy: replace 000000000000 with your real AWS account ID.
 images:
 - name: bookstore-catalog-service
-  newName: 000000000000.dkr.ecr.us-west-1.amazonaws.com/bookstore-catalog-service
-  newTag: latest
+  newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-catalog-service
+  newTag: 1dc8bc38

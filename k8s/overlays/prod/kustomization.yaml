@@ -13,11 +13,11 @@ resources:
 # For manual local deploy: replace 000000000000 with your real AWS account ID.
 images:
 - name: bookstore-backend
-  newName: 000000000000.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
-  newTag: latest
+  newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
+  newTag: 1dc8bc38
 - name: bookstore-frontend
-  newName: 000000000000.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
-  newTag: latest
+  newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
+  newTag: 1dc8bc38
 
 patches:
 - target:
