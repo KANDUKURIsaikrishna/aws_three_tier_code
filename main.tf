@@ -77,11 +77,14 @@ resource "aws_secretsmanager_secret_version" "catalog_db_credentials" {
 # Private zone for in-cluster RDS DNS + public zone with active-passive failover.
 
 module "route53" {
-  source            = "./modules/route53"
-  vpc_id            = module.network.vpc_id
-  rds_endpoint      = module.rds.rds_endpoint
-  domain            = var.domain
-  primary_alb_dns   = var.primary_alb_dns
+  source       = "./modules/route53"
+  vpc_id       = module.network.vpc_id
+  rds_endpoint = module.rds.rds_endpoint
+  domain       = var.domain
+  # local.primary_alb_dns (argocd.tf) auto-discovers the ingress-nginx NLB
+  # hostname within this same apply, falling back to var.primary_alb_dns only
+  # if that's explicitly set — no more manual second-apply for this value.
+  primary_alb_dns   = local.primary_alb_dns
   secondary_alb_dns = var.secondary_alb_dns
   enable_cloudfront = var.enable_cloudfront
   cloudfront_domain = try(aws_cloudfront_distribution.frontend[0].domain_name, "")

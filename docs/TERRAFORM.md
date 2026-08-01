@@ -10,13 +10,14 @@ variables.tf          — root input variables
 outputs.tf             — root outputs
 locals.tf              — VPC CIDR + subnet layout (single source of truth)
 data.tf                 — data "aws_caller_identity" "current"
-providers.tf              — aws (default + us-east-1 + secondary aliases), helm
+providers.tf              — aws (default + us-east-1 + secondary aliases), helm, kubernetes, kubectl
 versions.tf                — required_version, required_providers, S3 backend block
 iam.tf                       — GitHub Actions OIDC role
 cloudtrail.tf                 — multi-region CloudTrail
 guardduty.tf                   — GuardDuty detector
 cloudfront.tf                    — optional CDN in front of the frontend
 dr.tf                              — cross-region RDS backup replication
+argocd.tf                           — Terraform-managed ArgoCD Application/ApplicationSet + ALB hostname auto-discovery
 terraform.tfvars                    — region/domain/github_repo values (not secret)
 modules/
   network/       — VPC, subnets, IGW, NAT, flow logs
@@ -168,7 +169,17 @@ resource "aws_secretsmanager_secret_version" "catalog_db_credentials" {
 }
 ```
 
-The actual MySQL schema + user creation is **not** Terraform's job — RDS doesn't expose a Terraform-native way to run arbitrary SQL. That happens via a one-off Kubernetes Job (`k8s/services/catalog-service/bootstrap/schema-init-job.yaml`), run once by hand against the admin credentials after `apply`. See [`KUBERNETES.md`](KUBERNETES.md) and [`DEPLOYMENT.md`](DEPLOYMENT.md).
+The actual MySQL schema + user creation is **not** Terraform's job — RDS doesn't expose a Terraform-native way to run arbitrary SQL. That happens via a Kubernetes Job (`k8s/services/catalog-service/base/schema-init-job.yaml`), run automatically by ArgoCD as a `PreSync` hook against the admin credentials — no manual step. See [`KUBERNETES.md`](KUBERNETES.md#the-schema-init-job--an-argocd-presync-hook-not-a-manual-one-off) and [`DEPLOYMENT.md`](DEPLOYMENT.md).
+
+## Root: `argocd.tf`
+
+Three things, none of which used to be automated:
+
+1. **`kubectl_manifest` resources** applying `k8s/argocd/application.yaml` and `k8s/argocd/applicationset-microservices.yaml` as-is (`file()`, not re-expressed as HCL) — replaces a manual `kubectl apply -f` step. Uses the `gavinbunney/kubectl` provider specifically because its `kubectl_manifest` resource defers schema validation to apply time; `hashicorp/kubernetes`'s `kubernetes_manifest` needs the target CRD to already exist at `plan` time, which breaks here since the `Application`/`ApplicationSet` CRDs are installed by the `argocd` Helm release within the *same* apply. Both depend on `module.eks_addons`.
+
+2. **`null_resource.wait_for_alb_hostname`** — polls `kubectl wait --for=jsonpath='{.status.loadBalancer.ingress[0].hostname}'` against the ingress-nginx Service. Needed because `helm_release`'s `wait = true` only waits for pods to become `Ready`, not for AWS's cloud-controller to finish provisioning the NLB and populate that field, which can lag 1-3 minutes behind. Re-runs every apply (`triggers = { always_run = timestamp() }`) — cheap once the condition is already true, and re-validates after a cluster recreate.
+
+3. **`data "kubernetes_service" "ingress_nginx"`** — reads the now-confirmed-populated hostname, feeding `local.primary_alb_dns` (used by `module.route53` instead of `var.primary_alb_dns` directly). `var.primary_alb_dns` still works as a manual override if you explicitly set it; auto-discovery is only the fallback when it's empty. This replaces what used to be a required second `terraform apply` — see [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ## Common commands
 

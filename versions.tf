@@ -18,6 +18,21 @@ terraform {
       source  = "hashicorp/null"
       version = "~> 3.0"
     }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.30"
+    }
+    kubectl = {
+      # gavinbunney/kubectl, not hashicorp — deliberately, for applying the
+      # existing ArgoCD Application/ApplicationSet YAML as-is. Its
+      # kubectl_manifest resource defers schema validation to apply time,
+      # unlike hashicorp/kubernetes's kubernetes_manifest, which needs the
+      # CRD to already exist at plan time — a real problem here since the
+      # Application/ApplicationSet CRDs are installed by the argocd Helm
+      # release in the SAME apply, not before it.
+      source  = "gavinbunney/kubectl"
+      version = "~> 1.14"
+    }
   }
 
   # Run scripts/bootstrap-tf-state.sh once to create the S3 bucket and

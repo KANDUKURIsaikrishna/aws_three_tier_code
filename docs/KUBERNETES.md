@@ -18,7 +18,6 @@ k8s/
     catalog-service/
       base/                 ← NEW microservice, namespace "catalog"
       overlays/prod/
-      bootstrap/              ← one-off Jobs, not part of any Kustomize base
 ```
 
 These are deliberately separate. `catalog-service` is not folded into `k8s/base` because it's a different namespace, different lifecycle, different ArgoCD-managed object — mixing them would make the eventual old-backend removal (Plan 4 of the microservices work) much messier than swapping one `targetRevision`/one `Application`.
@@ -105,12 +104,16 @@ template:
 
 Adding `user-service`, `order-service`, etc. later is a one-line addition to `elements` — no new YAML file. **`targetRevision` is currently pinned to `observability`**, not `main`, since this whole platform is being built on that branch — there's a comment in the file as a reminder to switch it once the work merges, but nothing enforces that automatically. Don't assume it self-corrects.
 
-Prerequisites for both (one-time, outside Terraform — ArgoCD itself is installed via `helm_release` in `modules/eks-addons/gitops.tf`, but the `Application`/`ApplicationSet` custom resources themselves need `kubectl apply`):
+**Both are Terraform-managed, not manual `kubectl apply`.** ArgoCD itself is installed via `helm_release` in `modules/eks-addons/gitops.tf`, and `argocd.tf` (root) applies both YAML files as-is via `kubectl_manifest` (the `gavinbunney/kubectl` provider, not `hashicorp/kubernetes`'s `kubernetes_manifest` — the latter needs the target CRD to already exist at `plan` time, which breaks on a fresh cluster where the `Application`/`ApplicationSet` CRDs are installed by the same apply's `argocd` Helm release; `kubectl_manifest` defers validation to apply time instead):
 
-```bash
-kubectl apply -f k8s/argocd/application.yaml
-kubectl apply -f k8s/argocd/applicationset-microservices.yaml
+```hcl
+resource "kubectl_manifest" "argocd_application" {
+  yaml_body  = file("${path.module}/k8s/argocd/application.yaml")
+  depends_on = [module.eks_addons]
+}
 ```
+
+The YAML files in `k8s/argocd/` stay the single source of truth — Terraform reads them with `file()` rather than re-expressing them as HCL, so there's no way for the applied object and the committed YAML to drift apart. See [`DEPLOYMENT.md`](DEPLOYMENT.md) and [`TERRAFORM.md`](TERRAFORM.md#root-argocdtf).
 
 ## `k8s/services/catalog-service/`
 
@@ -121,16 +124,16 @@ base/
   namespace.yaml         — "catalog" namespace
   configmap.yaml          — DB_PORT, DB_NAME=catalog_db, APP_PORT
   external-secret.yaml     — catalog-db-secret, reads /bookstore/catalog-db-credentials
-  deployment.yaml            — plain Deployment (not a Rollout — canary comes later, with the gateway)
-  service.yaml                 — ClusterIP :80 → :3000
-  hpa.yaml                      — CPU 70% / memory 80%, 1-5 replicas
-  pdb.yaml                       — minAvailable: 1
-  network-policy.yaml              — default-deny + catalog-service allow-all-ingress (deliberately open — see below)
+  admin-db-secret.yaml      — admin-db-secret, reads /bookstore/db-credentials (for the schema-init hook)
+  schema-init-job.yaml       — ArgoCD PreSync hook, see below
+  deployment.yaml              — plain Deployment (not a Rollout — canary comes later, with the gateway)
+  service.yaml                   — ClusterIP :80 → :3000
+  hpa.yaml                        — CPU 70% / memory 80%, 1-5 replicas
+  pdb.yaml                         — minAvailable: 1
+  network-policy.yaml                — default-deny + catalog-service allow-all-ingress (deliberately open — see below)
   kustomization.yaml
 overlays/prod/
-  kustomization.yaml                — image tag placeholder, same pattern as the monolith's prod overlay
-bootstrap/
-  schema-init-job.yaml                — one-off, NOT in any kustomization
+  kustomization.yaml                    — image tag placeholder, same pattern as the monolith's prod overlay
 ```
 
 ### Why the NetworkPolicy allows all ingress
@@ -142,11 +145,22 @@ ingress:
 
 There's no `api-gateway` namespace yet to scope traffic to, and no public Ingress object routes to `catalog-service` at all right now (it's only reachable via `kubectl port-forward` for verification). The egress rule right next to it *is* properly scoped (RDS CIDR + DNS only, nothing else) — the permissive ingress is a deliberate, documented interim state tied to a specific future plan, not an oversight. Don't "fix" it without also building the api-gateway plan it's waiting on.
 
-### The schema-init Job
+### The schema-init Job — an ArgoCD PreSync hook, not a manual one-off
 
-Terraform creates the `catalog_db_credentials` secret (random password, `catalog_user` username) but can't run arbitrary SQL against RDS. `bootstrap/schema-init-job.yaml` is a one-shot `batch/v1 Job` that does the SQL work: creates the `catalog_db` schema, creates/migrates the `books` table (copying existing rows from the monolith's `test.books` table), creates the `catalog_user` MySQL user, and grants it access to only `catalog_db`. It needs **both** the admin credentials (`db-secret`, namespace `bookstore`) and the new service credentials (`catalog-db-secret`, namespace `catalog`) — since K8s Secrets don't cross namespaces, the admin secret has to be copied into `catalog` by hand right before running this Job (see [`DEPLOYMENT.md`](DEPLOYMENT.md)), then deleted afterward. It's a one-time bootstrap tool, not a standing credential bridge.
+Terraform creates the `catalog_db_credentials` secret (random password, `catalog_user` username) but can't run arbitrary SQL against RDS. `schema-init-job.yaml` is the `batch/v1 Job` that does the SQL work: creates the `catalog_db` schema, creates/migrates the `books` table (copying existing rows from the monolith's `test.books` table), creates the `catalog_user` MySQL user, and grants it access to only `catalog_db`.
 
-Deliberately kept out of `base/kustomization.yaml`: a completed `Job` is immutable, and ArgoCD's `selfHeal` would either error trying to re-apply it or (worse) try to delete-and-recreate it on every sync.
+It's annotated as an ArgoCD hook:
+
+```yaml
+metadata:
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+```
+
+`PreSync` means it runs before every sync of the `catalog-service` Application, automatically — no manual `kubectl apply`. `HookSucceeded` deletes the Job after it completes, so the next sync creates a fresh one under the same name instead of colliding with a completed one. ArgoCD's normal `selfHeal`/prune diffing doesn't apply to hooks the way it would to a plain resource in the base — this is specifically why it's now safe to include in `base/kustomization.yaml` (a plain, non-hook Job would fight `selfHeal` on every sync, which is why it used to be kept out entirely). The SQL itself was already written idempotently (`CREATE ... IF NOT EXISTS`, `INSERT ... ON DUPLICATE KEY UPDATE`), which is exactly what makes it safe to actually re-run on every sync rather than just the first one.
+
+It needs **both** the admin credentials and the new service's own credentials. Admin creds no longer require a manual cross-namespace copy: `admin-db-secret.yaml` is a second `ExternalSecret` that pulls the same `/bookstore/db-credentials` entry the monolith already uses, materialized into the `catalog` namespace by ESO — no new IAM permissions needed, since the shared `ClusterSecretStore`'s IRSA role is already scoped to all of `/bookstore/*`. The Job's pod template also carries the `app: catalog-service` label — without it, the namespace's `default-deny-all` NetworkPolicy would block its egress to RDS, since it wouldn't match `catalog-service-policy`'s pod selector.
 
 ## Metrics convention (every service, old and new)
 

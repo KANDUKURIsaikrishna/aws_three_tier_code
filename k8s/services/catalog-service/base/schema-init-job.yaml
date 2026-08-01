@@ -1,0 +1,76 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Catalog DB schema bootstrap — ArgoCD PreSync hook
+#
+# Runs automatically before every sync of the catalog-service Application, no
+# manual `kubectl apply` step. ArgoCD hooks are exempt from the normal
+# selfHeal/prune diffing that would otherwise fight over a plain Job (Jobs are
+# immutable once created — re-applying one is an error, which is exactly why
+# this used to be deliberately kept OUT of any kustomize base). The
+# hook-delete-policy below deletes the Job after it succeeds, so the next sync
+# creates a fresh one under the same name instead of colliding with a
+# completed one.
+#
+# The SQL itself is already idempotent (CREATE DATABASE/TABLE/USER IF NOT
+# EXISTS, INSERT ... ON DUPLICATE KEY UPDATE) — safe to actually run on every
+# sync, not just the first one.
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: catalog-schema-init
+  namespace: catalog
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      # Matches network-policy.yaml's catalog-service-policy podSelector —
+      # without this label, the namespace's default-deny-all NetworkPolicy
+      # blocks this pod's egress to RDS (it wouldn't match any allow rule).
+      labels:
+        app: catalog-service
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: schema-init
+          image: mysql:8.0
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mysql -h "$ADMIN_DB_HOST" -u "$ADMIN_DB_USERNAME" -p"$ADMIN_DB_PASSWORD" <<SQL
+              CREATE DATABASE IF NOT EXISTS catalog_db;
+
+              CREATE TABLE IF NOT EXISTS catalog_db.books (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                `desc` TEXT,
+                price DECIMAL(10,2) NOT NULL,
+                cover VARCHAR(1024)
+              );
+
+              INSERT INTO catalog_db.books (id, title, `desc`, price, cover)
+              SELECT id, title, `desc`, price, cover FROM test.books
+              ON DUPLICATE KEY UPDATE title = VALUES(title);
+
+              CREATE USER IF NOT EXISTS 'catalog_user'@'%' IDENTIFIED BY '$CATALOG_DB_PASSWORD';
+              GRANT ALL PRIVILEGES ON catalog_db.* TO 'catalog_user'@'%';
+              FLUSH PRIVILEGES;
+              SQL
+          env:
+            - name: ADMIN_DB_HOST
+              valueFrom:
+                secretKeyRef: { name: admin-db-secret, key: DB_HOST }
+            - name: ADMIN_DB_USERNAME
+              valueFrom:
+                secretKeyRef: { name: admin-db-secret, key: DB_USERNAME }
+            - name: ADMIN_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: admin-db-secret, key: DB_PASSWORD }
+            - name: CATALOG_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: catalog-db-secret, key: DB_PASSWORD }
