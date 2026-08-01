@@ -35,6 +35,11 @@ output "catalog_service_repo_url" {
   value       = module.ecr.repo_urls["catalog-service"]
 }
 
+output "user_service_repo_url" {
+  description = "ECR repository URL for the user-service image"
+  value       = module.ecr.repo_urls["user-service"]
+}
+
 output "eks_cluster_name" {
   description = "EKS cluster name"
   value       = module.eks.cluster_name
