@@ -14,18 +14,13 @@ resources:
 images:
 - name: bookstore-backend
   newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
-  newTag: 3af802cf
+  newTag: 40dc055b
 - name: bookstore-frontend
   newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
-  newTag: 3af802cf
+  newTag: 40dc055b
 
 patches:
-- target:
-    group: argoproj.io
-    version: v1alpha1
-    kind: Rollout
-    name: backend
-  patch: |-
+- patch: |-
     - op: replace
       path: /spec/template/spec/containers/0/resources
       value:
@@ -35,12 +30,17 @@ patches:
         limits:
           cpu: "500m"
           memory: "256Mi"
-- target:
-    group: cert-manager.io
-    version: v1
-    kind: ClusterIssuer
-    name: letsencrypt-prod
-  patch: |-
+  target:
+    group: argoproj.io
+    kind: Rollout
+    name: backend
+    version: v1alpha1
+- patch: |-
     - op: replace
       path: /spec/acme/email
       value: kandukurisaikrishna778@gmail.com
+  target:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: letsencrypt-prod
+    version: v1
