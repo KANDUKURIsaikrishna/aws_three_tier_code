@@ -1,0 +1,76 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: notification-schema-init
+  namespace: notification
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: notification-service
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      restartPolicy: Never
+      containers:
+        - name: schema-init
+          image: mysql:8.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mysql -h "$ADMIN_DB_HOST" -u "$ADMIN_DB_USERNAME" -p"$ADMIN_DB_PASSWORD" <<SQL
+              CREATE DATABASE IF NOT EXISTS notification_db;
+
+              CREATE TABLE IF NOT EXISTS notification_db.notification_log (
+                id         INT AUTO_INCREMENT PRIMARY KEY,
+                order_id   INT NOT NULL,
+                channel    VARCHAR(50) NOT NULL,
+                status     VARCHAR(50) NOT NULL,
+                sent_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+              );
+
+              CREATE USER IF NOT EXISTS 'notification_service_user'@'%' IDENTIFIED BY '$NOTIFICATION_DB_PASSWORD';
+              GRANT ALL PRIVILEGES ON notification_db.* TO 'notification_service_user'@'%';
+              FLUSH PRIVILEGES;
+              SQL
+          env:
+            - name: ADMIN_DB_HOST
+              valueFrom:
+                secretKeyRef: { name: admin-db-secret, key: DB_HOST }
+            - name: ADMIN_DB_USERNAME
+              valueFrom:
+                secretKeyRef: { name: admin-db-secret, key: DB_USERNAME }
+            - name: ADMIN_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: admin-db-secret, key: DB_PASSWORD }
+            - name: NOTIFICATION_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: notification-db-secret, key: DB_PASSWORD }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

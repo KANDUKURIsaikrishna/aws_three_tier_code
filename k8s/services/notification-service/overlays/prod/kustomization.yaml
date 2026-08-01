@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../base
+
+# Account ID is intentionally NOT hardcoded here.
+# CI (deploy stage) overwrites this from secrets.AWS_ACCOUNT_ID every push:
+#   kustomize edit set image bookstore-notification-service=${ECR_REGISTRY}/bookstore-notification-service:${SHA}
+# Placeholder 000000000000 is replaced automatically on first CI deploy.
+images:
+- name: bookstore-notification-service
+  newName: 000000000000.dkr.ecr.us-west-1.amazonaws.com/bookstore-notification-service
+  newTag: latest
