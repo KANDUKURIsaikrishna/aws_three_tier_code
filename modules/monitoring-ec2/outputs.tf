@@ -22,3 +22,9 @@ output "instance_public_ip" {
   description = "Public IP of the monitoring EC2 instance (Elastic IP)"
   value       = aws_eip_association.monitoring.public_ip
 }
+
+output "ssh_private_key_pem" {
+  description = "Auto-generated SSH private key for the monitoring EC2 (user: ubuntu) — see Makefile's monitoring-key target"
+  value       = tls_private_key.monitoring_ssh.private_key_pem
+  sensitive   = true
+}

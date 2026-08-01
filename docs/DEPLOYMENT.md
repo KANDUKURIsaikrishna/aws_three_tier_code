@@ -116,7 +116,7 @@ terraform output alertmanager_url
 aws secretsmanager get-secret-value --secret-id /bookstore/grafana-admin --query SecretString --output text
 ```
 
-`Makefile` has `make monitoring-status` (Docker Compose status on the box) and `make monitoring-logs` (tails the init/dashboard-import logs) — both need SSH access to the monitoring EC2.
+`Makefile` has `make monitoring-status` (Docker Compose status on the box) and `make monitoring-logs` (tails the init/dashboard-import logs) — both auto-fetch an auto-generated SSH key from Terraform state via a `monitoring-key` prerequisite target (saved locally as `.monitoring-ssh-key.pem`, gitignored), no manual key management needed.
 
 ## Tearing it down
 

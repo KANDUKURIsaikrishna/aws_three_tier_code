@@ -542,6 +542,22 @@ After a successful apply, the orphaned zone (`Z05284462VHV14S4GNFNS`) is no long
 
 **Status:** not yet run as of this entry — needs the user to run the state surgery above directly (this session's established pattern never runs `terraform apply`, and state `rm`/`import` carry the same or higher risk).
 
+### OBS-027 — `make monitoring-status`/`monitoring-logs` have never been able to connect: no port 22 rule, no SSH key at all
+
+**Symptom:** trying to diagnose OBS-024 (monitoring stack unreachable) by SSHing in:
+```
+ssh: connect to host 13.57.1.221 port 22: Operation timed out
+```
+A timeout, not an auth failure — the connection never got a response at all.
+
+**Root cause, two separate gaps in `modules/monitoring-ec2/main.tf`:** (1) `aws_security_group.monitoring` had ingress rules for 3000/9090/9093/3100 only — port 22 was never in the security group at all, confirmed via `aws ec2 describe-security-groups ... IpPermissions[?ToPort==22]` returning `[]`. (2) even with the SG fixed, `aws_instance.monitoring` never set `key_name` — Ubuntu's cloud-init only seeds `~/.ssh/authorized_keys` from an EC2 key pair supplied at launch (or explicit user-data, which this project's `user-data.sh.tftpl` also doesn't do), so SSH had no way to authenticate. The Makefile's own comment ("requires SSH key in agent") implies the original intent was working key-based SSH — it just never got wired up on the Terraform side.
+
+**Fix:** added a port 22 ingress rule (same `var.admin_cidr_blocks` scoping as the other UI ports — narrow it in production per that variable's own description). Added `tls_private_key.monitoring_ssh` + `aws_key_pair.monitoring`, wired `key_name` into the instance, and a new sensitive output (`ssh_private_key_pem` on the module, `monitoring_ssh_private_key` at root) — auto-generated rather than requiring the user to bring their own, matching this project's existing automate-everything posture. Added `Makefile`'s `monitoring-key` target (`terraform output -raw monitoring_ssh_private_key > .monitoring-ssh-key.pem && chmod 400 ...`) as a prerequisite of both `monitoring-status`/`monitoring-logs`, which now pass `-i $(MONITORING_KEY)`. `*.pem` was already gitignored.
+
+**Real consequence, flagged before applying, not hidden:** `aws_instance`'s `key_name` is a ForceNew attribute — verified via a real `terraform plan` that this change **destroys and recreates** the monitoring EC2 instance (`aws_instance.monitoring must be replaced`, `aws_eip_association.monitoring must be replaced` alongside it). The EIP itself is untouched, so the public IP (and therefore every `*_url` output, and DNS if anything pointed at it) stays identical — only the instance/root-volume identity changes, then gets re-associated. Since OBS-024 already found the whole monitoring stack unreachable (nothing currently being collected), losing whatever was on the old root volume is not a real loss right now — and the replacement's fresh `user-data.sh.tftpl` run may incidentally resolve OBS-024 too, though that's not confirmed until it's actually applied.
+
+**Status:** fixed and committed, not yet applied as of this entry.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)

@@ -20,6 +20,18 @@ resource "aws_security_group" "monitoring" {
   vpc_id      = var.vpc_id
 
   ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = var.admin_cidr_blocks
+    # Genuinely missing until OBS-027 — this SG never had a port 22 rule at
+    # all, so `make monitoring-status`/`monitoring-logs` (both plain `ssh
+    # ubuntu@...`) have never been able to connect, full timeout not an auth
+    # failure. Same admin_cidr_blocks scoping as the other UI ports below —
+    # narrow this in production per that variable's own description.
+    description = "SSH"
+  }
+  ingress {
     from_port   = 3000
     to_port     = 3000
     protocol    = "tcp"
@@ -134,6 +146,26 @@ resource "aws_iam_instance_profile" "monitoring" {
   role = aws_iam_role.monitoring.name
 }
 
+# ── SSH Key Pair ────────────────────────────────────────────────────────────────
+# Genuinely missing until OBS-027 — the instance below never had a key_name
+# at all, so even with the SG's new port 22 rule, SSH had no way to
+# authenticate (Ubuntu's cloud-init only seeds authorized_keys from an EC2
+# key pair supplied at launch, or explicit user-data — neither existed).
+# Auto-generated rather than requiring the user to bring their own, matching
+# this project's existing automate-everything posture (argocd.tf's ALB
+# discovery, the schema-init hooks, etc.) — Makefile's `monitoring-key`
+# target fetches the private key from state and saves it locally.
+
+resource "tls_private_key" "monitoring_ssh" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "monitoring" {
+  key_name   = "bookstore-monitoring-ssh"
+  public_key = tls_private_key.monitoring_ssh.public_key_openssh
+}
+
 # ── EC2 Instance ───────────────────────────────────────────────────────────────
 
 resource "aws_instance" "monitoring" { # nosemgrep: aws-ec2-has-public-ip
@@ -142,6 +174,7 @@ resource "aws_instance" "monitoring" { # nosemgrep: aws-ec2-has-public-ip
   subnet_id                   = var.public_subnet_id
   vpc_security_group_ids      = [aws_security_group.monitoring.id]
   iam_instance_profile        = aws_iam_instance_profile.monitoring.name
+  key_name                    = aws_key_pair.monitoring.key_name
   associate_public_ip_address = true # intentional — SG restricts to admin_cidr_blocks, EIP needed for monitoring UIs
 
   metadata_options {

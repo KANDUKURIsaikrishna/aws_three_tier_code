@@ -85,6 +85,12 @@ output "alertmanager_url" {
   value       = module.monitoring_ec2.alertmanager_url
 }
 
+output "monitoring_ssh_private_key" {
+  description = "Auto-generated SSH private key for the monitoring EC2 — fetch via: make monitoring-key"
+  value       = module.monitoring_ec2.ssh_private_key_pem
+  sensitive   = true
+}
+
 output "grafana_admin_secret_arn" {
   description = "Secrets Manager secret ARN for Grafana admin password — retrieve: aws secretsmanager get-secret-value --secret-id /bookstore/grafana-admin"
   value       = module.eks_addons.grafana_admin_secret_arn
