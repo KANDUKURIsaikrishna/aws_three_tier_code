@@ -32,6 +32,8 @@ spec:
             namespace: notification
           - service: order-service
             namespace: order
+          - service: api-gateway
+            namespace: gateway
 
   template:
     metadata:

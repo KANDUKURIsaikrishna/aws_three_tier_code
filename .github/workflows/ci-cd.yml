@@ -21,6 +21,7 @@ env:
   USER_REPO:     bookstore-user-service
   ORDER_REPO:    bookstore-order-service
   NOTIFICATION_REPO: bookstore-notification-service
+  API_GATEWAY_REPO: bookstore-api-gateway
   EKS_CLUSTER:   bookstore-eks
   K8S_NAMESPACE: bookstore
 
@@ -70,6 +71,7 @@ jobs:
             services/user-service/package-lock.json
             services/notification-service/package-lock.json
             services/order-service/package-lock.json
+            services/api-gateway/package-lock.json
 
       - name: Install backend dependencies
         run: cd backend && npm ci
@@ -112,6 +114,15 @@ jobs:
 
       - name: npm audit — order-service production deps (fail on high/critical CVEs)
         run: cd services/order-service && npm audit --audit-level=high --omit=dev
+
+      - name: Install api-gateway dependencies
+        run: cd services/api-gateway && npm ci
+
+      - name: Run api-gateway tests
+        run: cd services/api-gateway && npm test
+
+      - name: npm audit — api-gateway production deps (fail on high/critical CVEs)
+        run: cd services/api-gateway && npm audit --audit-level=high --omit=dev
 
       - name: Install frontend dependencies
         run: cd client && npm ci
@@ -420,6 +431,48 @@ jobs:
         run: |
           docker push ${{ env.ECR_REGISTRY }}/${{ env.ORDER_REPO }}:${{ steps.tag.outputs.tag }}
 
+      # ── API gateway image ────────────────────────────────────────────────
+      - name: Build api-gateway image (no push yet)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context:   ./services/api-gateway
+          push:      false
+          load:      true
+          tags:      ${{ env.ECR_REGISTRY }}/${{ env.API_GATEWAY_REPO }}:${{ steps.tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      - name: Trivy — scan api-gateway (CRITICAL + HIGH = hard fail)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref:      ${{ env.ECR_REGISTRY }}/${{ env.API_GATEWAY_REPO }}:${{ steps.tag.outputs.tag }}
+          format:         sarif
+          output:         trivy-api-gateway.sarif
+          severity:       CRITICAL,HIGH
+          exit-code:      "1"
+          ignore-unfixed: true
+
+      - name: Show api-gateway CVEs in CI log (diagnostic on failure)
+        if: failure()
+        run: |
+          [ -f trivy-api-gateway.sarif ] && \
+            jq -r '.runs[].results[] |
+              "[" + (.level | ascii_upcase) + "] " + .ruleId +
+              ": " + (.message.text | split("\n")[0])' \
+            trivy-api-gateway.sarif \
+          || echo "trivy-api-gateway.sarif not found"
+
+      - name: Upload api-gateway Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4
+        if: always()
+        with:
+          sarif_file: trivy-api-gateway.sarif
+          category:   trivy-api-gateway
+
+      - name: Push api-gateway image
+        run: |
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.API_GATEWAY_REPO }}:${{ steps.tag.outputs.tag }}
+
       # ── Frontend image ───────────────────────────────────────────────────
       - name: Build frontend image (no push yet)
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
@@ -517,6 +570,8 @@ jobs:
             kustomize edit set image bookstore-notification-service=${{ env.ECR_REGISTRY }}/${{ env.NOTIFICATION_REPO }}:${TAG})
           (cd k8s/services/order-service/overlays/prod && \
             kustomize edit set image bookstore-order-service=${{ env.ECR_REGISTRY }}/${{ env.ORDER_REPO }}:${TAG})
+          (cd k8s/services/api-gateway/overlays/prod && \
+            kustomize edit set image bookstore-api-gateway=${{ env.ECR_REGISTRY }}/${{ env.API_GATEWAY_REPO }}:${TAG})
 
       - name: Commit and push updated image tags
         env:
@@ -528,7 +583,8 @@ jobs:
                   k8s/services/catalog-service/overlays/prod/kustomization.yaml \
                   k8s/services/user-service/overlays/prod/kustomization.yaml \
                   k8s/services/notification-service/overlays/prod/kustomization.yaml \
-                  k8s/services/order-service/overlays/prod/kustomization.yaml
+                  k8s/services/order-service/overlays/prod/kustomization.yaml \
+                  k8s/services/api-gateway/overlays/prod/kustomization.yaml
           # Skips the commit if kustomization.yaml did not actually change
           git diff --staged --quiet && echo "No image tag changes." && exit 0
           git commit -m "chore: bump image tags to ${TAG}"
