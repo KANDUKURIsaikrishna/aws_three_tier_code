@@ -399,17 +399,13 @@ jobs:
         env:
           TAG: ${{ needs.build-and-push.outputs.image-tag }}
         run: |
-          cd k8s/overlays/prod
-          kustomize edit set image \
-            bookstore-backend=${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:${TAG}
-          kustomize edit set image \
-            bookstore-frontend=${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:${TAG}
-          cd ../../services/catalog-service/overlays/prod
-          kustomize edit set image \
-            bookstore-catalog-service=${{ env.ECR_REGISTRY }}/${{ env.CATALOG_REPO }}:${TAG}
-          cd ../../user-service/overlays/prod
-          kustomize edit set image \
-            bookstore-user-service=${{ env.ECR_REGISTRY }}/${{ env.USER_REPO }}:${TAG}
+          (cd k8s/overlays/prod && \
+            kustomize edit set image bookstore-backend=${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:${TAG} && \
+            kustomize edit set image bookstore-frontend=${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:${TAG})
+          (cd k8s/services/catalog-service/overlays/prod && \
+            kustomize edit set image bookstore-catalog-service=${{ env.ECR_REGISTRY }}/${{ env.CATALOG_REPO }}:${TAG})
+          (cd k8s/services/user-service/overlays/prod && \
+            kustomize edit set image bookstore-user-service=${{ env.ECR_REGISTRY }}/${{ env.USER_REPO }}:${TAG})
 
       - name: Commit and push updated image tags
         env:
