@@ -109,6 +109,45 @@ resource "aws_route53_record" "primary" {
   health_check_id = aws_route53_health_check.primary.id
 }
 
+# The actual app-serving hostnames — genuinely missing until OBS-025.
+# k8s/base/ingress/ingress.yaml's Ingress rules only match
+# bookstore.<domain> (frontend) and api.bookstore.<domain> (backend), never
+# the bare apex — nginx's default backend returns 404 for anything else,
+# apex included. Every record above this one only ever covered the apex, so
+# neither of these two hostnames has ever had a Route53 record in either
+# hosted zone this project has used — the site has never actually been
+# reachable by name. Same ALIAS pattern as `primary` above (Classic ELB,
+# same apex-CNAME-forbidden reasoning doesn't strictly apply here since
+# these aren't the zone apex, but ALIAS is still preferred over CNAME so
+# Route53 can evaluate target health / avoid the extra CNAME lookup hop),
+# no failover/health-check complexity — that's an apex-only concern in this
+# design (see the `primary`/`secondary` comments above), not needed for
+# these. Not gated on `var.primary_alb_dns != ""` for the same reason
+# `primary` above isn't (OBS-008): that value is unknown at plan time.
+resource "aws_route53_record" "frontend" {
+  zone_id = aws_route53_zone.public.zone_id
+  name    = "bookstore.${var.domain}"
+  type    = "A"
+
+  alias {
+    name                   = var.primary_alb_dns
+    zone_id                = data.aws_elb_hosted_zone_id.ingress_lb.id
+    evaluate_target_health = true
+  }
+}
+
+resource "aws_route53_record" "api" {
+  zone_id = aws_route53_zone.public.zone_id
+  name    = "api.bookstore.${var.domain}"
+  type    = "A"
+
+  alias {
+    name                   = var.primary_alb_dns
+    zone_id                = data.aws_elb_hosted_zone_id.ingress_lb.id
+    evaluate_target_health = true
+  }
+}
+
 # Still CNAME, not ALIAS — genuinely fine for now, NOT a bug: this record only
 # ever gets created once var.secondary_alb_dns is non-empty (count below), and
 # that only happens once a secondary-region EKS cluster + ingress LB actually

@@ -511,6 +511,37 @@ Metric "error-rate" assessed Error due to consecutiveErrors (5) > consecutiveErr
 
 **Status:** NOT fixed — needs SSH access to `bookstore-monitoring` to diagnose (`make monitoring-status`, `make monitoring-logs`, or `docker compose ps`/`docker compose logs` directly on the box) and restart whatever's down. Once monitoring is back, retry the aborted rollout (`kubectl argo rollouts retry rollout backend -n bookstore` if the plugin's installed, or `kubectl annotate rollout backend -n bookstore kubectl.kubernetes.io/restartedAt="$(date -u +%Y-%m-%dT%H:%M:%SZ)" --overwrite` otherwise) — no point retrying before then, since the same abort will just recur.
 
+### OBS-025 — the site's actual hostnames never had Route53 records; only the bare apex ever did
+
+**Symptom:** asked to verify the site is reachable by browser. `bookstore.b17facebook.xyz` and `api.bookstore.b17facebook.xyz` — the exact hosts `k8s/base/ingress/ingress.yaml`'s `Ingress` rules match — had **zero** Route53 records, in either hosted zone this project has ever used. The apex (`b17facebook.xyz` alone) has had a correct ALIAS record since early in this session, but nothing in the Ingress config ever serves content at the bare apex — nginx's default backend returns 404 for any Host header that doesn't match a configured rule, apex included.
+
+**Root cause:** `modules/route53/main.tf`'s `primary`/`primary_cf`/`secondary` records all target `var.domain` (the apex) only — nobody ever added records for the two subdomains the app is actually served on. Consistent with this session's running theme (RDS never had a schema, the image never had `prom-client`, now DNS never pointed at the real hostnames) — pieces of this stack that were configured once and never verified against real, end-to-end traffic.
+
+**Fix:** added `aws_route53_record.frontend` (`bookstore.<domain>`) and `aws_route53_record.api` (`api.bookstore.<domain>`) to `modules/route53/main.tf` — same ALIAS-to-ingress-LB pattern as `primary`, no failover/health-check (that complexity is apex-only in this design). Not gated on `var.primary_alb_dns != ""` for the same plan-time-unknown-value reason `primary` isn't (OBS-008).
+
+**Status:** fixed and committed. Needs a real `terraform apply` to create the actual records — not yet run as of this entry. Also blocked in practice by OBS-026 (GoDaddy isn't even delegated to the zone these records get created in) until that's resolved.
+
+### OBS-026 — GoDaddy's registrar delegation points at a different, orphaned Route53 zone than the one Terraform manages
+
+**Symptom:** asked to make the site reachable, discovered neither `b17facebook.xyz` nor its subdomains resolve at all — not a propagation delay, confirmed via `dig @8.8.8.8` (bypasses local resolver cache) and `whois`.
+
+**Root cause:** `whois b17facebook.xyz` shows GoDaddy's registered nameservers as `ns-1446.awsdns-52.org` / `ns-941.awsdns-53.net` / `ns-243.awsdns-30.com` / `ns-1567.awsdns-03.co.uk`. `aws route53 list-hosted-zones-by-name --dns-name b17facebook.xyz` shows **two** hosted zones for this domain in the account: `Z05284462VHV14S4GNFNS` (Terraform-managed, `CallerReference: terraform-...`, the one OBS-018's `prevent_destroy` protects, has the correct apex ALIAS record) and `Z09020593QE7ZCUI17J3` (not Terraform-managed, `CallerReference` a random UUID — evidently created manually at some earlier point in this project's history, before this session). GoDaddy's registered nameservers match the **second** zone, not the Terraform-managed one. That zone contains only its own NS/SOA records and one leftover CNAME from a stale, unrelated ACM DNS-validation request — no ALIAS record, no subdomain records, nothing pointing at the ingress LB. OBS-018 protected the wrong zone from the registrar's point of view: the zone it protects isn't the one anything on the public internet actually reaches.
+
+**Decision:** given the choice between (a) updating GoDaddy's nameservers to point at the Terraform-managed zone, or (b) importing the zone GoDaddy already points at into Terraform state and dropping the orphaned one, chose **(b)** — avoids another manual GoDaddy trip, matches the earlier stated preference (OBS-018) to leave the registrar alone for now.
+
+**Fix (state surgery — run manually, not automated):**
+```bash
+terraform state rm module.route53.aws_route53_zone.public
+terraform import module.route53.aws_route53_zone.public Z09020593QE7ZCUI17J3
+terraform plan   # review: existing record resources (primary, primary_cf, the two
+                  # new OBS-025 subdomain records) will show as replacements —
+                  # expected, they're moving from the old zone_id to this one
+terraform apply
+```
+After a successful apply, the orphaned zone (`Z05284462VHV14S4GNFNS`) is no longer Terraform-tracked and can be deleted by hand (`aws route53 delete-hosted-zone --id Z05284462VHV14S4GNFNS`, after confirming it's empty of anything still needed) to avoid confusion and the small monthly per-zone charge. `modules/route53/main.tf`'s `aws_route53_zone.public` resource block itself needs no code change — this is purely a state-identity swap onto an AWS object that already exists.
+
+**Status:** not yet run as of this entry — needs the user to run the state surgery above directly (this session's established pattern never runs `terraform apply`, and state `rm`/`import` carry the same or higher risk).
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
