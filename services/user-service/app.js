@@ -75,61 +75,71 @@ export function createApp(db, jwtSecret) {
 
   app.post("/auth/register", (req, res) => {
     const { email, password } = req.body;
-    if (!email || !password) {
+    if (!email || !password || typeof email !== "string" || typeof password !== "string") {
       return res.status(400).json({ error: "email and password are required" });
     }
 
     db.query("SELECT id FROM users WHERE email = ?", [email], async (err, existing) => {
-      if (err) {
-        console.error("user-service DB error:", err);
+      try {
+        if (err) {
+          console.error("user-service DB error:", err);
+          return res.status(500).json({ error: "internal error" });
+        }
+        if (existing.length > 0) {
+          return res.status(409).json({ error: "email already registered" });
+        }
+
+        const passwordHash = await bcrypt.hash(password, 10);
+        db.query(
+          "INSERT INTO users (email, password_hash) VALUES (?, ?)",
+          [email, passwordHash],
+          (insertErr, result) => {
+            if (insertErr) {
+              console.error("user-service DB error:", insertErr);
+              return res.status(500).json({ error: "internal error" });
+            }
+            return res.status(201).json({ id: result.insertId, email });
+          }
+        );
+      } catch (e) {
+        console.error("user-service DB error:", e);
         return res.status(500).json({ error: "internal error" });
       }
-      if (existing.length > 0) {
-        return res.status(409).json({ error: "email already registered" });
-      }
-
-      const passwordHash = await bcrypt.hash(password, 10);
-      db.query(
-        "INSERT INTO users (email, password_hash) VALUES (?, ?)",
-        [email, passwordHash],
-        (insertErr, result) => {
-          if (insertErr) {
-            console.error("user-service DB error:", insertErr);
-            return res.status(500).json({ error: "internal error" });
-          }
-          return res.status(201).json({ id: result.insertId, email });
-        }
-      );
     });
   });
 
   app.post("/auth/login", (req, res) => {
     const { email, password } = req.body;
-    if (!email || !password) {
+    if (!email || !password || typeof email !== "string" || typeof password !== "string") {
       return res.status(400).json({ error: "email and password are required" });
     }
 
     db.query("SELECT id, email, password_hash FROM users WHERE email = ?", [email], async (err, rows) => {
-      if (err) {
-        console.error("user-service DB error:", err);
+      try {
+        if (err) {
+          console.error("user-service DB error:", err);
+          return res.status(500).json({ error: "internal error" });
+        }
+        if (rows.length === 0) {
+          // No such user: still run a compare against a fixed dummy hash so
+          // this branch costs about the same as the real-user path below,
+          // preventing email enumeration via response timing.
+          await bcrypt.compare(password, DUMMY_HASH);
+          return res.status(401).json({ error: "invalid email or password" });
+        }
+
+        const user = rows[0];
+        const valid = await bcrypt.compare(password, user.password_hash);
+        if (!valid) {
+          return res.status(401).json({ error: "invalid email or password" });
+        }
+
+        const token = jwt.sign({ userId: user.id, email: user.email }, jwtSecret, { expiresIn: "1h" });
+        return res.status(200).json({ token });
+      } catch (e) {
+        console.error("user-service DB error:", e);
         return res.status(500).json({ error: "internal error" });
       }
-      if (rows.length === 0) {
-        // No such user: still run a compare against a fixed dummy hash so
-        // this branch costs about the same as the real-user path below,
-        // preventing email enumeration via response timing.
-        await bcrypt.compare(password, DUMMY_HASH);
-        return res.status(401).json({ error: "invalid email or password" });
-      }
-
-      const user = rows[0];
-      const valid = await bcrypt.compare(password, user.password_hash);
-      if (!valid) {
-        return res.status(401).json({ error: "invalid email or password" });
-      }
-
-      const token = jwt.sign({ userId: user.id, email: user.email }, jwtSecret, { expiresIn: "1h" });
-      return res.status(200).json({ token });
     });
   });
 

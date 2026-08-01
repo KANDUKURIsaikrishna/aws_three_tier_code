@@ -60,6 +60,15 @@ describe("POST /auth/register", () => {
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: "email and password are required" });
   });
+
+  it("rejects registration when password is a non-string (object) instead of crashing", async () => {
+    const res = await request(app)
+      .post("/auth/register")
+      .send({ email: "x@example.com", password: { weird: "object" } });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "email and password are required" });
+  });
 });
 
 describe("POST /auth/login", () => {
