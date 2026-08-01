@@ -4,6 +4,11 @@ kind: Kustomization
 resources:
 - ../../base
 
+# Account ID is intentionally NOT hardcoded here.
+# CI (deploy stage) overwrites this from secrets.AWS_ACCOUNT_ID every push:
+#   kustomize edit set image bookstore-user-service=${ECR_REGISTRY}/bookstore-user-service:${SHA}
+# Placeholder 000000000000 is replaced automatically on first CI deploy.
+# For manual local deploy: replace 000000000000 with your real AWS account ID.
 images:
 - name: bookstore-user-service
   newName: 000000000000.dkr.ecr.us-west-1.amazonaws.com/bookstore-user-service
