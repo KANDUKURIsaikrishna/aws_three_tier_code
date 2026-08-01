@@ -62,19 +62,29 @@ spec:
             - -c
             - |
               set -eu
+              # Backticks below are escaped (\`) on purpose — this heredoc is
+              # UNQUOTED (<<SQL, not <<'SQL') so that $CATALOG_DB_PASSWORD
+              # expands (see TROUBLESHOOTING.md OBS-003). An unquoted heredoc
+              # ALSO treats bare backticks as shell command substitution, not
+              # literal characters — confirmed live: unescaped `desc` in the
+              # SQL below ran as the shell command `desc` three times ("sh:
+              # desc: command not found"), silently stripping the identifier
+              # from every statement that used it. \` is a literal backtick
+              # to the shell; MySQL still sees `desc` as a quoted identifier.
+              # See TROUBLESHOOTING.md OBS-017.
               mysql -h "$ADMIN_DB_HOST" -u "$ADMIN_DB_USERNAME" -p"$ADMIN_DB_PASSWORD" <<SQL
               CREATE DATABASE IF NOT EXISTS catalog_db;
 
               CREATE TABLE IF NOT EXISTS catalog_db.books (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 title VARCHAR(255) NOT NULL,
-                `desc` TEXT,
+                \`desc\` TEXT,
                 price DECIMAL(10,2) NOT NULL,
                 cover VARCHAR(1024)
               );
 
-              INSERT INTO catalog_db.books (id, title, `desc`, price, cover)
-              SELECT id, title, `desc`, price, cover FROM test.books
+              INSERT INTO catalog_db.books (id, title, \`desc\`, price, cover)
+              SELECT id, title, \`desc\`, price, cover FROM test.books
               ON DUPLICATE KEY UPDATE title = VALUES(title);
 
               CREATE USER IF NOT EXISTS 'catalog_user'@'%' IDENTIFIED BY '$CATALOG_DB_PASSWORD';

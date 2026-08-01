@@ -390,5 +390,28 @@ An `InvalidSpec` Rollout creates **no pods, no ReplicaSet, nothing** — worse t
 
 ## Related
 
+### OBS-017 — `rds_endpoint` output includes the port, breaking every DB connection in this project's history — plus a shell backtick bug in the same failure
+
+**Symptom**, hit once OBS-013/OBS-015 got the schema-init hook actually starting for the first time ever:
+```
+sh: line 2: desc: command not found     (×3)
+mysql: [Warning] Using a password on the command line interface can be insecure.
+ERROR 2005 (HY000): Unknown MySQL server host 'bookstore-db.cj4yg2wykia3.us-west-1.rds.amazonaws.com:3306' (-2)
+```
+
+**Root cause 1 (the big one):** `modules/rds/outputs.tf`'s `rds_endpoint` output was `aws_db_instance.db.endpoint` — the AWS/Terraform provider's `endpoint` attribute is `"host:port"` combined, not a bare hostname. Every consumer in this repo treats it as a bare hostname: the admin Secrets Manager entry's `DB_HOST` (`modules/rds/main.tf`), catalog-service's own `DB_HOST` (root `main.tf`), and the private Route53 zone's CNAME target (`modules/route53/main.tf`) — none of which can handle an embedded port. A DNS/driver hostname lookup on a string containing a colon fails outright, exactly as seen above. **This means no database connection anywhere in this project — old `backend/` included — has ever actually succeeded, for this project's entire history.** It was simply never exercised end-to-end (real RDS + real app pod + real credentials, all at once) until this session's Task 9.
+
+**Fix, two separate places** (not one — checked, and the first instinct of "just fix the output" was wrong): `modules/rds/outputs.tf`'s `rds_endpoint` output changed to `aws_db_instance.db.address` — this fixes catalog-service's `DB_HOST` (root `main.tf`, references the output) and the Route53 private CNAME (`modules/route53/main.tf`, also references the output). But the **admin** Secrets Manager entry's `DB_HOST` (`modules/rds/main.tf`) builds its value directly from `aws_db_instance.db.endpoint`, never going through the module's own output at all — fixing the output alone leaves the admin secret (the one both the original `backend/` and the schema-init hook actually read) still broken. Fixed both, independently, both now use `.address`. Port continues to be handled the way it already was everywhere (a separate `DB_PORT` key/ConfigMap value, never derived from this output).
+
+**Root cause 2 (found in the same failure, a different bug):** the three `sh: desc: command not found` lines came first, before the connection error — `schema-init-job.yaml`'s SQL heredoc is intentionally **unquoted** (`<<SQL`, not `<<'SQL'`) so `$CATALOG_DB_PASSWORD` expands (OBS-003's fix). An unquoted heredoc *also* treats bare backticks as shell command substitution, not literal characters — and the SQL has three `` `desc` `` MySQL-identifier-quoted column references. Each one ran as the shell command `desc` (which doesn't exist), silently stripping the identifier from the `CREATE TABLE`/`INSERT`/`SELECT` statements sent to MySQL. OBS-003's own fix note said "verified no other `$`-prefixed content would unintentionally expand" — true, but incomplete: it didn't check for backtick side effects, which are a separate unquoted-heredoc hazard.
+
+**Fix:** escaped all three as `` \`desc\` `` — a backslash-escaped backtick is literal to the shell (not command substitution) while still reaching MySQL as a real backtick-quoted identifier. Verified locally before committing: a standalone shell simulation of the same heredoc structure confirmed `\`desc\`` renders as literal `` `desc` `` in the output *and* `$CATALOG_DB_PASSWORD` still expands correctly — both properties hold simultaneously.
+
+**Status:** both fixes are committed. The `rds_endpoint` output change needs a real `terraform apply` to actually update the live Secrets Manager secret content — not yet run as of this entry. Not yet re-verified end-to-end after that apply.
+
+**General lesson:** an unquoted heredoc is a much bigger commitment than "now `$VAR` expands" — it also activates backtick command substitution and (less commonly relevant here) other shell metacharacters. Any heredoc carrying SQL with backtick-quoted identifiers needs those backticks escaped the moment the heredoc stops being single-quoted, not just a scan for stray `$` signs.
+
+## Related
+
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
 - [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) — OBS-005 and other known gaps that should get fixed properly rather than worked around

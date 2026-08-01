@@ -21,7 +21,14 @@ resource "aws_secretsmanager_secret_version" "db_credentials" {
   secret_string = jsonencode({
     DB_USERNAME = var.db_username
     DB_PASSWORD = random_password.db_password.result
-    DB_HOST     = aws_db_instance.db.endpoint
+    # .address, NOT .endpoint — .endpoint is "host:port" combined, which
+    # every consumer of DB_HOST (mysql2's `host:` param, the mysql CLI's
+    # `-h` flag) fails to resolve as a hostname. Confirmed live: this exact
+    # bug meant no DB connection in this project's history ever actually
+    # worked. See TROUBLESHOOTING.md OBS-017. (outputs.tf's rds_endpoint
+    # output has the same fix, but that's a SEPARATE reference — this one
+    # had to be fixed independently since it doesn't go through the output.)
+    DB_HOST = aws_db_instance.db.address
   })
 }
 

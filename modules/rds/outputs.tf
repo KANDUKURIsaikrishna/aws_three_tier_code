@@ -9,8 +9,20 @@ output "rds_instance_arn" {
 }
 
 output "rds_endpoint" {
-  description = "RDS connection endpoint"
-  value       = aws_db_instance.db.endpoint
+  # Deliberately .address, NOT .endpoint. aws_db_instance.endpoint returns
+  # "host:port" combined — every consumer of this output (the admin
+  # Secrets Manager entry's DB_HOST, catalog-service's DB_HOST, the private
+  # Route53 CNAME target) treats it as a bare hostname and passes it
+  # straight to a driver's `host` parameter or a DNS record value, neither
+  # of which can parse an embedded port. Confirmed live: `mysql -h
+  # "host:3306"` fails with "ERROR 2005: Unknown MySQL server host" — DNS
+  # resolution chokes on the colon. This means no database connection
+  # anywhere in this project's history ever actually worked; it was never
+  # exercised end-to-end until this session. See TROUBLESHOOTING.md OBS-017.
+  # Port is (and always was) handled separately by consumers, e.g. the
+  # DB_PORT key already present alongside DB_HOST in every secret/configmap.
+  description = "RDS connection hostname (bare address, no port — see comment above)"
+  value       = aws_db_instance.db.address
 }
 
 output "rds_subnet_group" {
