@@ -260,6 +260,30 @@ Error: creating Route53 Record: operation error Route 53: ChangeResourceRecordSe
 
 Verified against the real, partially-applied stack (RDS, secrets, and the private RDS DNS record already existed from the failed apply): `terraform plan` came back clean, `Plan: 5 to add, 0 to change, 1 to destroy` — the one "destroy" is `null_resource.wait_for_alb_hostname` replacing itself (its trigger is `timestamp()`, by design, re-checked every apply — it's not a real AWS resource, "destroying" it does nothing).
 
+**Update:** the ALIAS mechanism described here was correct, but the hosted zone ID it used (`load_balancer_type = "network"`, i.e. NLB) was not — the actual `terraform apply` that ran this failed with a *different* error immediately after. See OBS-010: the ingress LB in this cluster is a Classic ELB, not an NLB.
+
+### OBS-010 — Wrong LB type: it's a Classic ELB, not an NLB ✅ RESOLVED
+
+**Symptom**, hit immediately after OBS-009's fix, on the very next real `terraform apply` attempt:
+```
+Error: creating Route53 Record: operation error Route 53: ChangeResourceRecordSets,
+  ... InvalidChangeBatch: [Tried to create an alias that targets
+  a78c183ae42d84e9eb81e1cea4dd6cfc-2044134075.us-west-1.elb.amazonaws.com.,
+  type A in zone Z24FKFUX50B4VW, but the alias target name does not lie
+  within the target zone]
+  with module.route53.aws_route53_record.primary[0]
+```
+
+**Root cause:** this entire project — this session's own docs included ([`ARCHITECTURE.md`](ARCHITECTURE.md), [`DEPLOYMENT.md`](DEPLOYMENT.md), [`KUBERNETES.md`](KUBERNETES.md)) — has called ingress-nginx's `LoadBalancer` Service an "NLB" throughout. It isn't one. `modules/eks-addons` has no `aws-load-balancer-controller` Helm release, and `modules/eks-addons/ingress.tf` never sets the `service.beta.kubernetes.io/aws-load-balancer-type: nlb` annotation on the Service. On EKS, a plain `type: LoadBalancer` Service with neither of those provisions through the legacy in-tree AWS cloud provider, which defaults to a **Classic Load Balancer** — not ALB, not NLB. OBS-009's fix asked Route53 for the NLB's hosted zone (`Z24FKFUX50B4VW`), and AWS correctly rejected it: the real LB's DNS name genuinely doesn't belong to that zone.
+
+Trying the obvious next fix — `data "aws_lb_hosted_zone_id" { load_balancer_type = "classic" }` — failed too, with a *third* real error: `expected load_balancer_type to be one of ["application" "network"], got classic`. `aws_lb_hosted_zone_id` only covers ELBv2 (ALB/NLB); it has no concept of the classic v1 ELB at all.
+
+**Fix:** `aws_elb_hosted_zone_id` — a separate, no-argument data source specifically for Classic ELB, resolving correctly per-region via the module's default provider. For us-west-1 that's `Z368ELLRRE2KJ0`, a different constant from the NLB zone `Z24FKFUX50B4VW` used (incorrectly) in OBS-009. `modules/route53/main.tf`'s `data "aws_lb_hosted_zone_id" "nlb"` became `data "aws_elb_hosted_zone_id" "ingress_lb"`.
+
+Verified against the real, partially-applied stack: `terraform plan` came back clean, `Plan: 2 to add, 0 to change, 1 to destroy` (same benign `null_resource.wait_for_alb_hostname` self-replace as OBS-009), no errors — and the plan output showed `alias.zone_id = "Z368ELLRRE2KJ0"`, confirming the corrected zone actually got picked up.
+
+**Not fixed by this entry, flagged for later:** the "NLB" naming throughout this project's docs is now known-inaccurate and hasn't been corrected everywhere — [`ARCHITECTURE.md`](ARCHITECTURE.md), [`DEPLOYMENT.md`](DEPLOYMENT.md), [`KUBERNETES.md`](KUBERNETES.md), and [`TERRAFORM.md`](TERRAFORM.md) all still say "NLB" in places describing this same load balancer. A Classic ELB is also AWS's oldest, most limited load balancer type (no static IPs, weaker health-check/target-group model, being phased out in favor of ALB/NLB generally) — genuinely worth considering whether to fix the docs to say "Classic ELB" accurately, or fix the *infrastructure* instead (add the NLB annotation, or install `aws-load-balancer-controller`, so the LB this project has always claimed to have actually exists). See [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md).
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
