@@ -7,6 +7,11 @@ import { Registry, collectDefaultMetrics, Counter, Histogram } from "prom-client
 
 const SERVICE_NAME = "user-service";
 
+// Computed once at startup; compared against on every login where the email
+// isn't found, so that branch takes comparable time to the real-user path
+// and doesn't leak account existence via response timing.
+const DUMMY_HASH = bcrypt.hashSync("dummy-password-for-timing-safety", 10);
+
 const registry = new Registry();
 registry.setDefaultLabels({ service: SERVICE_NAME });
 collectDefaultMetrics({ register: registry });
@@ -74,18 +79,24 @@ export function createApp(db, jwtSecret) {
       return res.status(400).json({ error: "email and password are required" });
     }
 
-    db.query("SELECT id FROM users WHERE email = ?", [email], (err, existing) => {
-      if (err) return res.status(500).json({ error: "internal error" });
+    db.query("SELECT id FROM users WHERE email = ?", [email], async (err, existing) => {
+      if (err) {
+        console.error("user-service DB error:", err);
+        return res.status(500).json({ error: "internal error" });
+      }
       if (existing.length > 0) {
         return res.status(409).json({ error: "email already registered" });
       }
 
-      const passwordHash = bcrypt.hashSync(password, 10);
+      const passwordHash = await bcrypt.hash(password, 10);
       db.query(
         "INSERT INTO users (email, password_hash) VALUES (?, ?)",
         [email, passwordHash],
         (insertErr, result) => {
-          if (insertErr) return res.status(500).json({ error: "internal error" });
+          if (insertErr) {
+            console.error("user-service DB error:", insertErr);
+            return res.status(500).json({ error: "internal error" });
+          }
           return res.status(201).json({ id: result.insertId, email });
         }
       );
@@ -98,14 +109,21 @@ export function createApp(db, jwtSecret) {
       return res.status(400).json({ error: "email and password are required" });
     }
 
-    db.query("SELECT id, email, password_hash FROM users WHERE email = ?", [email], (err, rows) => {
-      if (err) return res.status(500).json({ error: "internal error" });
+    db.query("SELECT id, email, password_hash FROM users WHERE email = ?", [email], async (err, rows) => {
+      if (err) {
+        console.error("user-service DB error:", err);
+        return res.status(500).json({ error: "internal error" });
+      }
       if (rows.length === 0) {
+        // No such user: still run a compare against a fixed dummy hash so
+        // this branch costs about the same as the real-user path below,
+        // preventing email enumeration via response timing.
+        await bcrypt.compare(password, DUMMY_HASH);
         return res.status(401).json({ error: "invalid email or password" });
       }
 
       const user = rows[0];
-      const valid = bcrypt.compareSync(password, user.password_hash);
+      const valid = await bcrypt.compare(password, user.password_hash);
       if (!valid) {
         return res.status(401).json({ error: "invalid email or password" });
       }
@@ -120,7 +138,10 @@ export function createApp(db, jwtSecret) {
       "SELECT id, email, created_at FROM users WHERE id = ?",
       [req.user.userId],
       (err, rows) => {
-        if (err) return res.status(500).json({ error: "internal error" });
+        if (err) {
+          console.error("user-service DB error:", err);
+          return res.status(500).json({ error: "internal error" });
+        }
         if (rows.length === 0) return res.status(404).json({ error: "user not found" });
         return res.status(200).json(rows[0]);
       }
