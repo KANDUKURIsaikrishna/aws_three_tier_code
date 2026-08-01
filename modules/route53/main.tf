@@ -19,6 +19,29 @@ resource "aws_route53_record" "rds_endpoint" {
 
 resource "aws_route53_zone" "public" {
   name = var.domain
+
+  # Protected on purpose. The 4 NS records this zone gets assigned by AWS
+  # were manually copied to the domain's real registrar (GoDaddy) to
+  # delegate the domain to Route53 — a one-time, outside-Terraform, manual
+  # step. If this zone is ever destroyed and recreated, AWS assigns a
+  # DIFFERENT set of 4 nameservers, silently breaking that delegation until
+  # someone notices and manually updates the registrar again. prevent_destroy
+  # stops that from happening by accident during a routine `terraform
+  # destroy` of the rest of the stack (which this project does often during
+  # development — see TROUBLESHOOTING.md TF-015/TF-017).
+  #
+  # Every OTHER resource in this stack (RDS, EKS, records inside this zone,
+  # etc.) still destroys/recreates freely — this is scoped to just the zone
+  # itself, since that's the only thing whose identity the registrar
+  # actually depends on.
+  #
+  # To intentionally destroy and recreate this zone later (and redo the
+  # GoDaddy NS delegation from scratch): remove this lifecycle block first,
+  # then `terraform apply` (removing prevent_destroy is itself a plan-time
+  # change, not a resource replacement) before running `terraform destroy`.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_route53_health_check" "primary" {

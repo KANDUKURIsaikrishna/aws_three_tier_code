@@ -124,6 +124,8 @@ aws secretsmanager get-secret-value --secret-id /bookstore/grafana-admin --query
 terraform destroy
 ```
 
+This will refuse to destroy `module.route53.aws_route53_zone.public` (`prevent_destroy` — see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) OBS-018) if the domain's NS records have already been manually delegated to it at your registrar. Everything else still tears down. If you genuinely want to destroy and re-delegate the zone too, remove that `lifecycle` block first — see OBS-018 for the exact steps.
+
 This project's Terraform has real destroy-safety automation baked in (NLB release before VPC teardown, force-delete on the flow-log CloudWatch group, `recovery_window_in_days = 0` on Secrets Manager entries, `force_destroy = true` on the CloudTrail S3 bucket) specifically because this stack gets destroyed and recreated often during development — see TROUBLESHOOTING TF-015/TF-017 for what used to go wrong here. `make destroy` runs it with `-auto-approve`; use the plain command if you want the interactive confirmation.
 
 Since `argocd.tf`'s `kubectl_manifest` resources are now what created the ArgoCD `Application`/`ApplicationSet` objects, `terraform destroy` also deletes them — and both carry `resources-finalizer.argocd.argoproj.io`, so ArgoCD deletes everything it manages (all of `k8s/overlays/prod` and every `k8s/services/*/overlays/prod`) before the `Application` object itself actually goes away. This happens automatically, in the right order, before `eks-addons`/`eks` get torn down (Terraform destroys in reverse-dependency order).

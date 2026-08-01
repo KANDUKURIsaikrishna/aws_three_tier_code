@@ -413,5 +413,17 @@ ERROR 2005 (HY000): Unknown MySQL server host 'bookstore-db.cj4yg2wykia3.us-west
 
 ## Related
 
+### OBS-018 — Protected the public Route53 zone from destroy/recreate churn
+
+Not a bug — an operational decision, recorded here because it changes destroy behavior and would otherwise be surprising the first time someone hits it.
+
+**Context:** `aws_route53_zone.public` (zone ID `Z05284462VHV14S4GNFNS` as of this session) already exists from earlier applies this session, and its 4 AWS-assigned nameservers have already been manually copied to the domain's real registrar (GoDaddy) to delegate the domain to Route53 — a one-time, outside-Terraform step. This project also destroys and recreates its whole stack often during development (see TF-015/TF-017). If `terraform destroy` (or any operation forcing this specific resource to be replaced) ever tears down this zone, AWS assigns a **different** set of 4 nameservers on recreation — silently breaking the GoDaddy delegation until someone notices the domain stopped resolving and manually re-updates the registrar.
+
+**Fix:** added `lifecycle { prevent_destroy = true }` to `aws_route53_zone.public` in `modules/route53/main.tf`. Scoped to just this one resource — RDS, EKS, and every record *inside* this zone still destroy/recreate freely; only the zone's own identity (and therefore the registrar delegation) is protected. Verified as a true no-op against the live, already-existing zone: `terraform plan` shows no changes to it.
+
+**To intentionally redo DNS from scratch later:** remove the `lifecycle` block, `terraform apply` (removing `prevent_destroy` is itself a plan-time-only change, not a resource replacement), then `terraform destroy` will be able to remove the zone — followed by manually re-delegating the new NS values at the registrar again, same one-time step as before.
+
+## Related
+
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
 - [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) — OBS-005 and other known gaps that should get fixed properly rather than worked around
