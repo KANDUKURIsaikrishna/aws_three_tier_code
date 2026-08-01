@@ -33,10 +33,21 @@ spec:
       labels:
         app: catalog-service
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
       restartPolicy: Never
       containers:
         - name: schema-init
           image: mysql:8.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           command:
             - sh
             - -c
@@ -74,3 +85,9 @@ spec:
             - name: CATALOG_DB_PASSWORD
               valueFrom:
                 secretKeyRef: { name: catalog-db-secret, key: DB_PASSWORD }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -321,5 +321,25 @@ Message: The Kubernetes API could not find monitoring.coreos.com/ServiceMonitor 
 
 ## Related
 
+### OBS-013 — Schema-init PreSync hook ran before its own secrets existed ✅ RESOLVED
+
+**Symptom**, hit live once OBS-012 unblocked the rest of the sync:
+```
+catalog-schema-init-rcpw7   0/1   CreateContainerConfigError
+...
+Warning  Failed  12m (x12 over 14m)  kubelet  spec.containers{schema-init}: Error: secret "admin-db-secret" not found
+```
+`kubectl get externalsecret -n catalog` / `kubectl get secrets -n catalog` both returned `No resources found` — the `admin-db-secret` and `catalog-db-secret` `ExternalSecret` objects had never even been created, 15 minutes in, despite being plain (non-hook) resources in the same kustomize base as the Job.
+
+**Root cause:** a real ordering bug in this session's own PreSync-hook design (OBS-007/[`KUBERNETES.md`](KUBERNETES.md#the-schema-init-job--an-argocd-presync-hook-not-a-manual-one-off)). ArgoCD's sync has two entirely separate phases: `PreSync` hooks run **first**, then the normal `Sync` phase (everything without a hook annotation) runs after. `schema-init-job.yaml` was a `PreSync` hook, but `admin-db-secret.yaml`/`external-secret.yaml` (the `ExternalSecret`s it depends on) were plain `Sync`-phase resources — meaning the Job was guaranteed to run *before* the secrets it needs were ever created, not racing them, **always losing**. `kubectl describe application bookstore` never surfaced this as a sync error because from ArgoCD's perspective the hook was "Running: waiting for completion" exactly as designed — it just never could complete, because the thing it needed was scheduled for a phase that hadn't started yet.
+
+**Fix:** made both `ExternalSecret`s `PreSync` hooks too, at `sync-wave: "-1"` (the Job stays at the implicit default wave `"0"`). ArgoCD runs hooks of the same type in ascending sync-wave order, so `-1` now genuinely completes before `0` starts — within the same `PreSync` phase, not racing across two different phases anymore.
+
+**A second, independent bug found while fixing this:** the very next CI run failed at the Semgrep SAST stage (`yaml.kubernetes.security.allow-privilege-escalation-no-securitycontext`, blocking) — `schema-init-job.yaml`'s container had **no `securityContext` at all**, unlike literally every other container in this repo (`backend/rollout.yaml`, `catalog-service/deployment.yaml`, etc., all have `runAsNonRoot`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, dropped capabilities). Missed when the Job was first written because it was never run through CI until this point (Task 9 was on hold the whole time this file existed). Fixed by matching the exact posture used everywhere else in this repo, plus a `/tmp` `emptyDir` mount since `readOnlyRootFilesystem: true` means the `mysql` CLI needs somewhere writable for its own temp files.
+
+**General lesson, same shape as OBS-012:** a hook or resource that *depends on* another resource needs that dependency to be in the **same or an earlier hook phase and sync-wave** — being in the same kustomize base is necessary but nowhere near sufficient for ordering guarantees. Check this explicitly for any future PreSync/PostSync hook that reads a Secret/ConfigMap.
+
+## Related
+
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
 - [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) — OBS-005 and other known gaps that should get fixed properly rather than worked around
