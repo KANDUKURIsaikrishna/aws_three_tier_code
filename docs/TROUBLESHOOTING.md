@@ -284,6 +284,41 @@ Verified against the real, partially-applied stack: `terraform plan` came back c
 
 **Not fixed by this entry, flagged for later:** the "NLB" naming throughout this project's docs is now known-inaccurate and hasn't been corrected everywhere — [`ARCHITECTURE.md`](ARCHITECTURE.md), [`DEPLOYMENT.md`](DEPLOYMENT.md), [`KUBERNETES.md`](KUBERNETES.md), and [`TERRAFORM.md`](TERRAFORM.md) all still say "NLB" in places describing this same load balancer. A Classic ELB is also AWS's oldest, most limited load balancer type (no static IPs, weaker health-check/target-group model, being phased out in favor of ALB/NLB generally) — genuinely worth considering whether to fix the docs to say "Classic ELB" accurately, or fix the *infrastructure* instead (add the NLB annotation, or install `aws-load-balancer-controller`, so the LB this project has always claimed to have actually exists). See [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md).
 
+### OBS-011 — `application.yaml` targetRevision pointed at `main`, which has no `k8s/overlays` at all ✅ RESOLVED
+
+**Symptom**, hit live once `argocd.tf`'s `kubectl_manifest` had actually created the `bookstore` Application (a real milestone — proved OBS-007's Terraform-managed ArgoCD bootstrap works):
+```
+[{"lastTransitionTime":"...","message":"Failed to load target state: failed to
+generate manifest for source 1 of 1: rpc error: code = Unknown desc = Manifest
+generation error (cached): k8s/overlays/prod: app path does not exist","type":"ComparisonError"}]
+```
+Sync status stuck at `Unknown` indefinitely — not transient, force-refreshing and force-syncing didn't help, because the underlying problem was real: the path genuinely doesn't exist at that revision.
+
+**Root cause:** `k8s/argocd/application.yaml` (pre-existing file, unrelated to any of this session's other work) has `targetRevision: main`. Verified directly against GitHub (`git ls-tree -d origin/main -- k8s/overlays` returns nothing): `main` has never had the Kustomize `base`/`overlays` restructure at all — that only landed on `improvements` (and now `observability`). This file was seemingly never actually exercised against a real ArgoCD instance before — Task 9 (real deployment) was on hold for this project's entire history until this session.
+
+**Fix:** Same pattern already used for `k8s/argocd/applicationset-microservices.yaml`: pin `targetRevision: observability` for now, with a comment flagging it needs to switch back to `main` once this branch merges *and* `main` actually gets the overlay structure (not just once it merges — those are two different conditions). Fixed both the committed file (so future `terraform apply` runs stay consistent) and the live `Application` object directly via `kubectl patch` (so it didn't require a full new `apply` cycle to take effect immediately).
+
+**Separately worth noting:** a related discovery mid-diagnosis — `kubectl -n argocd patch application X --type merge -p '{"operation":{"sync":{}}}'` run twice in a row with an *empty* `sync: {}` body gets reported as `patched (no change)` the second time, because the JSON is byte-identical to what's already there — it does **not** trigger a new sync. Use `argocd.argoproj.io/refresh=hard` annotation plus a sync operation that actually differs (e.g. explicit `revision`/`prune` fields) to force a genuinely new attempt.
+
+### OBS-012 — `ServiceMonitor`/`PrometheusRule` don't just do nothing, they block the ENTIRE sync ✅ RESOLVED
+
+**Symptom**, hit immediately after OBS-011's fix got the `bookstore` Application resolving the right revision — sync status stuck at `OutOfSync` / health `Missing` across many retries, nothing in the `bookstore` namespace ever got created, not even the namespace itself:
+```
+one or more synchronization tasks are not valid. Retrying attempt #5 at 9:22AM.
+...
+Message: The Kubernetes API could not find monitoring.coreos.com/PrometheusRule for
+  requested resource bookstore/bookstore-alerts. Make sure the "PrometheusRule" CRD
+  is installed on the destination cluster.
+Message: The Kubernetes API could not find monitoring.coreos.com/ServiceMonitor for
+  requested resource bookstore/backend-monitor. ...
+```
+
+**Root cause:** `k8s/base/monitoring/servicemonitor.yaml` and `prometheus-rules.yaml` were already documented (`ARCHITECTURE.md`, `KUBERNETES.md`) as "inert" — CRDs for a Prometheus Operator that isn't installed in this cluster (Prometheus runs on a standalone EC2 instance instead, see `ARCHITECTURE.md`). "Inert" turned out to be the wrong mental model for what ArgoCD does with them: the Kubernetes API can't validate a resource whose CRD was never registered *at all*, and when 2 out of ~22 resources in a sync batch fail like that, **ArgoCD fails the whole sync operation**, not just those 2 — every other valid, perfectly-fine resource (the `Namespace`, `Deployment`, `Rollout`, `Ingress`, everything) stayed `OutOfSync` and uncreated right alongside them, retrying every ~20s and failing identically every time.
+
+**Fix:** Removed both from `k8s/base/kustomization.yaml`'s `resources` list. Left `monitoring/analysis-template.yaml` in place — different CRD group entirely (`argoproj.io/v1alpha1`, from Argo Rollouts, which *is* installed) — confirmed it was never part of the `SyncFailed` set. `kubectl kustomize k8s/overlays/prod` still renders cleanly (22 resources across 15 kinds, no `PrometheusRule`/`ServiceMonitor`).
+
+**General lesson:** "this CRD manifest is inert/does nothing" is only true until something (ArgoCD, `kubectl apply -f` on a whole directory, a CI validation step) tries to actually process it as part of a batch — at that point "does nothing" becomes "blocks everything in the same batch." [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) already flagged these two files as a gap to resolve; this is that resolution, forced by hitting it live rather than done proactively.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)

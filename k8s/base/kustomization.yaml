@@ -26,5 +26,5 @@ resources:
 # sync: the K8s API can't validate an unknown resource type at all, and that
 # blocks the ENTIRE sync batch, not just these two resources — confirmed live
 # (ComparisonError/SyncFailed on a real bookstore Application, see
-# TROUBLESHOOTING.md OBS-011). analysis-template.yaml stays — it's
+# TROUBLESHOOTING.md OBS-012). analysis-template.yaml stays — it's
 # argoproj.io/v1alpha1 (Argo Rollouts' own CRD, which IS installed).
