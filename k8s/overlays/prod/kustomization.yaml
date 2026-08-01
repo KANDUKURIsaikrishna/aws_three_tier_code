@@ -14,10 +14,10 @@ resources:
 images:
 - name: bookstore-backend
   newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
-  newTag: 1dc8bc38
+  newTag: 3af802cf
 - name: bookstore-frontend
   newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
-  newTag: 1dc8bc38
+  newTag: 3af802cf
 
 patches:
 - target:
