@@ -90,7 +90,16 @@ export function createApp(db, notifyFn) {
 
   app.post("/cart", requireUserId, (req, res) => {
     const { book_id, quantity } = req.body;
-    if (!book_id || !quantity || typeof book_id !== "number" || typeof quantity !== "number") {
+    if (
+      !book_id ||
+      !quantity ||
+      typeof book_id !== "number" ||
+      typeof quantity !== "number" ||
+      !Number.isInteger(book_id) ||
+      book_id <= 0 ||
+      !Number.isInteger(quantity) ||
+      quantity <= 0
+    ) {
       return res.status(400).json({ error: "book_id and quantity are required" });
     }
 
@@ -177,7 +186,16 @@ export function createApp(db, notifyFn) {
 
   app.post("/orders", requireUserId, (req, res) => {
     const { book_id, quantity } = req.body;
-    if (!book_id || !quantity || typeof book_id !== "number" || typeof quantity !== "number") {
+    if (
+      !book_id ||
+      !quantity ||
+      typeof book_id !== "number" ||
+      typeof quantity !== "number" ||
+      !Number.isInteger(book_id) ||
+      book_id <= 0 ||
+      !Number.isInteger(quantity) ||
+      quantity <= 0
+    ) {
       return res.status(400).json({ error: "book_id and quantity are required" });
     }
 

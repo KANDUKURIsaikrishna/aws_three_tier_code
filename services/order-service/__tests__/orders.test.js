@@ -71,6 +71,24 @@ describe("POST /cart", () => {
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: "book_id and quantity are required" });
   });
+
+  it("rejects a negative quantity", async () => {
+    const res = await request(app)
+      .post("/cart")
+      .set("X-User-Id", "3")
+      .send({ book_id: 10, quantity: -1 });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "book_id and quantity are required" });
+  });
+
+  it("rejects a non-integer quantity", async () => {
+    const res = await request(app)
+      .post("/cart")
+      .set("X-User-Id", "3")
+      .send({ book_id: 10, quantity: 1.5 });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "book_id and quantity are required" });
+  });
 });
 
 describe("DELETE /cart/:bookId", () => {
@@ -142,6 +160,15 @@ describe("POST /orders (direct, no cart)", () => {
 
   it("rejects a missing book_id or quantity", async () => {
     const res = await request(app).post("/orders").set("X-User-Id", "3").send({ book_id: 99 });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "book_id and quantity are required" });
+  });
+
+  it("rejects a book_id of 0", async () => {
+    const res = await request(app)
+      .post("/orders")
+      .set("X-User-Id", "3")
+      .send({ book_id: 0, quantity: 1 });
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: "book_id and quantity are required" });
   });
