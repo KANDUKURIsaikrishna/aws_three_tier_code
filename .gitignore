@@ -27,6 +27,7 @@ client/build/
 *.tfstate.backup
 .terraform/
 tfplan
+*.tfplan
 # NOTE: .terraform.lock.hcl is intentionally NOT ignored — commit it like package-lock.json
 
 # K8s secrets — use Sealed Secrets or External Secrets Operator
