@@ -191,6 +191,8 @@ The old backend's Argo Rollout (canary 10%→25%→50%→100%) still exists and 
 
 ## Related docs
 
+- [`ARCHITECTURE_DIAGRAM_PROMPT.md`](ARCHITECTURE_DIAGRAM_PROMPT.md) — ready-to-use prompt for generating an official-AWS-style architecture/networking diagram of everything on this page
+- [`CICD_DIAGRAM_PROMPT.md`](CICD_DIAGRAM_PROMPT.md) — same, for the CI/CD pipeline
 - [`TERRAFORM.md`](TERRAFORM.md) — every module, in depth
 - [`KUBERNETES.md`](KUBERNETES.md) — manifests, Kustomize layout, ArgoCD
 - [`CICD.md`](CICD.md) — the GitHub Actions pipeline

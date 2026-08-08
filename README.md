@@ -8,7 +8,9 @@ A production-grade, cloud-native bookstore application deployed on AWS using a c
 
 | Doc | Covers |
 |---|---|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System-level view: current state, module graph, region layout, the microservices platform in progress |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System-level view: current state, module graph, region layout, the microservices platform |
+| [`docs/ARCHITECTURE_DIAGRAM_PROMPT.md`](docs/ARCHITECTURE_DIAGRAM_PROMPT.md) | Ready-to-use prompt for generating an official-AWS-style architecture/networking diagram |
+| [`docs/CICD_DIAGRAM_PROMPT.md`](docs/CICD_DIAGRAM_PROMPT.md) | Ready-to-use prompt for generating an official-AWS-style CI/CD pipeline diagram |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | How to actually stand this up from zero, step by step |
 | [`docs/TERRAFORM.md`](docs/TERRAFORM.md) | Every Terraform module in depth |
 | [`docs/KUBERNETES.md`](docs/KUBERNETES.md) | Manifests, Kustomize layout, ArgoCD wiring |
