@@ -689,6 +689,28 @@ A different private IP each time — the EKS control plane's several per-AZ ENIs
 
 **Status:** fixed live and in git. `kube-state-metrics` confirmed reporting `up` in Prometheus's own target list.
 
+### OBS-035 — `git push` rejected mid-session: CI's own auto-commits diverge a long-running local branch from origin
+
+**Symptom:** after a long session of local commits on `observability` (16 tasks' worth, building the frontend), a plain `git push` failed:
+```
+! [rejected]        observability -> observability (non-fast-forward)
+error: failed to push some refs to '...'
+hint: Updates were rejected because the tip of your current branch is behind its remote counterpart.
+```
+
+**Root cause:** this project's CI `deploy` job commits directly back to the branch it just built from — `kustomize edit set image` + `git commit` + `git push`, on every successful build (see `docs/CICD.md`). Earlier in the same session, a prior push had triggered exactly one such CI auto-commit (`chore: bump image tags to <sha>`) on `origin/observability`. All subsequent work that session continued locally on top of the commit *before* that auto-commit, since nothing ever pulled it down — by the time of this push, local and remote had diverged by exactly one commit each at the same point in history (`git merge-base` confirmed a common ancestor with local 24 commits ahead on one side and the single CI commit on the other).
+
+**Fix:** confirmed the divergent remote commit only touched `kustomization.yaml` image-tag fields (mechanical, CI-only files no local commit had touched), then:
+```bash
+git fetch origin observability
+git pull --rebase origin observability   # clean, zero conflicts given the above
+# re-run the full test suite + build to confirm the replay didn't break anything
+git push
+```
+A rebase was safe here specifically because the diverging commits were purely local and unpushed (never shared with anyone else) — this is the ordinary, expected case for rebase, not the risky "rewriting published history" kind.
+
+**Status:** resolved for this session. **Systemic risk, not fixed:** any long local session on a branch this CI actively pushes to will hit this again. Worth remembering to `git fetch`/`git pull --rebase` before a push if it's been a while since the last one, especially right after telling the user to approve a deploy gate (that approval is exactly when CI's auto-commit lands).
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)

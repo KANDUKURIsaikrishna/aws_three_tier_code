@@ -2,7 +2,7 @@
 
 A production-grade, cloud-native bookstore application deployed on AWS using a classic three-tier architecture. The infrastructure is fully codified in Terraform, containerised with Docker, orchestrated on Kubernetes (EKS), and protected by a DevSecOps CI/CD pipeline.
 
-> **Note:** this README describes the original monolith. As of the `observability` branch, all 5 planned microservices (`catalog-service`, `user-service`, `order-service`, `notification-service`, `api-gateway`) are built and registered with ArgoCD — but the cutover from the old `backend/` hasn't happened yet (a real Ingress-host collision blocks it; see [`docs/FUTURE_IMPROVEMENTS.md`](docs/FUTURE_IMPROVEMENTS.md)), and monitoring has moved off-cluster onto a dedicated EC2 instance. The docs below reflect the actual current state — start there if anything here seems out of date.
+> **Note:** this README describes the original monolith. As of the `observability` branch, all 5 planned microservices (`catalog-service`, `user-service`, `order-service`, `notification-service`, `api-gateway`) are built, registered with ArgoCD, and reachable — the frontend (`client/`) has a real login/register/cart/checkout/order-history UI wired to them via `api-gateway`, and the Ingress-host collision that used to block the gateway from being reliably reachable is resolved. `backend/`/`k8s/base/` (the old monolith) still exist and still serve the frontend's static assets — the final backend-deletion step is intentionally paused, see [`docs/FUTURE_IMPROVEMENTS.md`](docs/FUTURE_IMPROVEMENTS.md). Monitoring has also moved off-cluster onto a dedicated EC2 instance. The docs below reflect the actual current state — start there if anything here seems out of date.
 
 ## Documentation
 

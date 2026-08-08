@@ -90,7 +90,13 @@ kubectl get jobs -n catalog
 kubectl logs job/catalog-schema-init -n catalog   # only exists briefly — hook-delete-policy removes it after success
 ```
 
-**Before relying on `api.bookstore.<domain>` reaching `api-gateway`:** `k8s/base/ingress/ingress.yaml` (old monolith, still deployed) and `k8s/services/api-gateway/base/ingress.yaml` (new) both declare that exact host in different namespaces — see [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) gap #12. Resolve that collision before treating api-gateway as the live path for that hostname; until then, verify it directly instead:
+`api-gateway` has a real public `Ingress` for `api.bookstore.<domain>` — the old monolith's ingress no longer declares that host (the collision described in earlier revisions of this doc is resolved), so `api.bookstore.<domain>` reaching `api-gateway` is the live, working path, not something to route around:
+
+```bash
+curl -s https://api.bookstore.<domain>/health
+```
+
+If you'd rather bypass DNS/ingress entirely (e.g. verifying straight after an apply, before DNS has propagated), `kubectl port-forward` still works the same as always:
 
 ```bash
 kubectl port-forward -n gateway svc/gateway-service 8082:80
@@ -105,7 +111,7 @@ docker push <backend_repo_url>:manual
 # then kustomize edit set image + commit + push, same pattern CI uses
 ```
 
-Verify catalog-service end-to-end (it has no public ingress yet — traffic hasn't cut over):
+Verify catalog-service directly (bypassing the gateway, useful for isolating whether a problem is in the service itself or in the gateway/ingress path):
 
 ```bash
 kubectl port-forward -n catalog svc/catalog-service 8081:80
@@ -113,6 +119,29 @@ kubectl port-forward -n catalog svc/catalog-service 8081:80
 curl -s http://localhost:8081/health
 curl -s http://localhost:8081/books
 curl -s http://localhost:8081/metrics | grep 'service="catalog-service"'
+```
+
+### Verify the frontend end-to-end (real UI, not just curl)
+
+The React app at `bookstore.<domain>` has a real login/cart/checkout/order-history flow wired to `api-gateway` — worth clicking through after any deploy that touches `client/` or the gateway:
+
+1. Open `https://bookstore.<domain>` — should show the book catalog (public, no login needed).
+2. Register a new account, then log in.
+3. Click "Add to Cart" on a book, go to Cart, adjust quantity, proceed to Checkout, place the order.
+4. Check Orders — the placed order should show with status `pending`.
+5. Log out, confirm `/cart`, `/checkout`, `/orders` all redirect to `/login` when visited directly while logged out.
+
+Equivalent via `curl` if you don't have browser access (e.g. testing from a box without a display):
+
+```bash
+curl -s https://api.bookstore.<domain>/auth/register -H "Content-Type: application/json" \
+  -d '{"email":"test@example.com","password":"testpass123"}'
+TOKEN=$(curl -s https://api.bookstore.<domain>/auth/login -H "Content-Type: application/json" \
+  -d '{"email":"test@example.com","password":"testpass123"}' | jq -r .token)
+curl -s https://api.bookstore.<domain>/cart -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"book_id":1,"quantity":1}'
+curl -s -X POST https://api.bookstore.<domain>/orders/checkout -H "Authorization: Bearer $TOKEN"
+curl -s https://api.bookstore.<domain>/orders -H "Authorization: Bearer $TOKEN"
 ```
 
 ## Ongoing deploys (once the initial stand-up is done)
