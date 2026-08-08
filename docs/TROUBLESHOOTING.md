@@ -668,9 +668,26 @@ Nothing after that line in `user-data.sh.tftpl` ever ran — no kubectl install,
 
 **A fourth bug, found right after that:** with the permission issue fixed, `kube-state-metrics` failed with `exec: executable aws not found` — the image has no AWS CLI, so `aws eks update-kubeconfig`'s exec-based auth (`aws eks get-token`) can never work from inside this specific container, regardless of file permissions. Fixed by switching to a static bearer token instead: a `refresh-kube-token.sh` script (run once at boot, then via cron every 10 minutes, since EKS tokens are short-lived) calls `aws eks get-token` **on the host** (where the CLI does exist) and writes a plain `token:`-auth kubeconfig — no exec plugin needed inside the container at all. Same pattern already used for the Prometheus node-exporter target list (`update-prom-targets.sh`, refreshed every 5 min via cron) — this project already had the right pattern for "value that goes stale, refresh it on a timer," it just hadn't been applied here yet.
 
-**Fix applied:** all four fixed live via SSH on the running instance (`make monitoring-status`/`docker ps` confirmed all 5 containers `Up`, Grafana/Prometheus/Alertmanager all returning `200` externally), and all four fixed in `modules/monitoring-ec2/user-data.sh.tftpl` so a future fresh `terraform apply` doesn't need any of this manual surgery again.
+**Fix applied:** all four fixed live via SSH on the running instance (`make monitoring-status`/`docker ps` confirmed all 5 containers `Up`, Grafana/Prometheus/Alertmanager all returning `200` externally), and all four fixed in `modules/monitoring-ec2/user-data.sh.tftpl` so a future fresh `terraform apply` doesn't need any of this manual surgery again. `kube-state-metrics` reaching `Up` at the Docker level here was necessary but not sufficient — see OBS-034 immediately below for the fifth bug that kept it from actually working even once it stopped crash-looping.
 
 **Status:** fixed live and in git. Loki intentionally returns nothing when checked from outside the VPC — its security group scopes it to the VPC CIDR only (Fluent Bit push traffic), Grafana reaches it over the internal Docker network, this is by design, not a bug.
+
+### OBS-034 — `kube-state-metrics` stopped crash-looping but still couldn't reach the EKS API: the cluster's security group never allowed the monitoring EC2 in
+
+**Symptom:** after fixing OBS-033's four bugs, `kube-state-metrics`'s container stayed `Up` (no more restart loop), but its logs showed a *new*, consistent failure every ~30s:
+```
+failed to create client: error while trying to communicate with apiserver:
+Get "https://<cluster-id>.sk1.us-west-1.eks.amazonaws.com/version": dial tcp <private-ip>:443: i/o timeout
+```
+A different private IP each time — the EKS control plane's several per-AZ ENIs — all timing out, never refused, the classic signature of a security-group drop rather than "nothing listening."
+
+**Root cause:** `modules/monitoring-ec2/main.tf` already had a rule allowing the monitoring EC2 to *reach out to* the EKS-managed nodes on port 9100 (node-exporter scraping), but nothing in the other direction — no rule anywhere authorized the monitoring EC2's security group to reach the EKS **cluster** security group on port 443 at all. Confirmed directly: `aws ec2 describe-security-groups` on the cluster SG (`module.eks.cluster_security_group_id`) showed inbound only from itself and the node group's SG — the monitoring EC2's SG was never in that list, on any port relevant to the API server. Given this project has been through several destroy/recreate cycles this session alone, this had apparently never worked, ever — nobody had checked until tonight's `make monitoring-status` prompted actually looking.
+
+**Fix:** added a new `aws_security_group_rule.monitoring_scrape_eks_api` in `modules/monitoring-ec2/main.tf`, the same shape as the existing node-exporter rule, allowing the monitoring EC2's SG inbound on 443 to the cluster SG. Applied live via `aws ec2 authorize-security-group-ingress` first to unblock immediately (purely additive, no existing traffic affected), then committed to git.
+
+**A sixth, minor gap found once the network path worked:** `kube-state-metrics` could now authenticate, but logged `forbidden` on a handful of cluster-scoped resource types (`MutatingWebhookConfiguration`, `VolumeAttachment`, `Lease`, `PersistentVolume`, `Node`) — `AmazonEKSViewPolicy` (the access policy already correctly associated via `module.monitoring_ec2.aws_eks_access_policy_association.monitoring_view`) doesn't cover quite everything kube-state-metrics wants by default. Prometheus reports the target as `up` regardless — the core pod/deployment/service/namespace metrics that matter for the existing Grafana dashboards all work; only a few niche metric families are incomplete. Not chased further tonight; a tighter or additional access policy would be the real fix if those specific metrics turn out to matter.
+
+**Status:** fixed live and in git. `kube-state-metrics` confirmed reporting `up` in Prometheus's own target list.
 
 ## Related
 
