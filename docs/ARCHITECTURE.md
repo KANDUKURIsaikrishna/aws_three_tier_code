@@ -6,10 +6,10 @@ Current state of the `observability` branch. This describes what the code actual
 
 A bookstore web app built as a learning/reference implementation of a production-grade AWS three-tier architecture, now mid-migration to a microservices split. Two things are true at once right now:
 
-1. The **original monolith** (`client/` React frontend + `backend/` Node/Express API + RDS MySQL) is the thing that has actually been deployed and tested end-to-end, and still owns production traffic.
-2. The **microservices platform** is now fully built: all 5 services (`catalog-service`, `user-service`, `order-service`, `notification-service`, `api-gateway`) are implemented, tested, and registered with ArgoCD, per [`docs/superpowers/specs/2026-07-29-microservices-observability-design.md`](superpowers/specs/2026-07-29-microservices-observability-design.md) and [Plans 1-4](#related), and the frontend has a real login/cart/checkout/orders UI wired to it (see [Plan 5](#related)). `backend/` and `k8s/base/` still exist and still serve `bookstore.<domain>` (frontend static assets) — the full monolith retirement described in Plan 4 Task 9 hasn't happened — but the ingress host collision that used to block `api.bookstore.<domain>` traffic from reliably reaching the gateway is **resolved**: `k8s/base/ingress/ingress.yaml` no longer declares that host at all, `k8s/services/api-gateway/base/ingress.yaml` is its sole owner, and every write to `/books` now genuinely requires the JWT the gateway enforces (verified live — `POST /books` without a token returns `401`, confirming the old backend isn't answering that host anymore).
+1. The **frontend** (`client/`, React) is what users actually load, served as static assets by the old monolith's `frontend-service` — that part of `backend/`'s original deployment is still the real, live path.
+2. Every API call that frontend makes goes to the **microservices platform** — `catalog-service`, `user-service`, `order-service`, `notification-service`, all behind `api-gateway` — per [`docs/superpowers/specs/2026-07-29-microservices-observability-design.md`](superpowers/specs/2026-07-29-microservices-observability-design.md), [Plans 1-4](#related), and the frontend integration in [Plan 5](#related). The old monolith's `backend/` (Node/Express API) is still deployed but has **zero ingress routes** — nothing reaches it from outside the cluster anymore. The ingress host collision that used to make this ambiguous is resolved: `k8s/base/ingress/ingress.yaml` only routes `bookstore.<domain>` → `frontend-service`; `k8s/services/api-gateway/base/ingress.yaml` exclusively owns `api.bookstore.<domain>`.
 
-## Top-level system diagram (current, monolith serving traffic)
+## Top-level system diagram (current, real traffic split)
 
 ```
                                    Internet
@@ -18,21 +18,29 @@ A bookstore web app built as a learning/reference implementation of a production
                                       |
                     ┌─────────────────────────────────┐
                     │   CloudFront (optional, off by   │
-                    │   default) or direct to NLB      │
+                    │   default) or direct to Classic ELB │
                     └─────────────────────────────────┘
                                       |
-                              Nginx Ingress (NLB)
-                                      |
-                    ┌─────────────────┴─────────────────┐
-                    |                                     |
-              frontend Service                      backend Service
-              (React static, nginx)              (Node/Express, Argo Rollout canary)
-                                                          |
-                                                    RDS MySQL 8.0
-                                                    (Multi-AZ, us-west-1)
+                              Nginx Ingress Controller (Classic ELB)
+                          ┌───────────┴───────────┐
+                 host: bookstore.<domain>   host: api.bookstore.<domain>
+                          |                           |
+                  frontend Service              api-gateway Service
+              (React static, nginx)      (Node/Express, JWT verification)
+                                                       |
+                          ┌────────────┬──────────────┼──────────────┐
+                          |            |              |              |
+                  catalog-service  user-service  order-service  notification-service
+                          |            |              |              |
+                          └────────────┴──────┬───────┴──────────────┘
+                                               |
+                                        RDS MySQL 8.0
+                                        (Multi-AZ, us-west-1, per-service schemas)
+
+        backend Service (old Express API) — still running, zero ingress routes, unreachable
 ```
 
-Everything above lives in one EKS cluster (`bookstore-eks`, us-west-1), one `bookstore` namespace, deployed via ArgoCD from `k8s/overlays/prod`.
+Everything above lives in one EKS cluster (`bookstore-eks`, us-west-1), split across the `bookstore` namespace (old monolith) and 5 microservice namespaces (`catalog`, `user`, `order`, `notification`, `gateway`), deployed via ArgoCD from `k8s/overlays/prod` and `k8s/services/*/overlays/prod` respectively.
 
 ## Region layout
 
@@ -62,7 +70,7 @@ iam.tf / cloudtrail.tf / guardduty.tf (independent)         any Helm install)
 | `rds` | MySQL 8.0 `db.t3.micro`, Multi-AZ, Secrets Manager admin credentials, enhanced monitoring, optional cross-region backup replication | `network`, `security` |
 | `route53` | Private zone (RDS internal DNS) + public zone with active-passive failover records | `network`, `rds`, `eks` (needs ALB DNS) |
 | `ecr` | ECR repos for `frontend`, `backend`, plus any `extra_repos` (currently `catalog-service`, `user-service`, `order-service`, `notification-service`, `api-gateway`), 10-image lifecycle policy, optional cross-region replication | — |
-| `eks` | EKS 1.31 cluster, managed node group (`t3.medium`, min 1 / max 2 / desired 2), OIDC provider (enables IRSA), node launch template running node-exporter + Fluent Bit as systemd services | `network`, `security` |
+| `eks` | EKS 1.31 cluster, managed node group (`t3.medium`, min 1 / max 3 / desired 3 — bumped from 2 once all 5 microservices + api-gateway needed to schedule alongside the monolith and cluster-services, see TROUBLESHOOTING OBS-030), OIDC provider (enables IRSA), node launch template running node-exporter + Fluent Bit as systemd services | `network`, `security` |
 | `eks-addons` | Helm-installed cluster add-ons: cert-manager, External Secrets Operator, ingress-nginx, ArgoCD, Argo Rollouts, EBS CSI driver | `eks` |
 | `monitoring-ec2` | Standalone EC2 (`t3.small`) running Prometheus + Grafana + Loki + Alertmanager + kube-state-metrics via Docker Compose | `network`, `eks-addons` |
 
@@ -124,19 +132,23 @@ git push → GitHub Actions CI
 
 CI never runs `kubectl` directly — it only edits image tags in git, and ArgoCD does the actual apply. Full detail: [`CICD.md`](CICD.md).
 
-## The microservices platform (built, not yet live)
+## The microservices platform (live — every frontend API call goes through it)
 
-All 5 services are implemented and registered with ArgoCD:
+All 5 services are implemented, registered with ArgoCD, and live. **The frontend's every API call — `/books`, `/auth`, `/cart`, `/orders`, all of it — now goes through `api-gateway`, not the old backend.** This isn't partial: `client/`'s build-time `API_URL` (`REACT_APP_API_URL`, set via the `API_URL` GitHub secret) points at `api.bookstore.<domain>`, which `api-gateway`'s `Ingress` exclusively owns since the collision fix (Plan 5) — confirmed by inspecting the deployed JS bundle directly. The old monolith's `k8s/base/ingress/ingress.yaml` only routes `bookstore.<domain>` (path `/`) to `frontend-service` now; **`backend-service` has zero ingress paths anywhere in the cluster** — it's still deployed (the `backend` Rollout is still running, still gets image updates from CI) but is fully unreachable from outside the cluster and unreachable from the app that real users interact with.
 
 ```
-frontend (React)
-    |  HTTP (not yet pointed here — see below)
-api-gateway (Node/Express + http-proxy-middleware, JWT verification)   — done
-    ├── /books        → catalog-service        — done
-    ├── /auth,/users   → user-service           — done
-    ├── /orders        → order-service          — done
-    └── (internal)     → notification-service    — done, called by order-service
+frontend (React static assets, served by frontend-service via bookstore-ingress)
+    |  every API call, unconditionally
+api-gateway (Node/Express + http-proxy-middleware, JWT verification) — sole entry point
+    ├── /books         → catalog-service         (GET public; writes need a JWT)
+    ├── /auth, /users   → user-service            (login/register/profile)
+    ├── /orders, /cart   → order-service           (cart, checkout, order history)
+    └── (internal)        → notification-service    (called by order-service, not by the frontend directly)
+
+backend-service (old Express API) — still deployed, zero ingress routes, effectively orphaned
 ```
+
+What's left of "the cutover" (Plan 4 Task 9) is now purely cleanup — deleting `backend/`, `k8s/base/backend/`, and the other monolith-only manifests — not a routing change. Nothing user-facing depends on the old backend anymore.
 
 Each service: own ECR repo, own K8s namespace, own Deployment/Service/HPA/PDB, own schema inside the *same* shared RDS instance (schema-level isolation, not per-service RDS — that's an explicit non-goal for now), own `/metrics` endpoint labeled `service="<name>"`. Deployed via a single ArgoCD `ApplicationSet` (`k8s/argocd/applicationset-microservices.yaml`) with a list generator, now listing all 5 services.
 
@@ -149,8 +161,8 @@ Explicitly deferred (see the design spec's Non-goals): service mesh / mTLS, asyn
 ```
 VPC 170.20.0.0/16 (us-west-1)
 
-public[0]   170.20.1.0/24   us-west-1a   — IGW, NLB
-public[1]   170.20.2.0/24   us-west-1c   — IGW, NLB
+public[0]   170.20.1.0/24   us-west-1a   — IGW, Classic ELB
+public[1]   170.20.2.0/24   us-west-1c   — IGW, Classic ELB
 private[0]  170.20.3.0/24   us-west-1a   — EKS nodes
 private[1]  170.20.4.0/24   us-west-1c   — EKS nodes
 private[2]  170.20.5.0/24   us-west-1a   — EKS nodes
@@ -161,14 +173,21 @@ private[5]  170.20.8.0/24   us-west-1c   — RDS
 
 Single NAT gateway in `public[0]` — a deliberate cost tradeoff for a demo/reference project. Production would want one NAT per AZ.
 
-## Traffic flow (monolith, current production path)
+## Traffic flow (current, real split)
 
 ```
-Internet → Route53 → (CloudFront, optional) → Nginx Ingress NLB
+Static assets (HTML/JS/CSS):
+Internet → Route53 (bookstore.<domain>) → (CloudFront, optional) → Nginx Ingress Classic ELB
     → frontend Service (static React via nginx)
-    → backend Service (Argo Rollout, canary 10%→25%→50%→100%)
-    → RDS :3306
+
+Every API call the loaded frontend makes:
+Internet → Route53 (api.bookstore.<domain>) → (CloudFront, optional) → Nginx Ingress Classic ELB
+    → api-gateway Service (JWT verification on writes)
+    → catalog-service / user-service / order-service / notification-service
+    → RDS :3306 (per-service schema, shared instance)
 ```
+
+The old backend's Argo Rollout (canary 10%→25%→50%→100%) still exists and still deploys on every CI push to `main`/`observability` — it's just not in the request path for anything a real user does anymore, since it has no ingress route.
 
 ## Related docs
 
