@@ -7,6 +7,7 @@ const Checkout = () => {
   const [items, setItems] = useState([]);
   const [error, setError] = useState("");
   const [placing, setPlacing] = useState(false);
+  const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -15,8 +16,10 @@ const Checkout = () => {
         const [cartRes, booksRes] = await Promise.all([api.get("/cart"), api.get("/books")]);
         setItems(joinWithBooks(cartRes.data, booksRes.data));
       } catch (err) {
-        console.log(err);
+        console.log(err.message);
         setError("something went wrong, try again");
+      } finally {
+        setLoading(false);
       }
     };
     loadCart();
@@ -43,9 +46,12 @@ const Checkout = () => {
     }
   };
 
+  const showEmptyMessage = !loading && items.length === 0 && !error;
+
   return (
     <div>
       <h1>Checkout</h1>
+      {loading && <p>Loading your cart...</p>}
       {error && (
         <p className="error">
           {error}
@@ -55,6 +61,11 @@ const Checkout = () => {
               <Link to="/cart">Back to cart</Link>
             </>
           )}
+        </p>
+      )}
+      {showEmptyMessage && (
+        <p>
+          Your cart is empty. <Link to="/cart">Back to cart</Link>
         </p>
       )}
       <div className="books">
@@ -69,9 +80,11 @@ const Checkout = () => {
         ))}
       </div>
       {items.length > 0 && <h2>Total: ${total.toFixed(2)}</h2>}
-      <button className="addHome" onClick={handlePlaceOrder} disabled={placing || items.length === 0}>
-        {placing ? "Placing order..." : "Place Order"}
-      </button>
+      {!loading && (
+        <button className="addHome" onClick={handlePlaceOrder} disabled={placing || items.length === 0}>
+          {placing ? "Placing order..." : "Place Order"}
+        </button>
+      )}
     </div>
   );
 };

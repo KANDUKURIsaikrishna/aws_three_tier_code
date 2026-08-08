@@ -27,7 +27,7 @@ const Update = () => {
       await api.put(`/books/${bookId}`, book);
       navigate("/");
     } catch (err) {
-      console.log(err);
+      console.log(err.message);
       setError(true);
     }
   };

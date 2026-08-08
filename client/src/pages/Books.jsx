@@ -8,6 +8,7 @@ import { useAuth } from "../context/AuthContext";
 const Books = () => {
   const [books, setBooks] = useState([]);
   const [addedId, setAddedId] = useState(null);
+  const [error, setError] = useState("");
   const { isAuthenticated } = useAuth();
   const navigate = useNavigate();
 
@@ -17,18 +18,28 @@ const Books = () => {
         const res = await api.get("/books");
         setBooks(res.data);
       } catch (err) {
-        console.log(err);
+        console.log(err.message);
+        setError("something went wrong, try again");
       }
     };
     fetchAllBooks();
   }, []);
 
   const handleDelete = async (id) => {
+    // The gateway now requires a JWT for /books writes; a logged-out user
+    // clicking this would just get a 401 (and the interceptor bounces them
+    // to /login mid-action), so gate proactively instead -- same pattern as
+    // handleAddToCart below.
+    if (!isAuthenticated) {
+      navigate("/login");
+      return;
+    }
     try {
       await api.delete(`/books/${id}`);
       window.location.reload();
     } catch (err) {
-      console.log(err);
+      console.log(err.message);
+      setError("something went wrong, try again");
     }
   };
 
@@ -42,13 +53,15 @@ const Books = () => {
       setAddedId(id);
       setTimeout(() => setAddedId(null), 1500);
     } catch (err) {
-      console.log(err);
+      console.log(err.message);
+      setError("something went wrong, try again");
     }
   };
 
   return (
     <div>
       <h1>Mindcircuit book Store</h1>
+      {error && <p className="error">{error}</p>}
       <div className="books">
         {books.map((book) => (
           <div key={book.id} className="book">
@@ -59,23 +72,29 @@ const Books = () => {
             <button className="addToCart" onClick={() => handleAddToCart(book.id)}>
               {addedId === book.id ? "Added!" : "Add to Cart"}
             </button>
-            <button className="delete" onClick={() => handleDelete(book.id)}>
-              Delete
-            </button>
-            <button className="update">
-              <Link to={`/update/${book.id}`} style={{ color: "inherit", textDecoration: "none" }}>
-                Update
-              </Link>
-            </button>
+            {isAuthenticated && (
+              <>
+                <button className="delete" onClick={() => handleDelete(book.id)}>
+                  Delete
+                </button>
+                <button className="update">
+                  <Link to={`/update/${book.id}`} style={{ color: "inherit", textDecoration: "none" }}>
+                    Update
+                  </Link>
+                </button>
+              </>
+            )}
           </div>
         ))}
       </div>
 
-      <button className="addHome">
-        <Link to="/add" style={{ color: "inherit", textDecoration: "none" }}>
-          Add new book
-        </Link>
-      </button>
+      {isAuthenticated && (
+        <button className="addHome">
+          <Link to="/add" style={{ color: "inherit", textDecoration: "none" }}>
+            Add new book
+          </Link>
+        </button>
+      )}
     </div>
   );
 };

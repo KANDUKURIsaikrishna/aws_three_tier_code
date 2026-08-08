@@ -19,8 +19,22 @@ function App() {
           <Nav />
           <Routes>
             <Route path="/" element={<Books />} />
-            <Route path="/add" element={<Add />} />
-            <Route path="/update/:id" element={<Update />} />
+            <Route
+              path="/add"
+              element={
+                <ProtectedRoute>
+                  <Add />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/update/:id"
+              element={
+                <ProtectedRoute>
+                  <Update />
+                </ProtectedRoute>
+              }
+            />
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
             <Route

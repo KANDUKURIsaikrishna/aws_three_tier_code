@@ -12,7 +12,7 @@ const Orders = () => {
         const [ordersRes, booksRes] = await Promise.all([api.get("/orders"), api.get("/books")]);
         setOrders(joinWithBooks(ordersRes.data, booksRes.data));
       } catch (err) {
-        console.log(err);
+        console.log(err.message);
         setError("something went wrong, try again");
       }
     };

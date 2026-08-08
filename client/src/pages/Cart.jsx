@@ -23,7 +23,7 @@ const Cart = () => {
         Object.fromEntries(joined.map((item) => [item.book_id, String(item.quantity)]))
       );
     } catch (err) {
-      console.log(err);
+      console.log(err.message);
       setError("something went wrong, try again");
     }
   };
@@ -52,7 +52,7 @@ const Cart = () => {
       await api.post("/cart", { book_id: bookId, quantity });
       loadCart();
     } catch (err) {
-      console.log(err);
+      console.log(err.message);
       setError("something went wrong, try again");
     }
   };
@@ -62,7 +62,7 @@ const Cart = () => {
       await api.delete(`/cart/${bookId}`);
       loadCart();
     } catch (err) {
-      console.log(err);
+      console.log(err.message);
       setError("something went wrong, try again");
     }
   };
