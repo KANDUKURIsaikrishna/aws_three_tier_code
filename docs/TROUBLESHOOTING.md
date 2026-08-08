@@ -711,6 +711,66 @@ A rebase was safe here specifically because the diverging commits were purely lo
 
 **Status:** resolved for this session. **Systemic risk, not fixed:** any long local session on a branch this CI actively pushes to will hit this again. Worth remembering to `git fetch`/`git pull --rebase` before a push if it's been a while since the last one, especially right after telling the user to approve a deploy gate (that approval is exactly when CI's auto-commit lands).
 
+### OBS-036 — `terraform destroy` failed on `helm_release.external_secrets`: uninstall hung on a finalizer deadlock
+
+**Symptom:** a full `terraform destroy -auto-approve` got 106 resources in, then failed:
+```
+Error: uninstallation completed with 1 error(s): context deadline exceeded
+```
+after ~10.5 minutes stuck on `module.eks_addons.helm_release.external_secrets: Still destroying...`. `terraform state list` afterward still showed the EKS cluster, node group, VPC, and the `external_secrets` helm release itself — destroy had stopped partway through.
+
+**Root cause:** every `ExternalSecret` custom resource across `bookstore`/`catalog`/`order`/`user` namespaces carries an `externalsecrets.external-secrets.io/externalsecret-cleanup` finalizer, normally removed by the ESO controller on delete. Helm's uninstall tears down the ESO deployment (and, per its resource policy, keeps the CRDs) — but nothing guarantees the controller pods survive long enough to process every `ExternalSecret` delete first. Once the controller was gone, those objects sat forever with the finalizer still attached, which in turn kept their namespaces stuck in `Terminating` (`kubectl get ns` showed `bookstore`/`catalog`/`order`/`user` all `Terminating` with zero actual resources left in them) — and Helm's uninstall waits on exactly that.
+
+**Fix applied live:** for each stuck namespace, strip the finalizer directly so Kubernetes can finish deleting the (already-empty) object:
+```bash
+kubectl patch externalsecret <name> -n <ns> --type=json -p='[{"op":"remove","path":"/metadata/finalizers"}]'
+```
+All 4 namespaces cleared within seconds of patching. Re-running `terraform destroy -auto-approve` then completed the remaining 22 resources (EKS, VPC, IAM) with zero errors.
+
+**Status:** worked around live, not yet fixed in Terraform. A durable fix would be ordering the ESO helm release's destroy *after* something that force-deletes/finalizer-strips any remaining `ExternalSecret`/`ClusterSecretStore` objects — e.g. a `null_resource` destroy-time provisioner running the same `kubectl patch` loop, gated on `depends_on` so it always runs before the helm uninstall. Not yet implemented; this will recur on every future full destroy until it is.
+
+### OBS-037 — fresh-cluster ArgoCD sync failed on `ExternalSecret` PreSync hooks even with the OBS-030 ordering fix in place
+
+**Symptom:** immediately after a clean `terraform apply` on a brand-new cluster, 5 of 6 ArgoCD Applications (`bookstore`, `catalog-service`, `notification-service`, `order-service`, `user-service`) sat `OutOfSync`/`Healthy` (health "Healthy" here just meant "nothing deployed yet", not actually healthy) while `api-gateway` alone synced. `kubectl describe application catalog-service -n argocd` showed:
+```
+phase: Failed
+message: one or more synchronization tasks completed unsuccessfully (retried 5 times)
+hookPhase: Failed  (ExternalSecret admin-db-secret)
+message: could not get secret data from provider
+```
+and the `ExternalSecret` objects Argo *did* manage to create during the failed attempt were gone again afterward (`kubectl get externalsecrets -A` showed only 2 objects cluster-wide, not the expected 9+).
+
+**Root cause:** OBS-030's `ClusterSecretStore` PreSync/wave-(-2) hook fix is real and does make the store apply before any `ExternalSecret`, but it doesn't guarantee the **ESO controller pods themselves** are ready to serve requests by the time ArgoCD's PreSync hook executes — IRSA/OIDC trust and the AWS SDK client inside the ESO pod both take a few seconds to warm up after the pod goes `Running`. ArgoCD's hook retry budget (5 attempts, exponential backoff, capped ~3min total per the `retry.backoff.maxDuration` in the sync operation) was exhausted before ESO finished warming up, and the sync `Operation` moved to a terminal `Failed` phase — which ArgoCD does not automatically retry; it just waits for the next 3-minute auto-sync poll, which itself doesn't retry a `Failed` operation, only a genuinely `OutOfSync` one.
+
+**Fix applied live:** confirmed via `kubectl logs -n external-secrets -l app.kubernetes.io/name=external-secrets` that ESO was in fact healthy and successfully reconciling secrets by this point, then manually re-triggered each stuck Application:
+```bash
+kubectl patch application <name> -n argocd --type=merge \
+  -p '{"operation":{"sync":{"revision":"HEAD","prune":true},"initiatedBy":{"username":"manual"}}}'
+```
+All 5 synced successfully on the retry.
+
+**Status:** worked around live, not fixed durably. A real fix needs either an EKS-Auto-mode-style readiness gate before ArgoCD starts syncing anything dependent on ESO (e.g. a `PreSync` hook Job that polls the ESO deployment's `Available` condition before any `ExternalSecret` is applied), or a longer PreSync hook retry budget so the existing 3-minute auto-poll has a chance to succeed on its own without manual intervention. Related to, but distinct from, OBS-030 — that fix addressed *ordering*, this gap is about *readiness*.
+
+### OBS-038 — full destroy wipes all 7 ECR repos, so every pod ImagePullBackOff's immediately after apply until CI rebuilds
+
+**Symptom:** right after `terraform apply` finished cleanly and ArgoCD synced (see OBS-037), every single application pod across `bookstore`/`gateway`/`catalog`/`user`/`order`/`notification` came up `ImagePullBackOff`/`ErrImagePull`.
+
+**Root cause:** not a bug — `terraform destroy` genuinely deletes all 7 `aws_ecr_repository` resources along with everything else, so a fresh `terraform apply` recreates them empty. The Kubernetes manifests in git still reference whatever image tag was last deployed (e.g. `bookstore-api-gateway:1bf75186`), which no longer exists in the newly-empty repo. Nothing in `terraform apply` builds or pushes application images — that's entirely CI's job, and CI only runs on a `git push`.
+
+**Fix applied:** pushed an empty commit (`git commit --allow-empty`) to `observability` to trigger the pipeline, which built, scanned, and pushed fresh images for all 7 services and auto-committed the tag bump back to the k8s manifests (see OBS-035 for that auto-commit behavior). Once ArgoCD picked up the new revision (manually re-triggered per OBS-037 rather than waiting on the 3-minute poll), all pods came up `1/1 Running` within about 2 minutes of the images landing in ECR.
+
+**Status:** expected behavior, not a defect — documenting so a future full destroy/apply doesn't cause alarm when every pod is red immediately afterward. Worth remembering: **a full destroy/apply is not complete on its own** — it must be followed by a CI run (a real code push, or an empty commit like this one) before the cluster is actually serving traffic.
+
+### OBS-039 — after a full destroy/recreate, the domain is unreachable because the registrar still delegates to the old (destroyed) Route53 zone
+
+**Symptom:** after ArgoCD synced and every pod was `1/1 Running` (OBS-037, OBS-038 both resolved), `curl http://bookstore.<domain>/` and `curl http://api.bookstore.<domain>/books` both timed out — but `curl` straight to the ELB's DNS name with an explicit `Host:` header returned a correct `308` redirect for both hosts, proving the entire ingress → service → pod chain was actually healthy. `dig +short bookstore.<domain>` returned nothing at all, even against `8.8.8.8` (a public resolver, ruling out local network/SNI filtering — see the DNS/SNI issue documented earlier this session, which was a different, local-only problem).
+
+**Root cause:** `module.route53`'s **public** hosted zone is a real `aws_route53_zone` resource with no `prevent_destroy` (deliberately removed in commit `797a526` ahead of this exact test) — so a full `terraform destroy` deletes it, and `terraform apply` creates a brand-new zone with a **new zone ID and new NS records** every time. `whois <domain>` confirmed the registrar (nic.xyz) was still delegating to the *previous* zone's nameservers (`NS-1229.AWSDNS-25.ORG`, `NS-156.AWSDNS-19.COM`, `NS-1592.AWSDNS-07.CO.UK`, `NS-762.AWSDNS-31.NET`) — completely different from the new zone's actual NS records (`ns-1281.awsdns-32.org`, `ns-1662.awsdns-15.co.uk`, `ns-72.awsdns-09.com`, `ns-864.awsdns-44.net`, from this apply's `route53_public_name_servers` output). Nothing in Terraform or CI updates the registrar — domain registration lives entirely outside AWS.
+
+**Fix:** not something Terraform/AWS CLI can do — requires logging into the domain registrar and updating its NS delegation to the new zone's 4 nameservers (available as a Terraform output: `route53_public_name_servers`). Left for the user to do manually.
+
+**Status:** known, manual step required after every full destroy/recreate cycle. A durable fix isn't really possible without either (a) never destroying the public zone (give it `prevent_destroy` again, accepting that a full destroy leaves the zone behind as a real orphan cost), or (b) automating the registrar update via its API if the registrar supports one — nic.xyz/nowhere in this repo currently does. Worth calling out explicitly in `DEPLOYMENT.md`'s destroy/recreate instructions so it isn't a surprise next time.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
