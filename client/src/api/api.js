@@ -12,8 +12,17 @@ export function attachAuthHeader(config) {
   return config;
 }
 
+// A 401 from /auth/login or /auth/register means "wrong credentials" /
+// "bad input" -- an expected, user-facing error the calling page (Login.jsx,
+// via AuthContext's login()) needs to catch and display. Only a 401 from
+// every OTHER endpoint means "the stored session expired," which is what
+// should trigger the clear-and-redirect. Without this check, a failed login
+// attempt would bounce straight to /login before the page's own catch block
+// ever got to show "invalid email or password."
 export function handleAuthError(error) {
-  if (error.response && error.response.status === 401) {
+  const url = (error.config && error.config.url) || "";
+  const isAuthEndpoint = url.includes("/auth/login") || url.includes("/auth/register");
+  if (error.response && error.response.status === 401 && !isAuthEndpoint) {
     localStorage.removeItem("bookstore_token");
     localStorage.removeItem("bookstore_email");
     window.location.href = "/login";

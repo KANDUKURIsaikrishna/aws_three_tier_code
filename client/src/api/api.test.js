@@ -44,4 +44,20 @@ describe("handleAuthError", () => {
     expect(localStorage.getItem("bookstore_token")).toBe("abc123");
     expect(window.location.href).toBe("");
   });
+
+  test("does not clear stored auth or redirect on a 401 from /auth/login", async () => {
+    // A 401 here means "wrong credentials," an expected error the Login
+    // page's own catch block needs to display -- not a session expiry.
+    const error = { response: { status: 401 }, config: { url: "/auth/login" } };
+    await expect(handleAuthError(error)).rejects.toBe(error);
+    expect(localStorage.getItem("bookstore_token")).toBe("abc123");
+    expect(window.location.href).toBe("");
+  });
+
+  test("does not clear stored auth or redirect on a 401 from /auth/register", async () => {
+    const error = { response: { status: 401 }, config: { url: "/auth/register" } };
+    await expect(handleAuthError(error)).rejects.toBe(error);
+    expect(localStorage.getItem("bookstore_token")).toBe("abc123");
+    expect(window.location.href).toBe("");
+  });
 });
