@@ -1,8 +1,7 @@
-import axios from "axios";
 import React from "react";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import API_BASE_URL from "./config";
+import api from "../api/api";
 
 const Add = () => {
   const [book, setBook] = useState({
@@ -22,7 +21,7 @@ const Add = () => {
   const handleClick = async (e) => {
     e.preventDefault();
     try {
-      await axios.post(`${API_BASE_URL}/books`, book);
+      await api.post("/books", book);
       navigate("/");
     } catch (err) {
       console.log(err);
