@@ -1,17 +1,20 @@
 import React from "react";
 import { useEffect } from "react";
 import { useState } from "react";
-import axios from "axios";
-import { Link } from "react-router-dom";
-import API_BASE_URL from "./config";
+import { Link, useNavigate } from "react-router-dom";
+import api from "../api/api";
+import { useAuth } from "../context/AuthContext";
 
 const Books = () => {
   const [books, setBooks] = useState([]);
+  const [addedId, setAddedId] = useState(null);
+  const { isAuthenticated } = useAuth();
+  const navigate = useNavigate();
 
   useEffect(() => {
     const fetchAllBooks = async () => {
       try {
-        const res = await axios.get(`${API_BASE_URL}/books`);
+        const res = await api.get("/books");
         setBooks(res.data);
       } catch (err) {
         console.log(err);
@@ -20,12 +23,24 @@ const Books = () => {
     fetchAllBooks();
   }, []);
 
-  console.log(books);
-
   const handleDelete = async (id) => {
     try {
-      await axios.delete(`${API_BASE_URL}/books/${id}`);
-      window.location.reload()
+      await api.delete(`/books/${id}`);
+      window.location.reload();
+    } catch (err) {
+      console.log(err);
+    }
+  };
+
+  const handleAddToCart = async (id) => {
+    if (!isAuthenticated) {
+      navigate("/login");
+      return;
+    }
+    try {
+      await api.post("/cart", { book_id: id, quantity: 1 });
+      setAddedId(id);
+      setTimeout(() => setAddedId(null), 1500);
     } catch (err) {
       console.log(err);
     }
@@ -41,12 +56,14 @@ const Books = () => {
             <h2>{book.title}</h2>
             <p>{book.desc}</p>
             <span>${book.price}</span>
-            <button className="delete" onClick={() => handleDelete(book.id)}>Delete</button>
+            <button className="addToCart" onClick={() => handleAddToCart(book.id)}>
+              {addedId === book.id ? "Added!" : "Add to Cart"}
+            </button>
+            <button className="delete" onClick={() => handleDelete(book.id)}>
+              Delete
+            </button>
             <button className="update">
-              <Link
-                to={`/update/${book.id}`}
-                style={{ color: "inherit", textDecoration: "none" }}
-              >
+              <Link to={`/update/${book.id}`} style={{ color: "inherit", textDecoration: "none" }}>
                 Update
               </Link>
             </button>
