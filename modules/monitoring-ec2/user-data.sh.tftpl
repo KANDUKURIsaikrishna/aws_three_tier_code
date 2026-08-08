@@ -8,8 +8,22 @@ SECRET_NAME="${grafana_admin_secret_name}"
 NE_PORT="${ne_port}"
 
 # ── Install Docker + tools ────────────────────────────────────────────────────
+# docker-compose-plugin is NOT in Ubuntu's default apt repos (jammy) -- only
+# Docker's own repo has it. Installing it in the same apt-get line as
+# docker.io used to fail the whole command (apt-get aborts on any unknown
+# package name in the list), and with `set -e` that silently killed the rest
+# of this script before Prometheus/Grafana/Loki/Alertmanager ever got
+# configured or started. See TROUBLESHOOTING.md OBS-033.
 apt-get update -y
-apt-get install -y docker.io docker-compose-plugin awscli jq curl
+apt-get install -y ca-certificates curl gnupg jq awscli
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+ARCH=$(dpkg --print-architecture)
+CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+echo "deb [arch=$ARCH signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $CODENAME stable" > /etc/apt/sources.list.d/docker.list
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 systemctl enable docker
 systemctl start docker
 
@@ -34,11 +48,46 @@ echo "$GRAFANA_PASSWORD" > /run/grafana-pass
 chmod 600 /run/grafana-pass
 
 # ── kubeconfig for kube-state-metrics Docker container ───────────────────────
-mkdir -p /root/.kube
-aws eks update-kubeconfig \
-  --region "$REGION" \
-  --name "$CLUSTER_NAME" \
-  --kubeconfig /root/.kube/config
+# Written to /opt/monitoring/kube, NOT /root/.kube -- /root is 0700 on Ubuntu,
+# which blocks the container's non-root user from traversing into it at all,
+# regardless of the file's own permissions inside. Static bearer token, not
+# exec-based auth: the kube-state-metrics image has no `aws` CLI, so
+# `aws eks get-token`-based exec auth can never work from inside it. A cron
+# job refreshes the token before it expires (EKS tokens are short-lived).
+# See TROUBLESHOOTING.md OBS-033.
+mkdir -p /opt/monitoring/kube
+cat > /usr/local/bin/refresh-kube-token.sh << REFRESH_EOF
+#!/bin/bash
+set -euo pipefail
+REGION="$REGION"
+CLUSTER_NAME="$CLUSTER_NAME"
+ENDPOINT=\$(aws eks describe-cluster --region "\$REGION" --name "\$CLUSTER_NAME" --query cluster.endpoint --output text)
+CA=\$(aws eks describe-cluster --region "\$REGION" --name "\$CLUSTER_NAME" --query cluster.certificateAuthority.data --output text)
+TOKEN=\$(aws eks get-token --region "\$REGION" --cluster-name "\$CLUSTER_NAME" --output json | python3 -c "import json,sys; print(json.load(sys.stdin)['status']['token'])")
+cat > /opt/monitoring/kube/config << CONF_EOF
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: \$ENDPOINT
+    certificate-authority-data: \$CA
+  name: \$CLUSTER_NAME
+contexts:
+- context:
+    cluster: \$CLUSTER_NAME
+    user: \$CLUSTER_NAME
+  name: \$CLUSTER_NAME
+current-context: \$CLUSTER_NAME
+users:
+- name: \$CLUSTER_NAME
+  user:
+    token: \$TOKEN
+CONF_EOF
+chmod 644 /opt/monitoring/kube/config
+REFRESH_EOF
+chmod +x /usr/local/bin/refresh-kube-token.sh
+/usr/local/bin/refresh-kube-token.sh
+echo "*/10 * * * * root /usr/local/bin/refresh-kube-token.sh" > /etc/cron.d/kube-token-refresh
 
 # ── Node-discovery script (cron updates Prometheus file_sd targets) ───────────
 # Terraform substitutes ${region}, ${cluster_name}, ${ne_port} at apply time
@@ -302,8 +351,13 @@ services:
   kube-state-metrics:
     image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.13.0
     container_name: kube-state-metrics
+    # user: "0:0" -- the image's own /root (baked in, not affected by the
+    # host-side mount) is 0700, so the container's default non-root user
+    # can't traverse into /root/.kube regardless of the mounted file's own
+    # permissions. Running as root avoids fighting the image's own layout.
+    user: "0:0"
     volumes:
-      - /root/.kube:/root/.kube:ro
+      - /opt/monitoring/kube:/root/.kube:ro
     command:
       - '--kubeconfig=/root/.kube/config'
     restart: unless-stopped

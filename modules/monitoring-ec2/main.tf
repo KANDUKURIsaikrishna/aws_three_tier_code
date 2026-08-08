@@ -81,6 +81,23 @@ resource "aws_security_group_rule" "eks_scrape_node_exporter" {
   description              = "Prometheus on monitoring EC2 scrapes node-exporter systemd service"
 }
 
+# Allow the monitoring EC2's kube-state-metrics container to reach the EKS API
+# server. `var.eks_node_sg_id` is actually the cluster security group (see the
+# module.eks call site) -- without this, kube-state-metrics can resolve the
+# API server's private-endpoint IPs but every connection attempt times out at
+# the security-group layer, crash-looping forever. Confirmed missing on a
+# cluster that's been through several destroy/recreate cycles -- this had
+# apparently never worked. See TROUBLESHOOTING.md OBS-034.
+resource "aws_security_group_rule" "monitoring_scrape_eks_api" {
+  type                     = "ingress"
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.monitoring.id
+  security_group_id        = var.eks_node_sg_id
+  description              = "kube-state-metrics on monitoring EC2 reaches the EKS API server"
+}
+
 # ── EKS Access Entry (monitoring EC2 IAM role → read-only K8s API) ─────────────
 # Enables kube-state-metrics Docker container on EC2 to authenticate via kubeconfig
 

@@ -652,6 +652,26 @@ The old ReplicaSet's pod was stuck `ImagePullBackOff` (referencing a tag deleted
 
 **Status:** live cluster fixed and unblocked (not yet committed to git as of this entry — the file still needs the literal-IP problem actually solved, not just patched to a new literal). See `docs/FUTURE_IMPROVEMENTS.md` for the tracked gap.
 
+### OBS-033 — The monitoring EC2's entire Docker Compose stack never actually started: `docker-compose-plugin` isn't in Ubuntu's default apt repos
+
+**Symptom:** `make monitoring-status` returned `bash: docker: command not found`. `/var/log/monitoring-init.log` showed the script died at its very first real step:
+```
+E: Unable to locate package docker-compose-plugin
+```
+Nothing after that line in `user-data.sh.tftpl` ever ran — no kubectl install, no Prometheus/Grafana/Loki/Alertmanager config, no `docker compose up`. The monitoring stack had likely never been running on this project, on any prior cluster lifetime — this was simply the first time anyone actually SSHed in and checked (OBS-027 fixed SSH *access* but nobody had verified what was on the other end of it until now).
+
+**Root cause:** `docker-compose-plugin` is a Docker-official package, not shipped in Ubuntu jammy's default apt repos — only `download.docker.com`'s own repo has it. The script's original single `apt-get install -y docker.io docker-compose-plugin awscli jq curl` line failed entirely (apt-get aborts the whole command if any listed package can't be located), and `set -euo pipefail` at the top of the script meant that one failure killed everything downstream.
+
+**A second bug surfaced immediately after fixing the first:** adding Docker's official apt repo and installing `docker-ce`/`docker-ce-cli`/`containerd.io`/`docker-compose-plugin` properly works — but the ORIGINAL script also still listed Ubuntu's own `docker.io` package, which conflicts with `containerd.io` (Ubuntu's `docker.io` pulls in `containerd`, which conflicts with Docker Inc's `containerd.io`). Fixed by dropping `docker.io` entirely and installing only the Docker-official set.
+
+**A third bug, found once Compose actually started:** `kube-state-metrics` crash-looped with `permission denied` reading `/root/.kube/config`. `/root` itself is `0700` on Ubuntu — the container's non-root user can't traverse into it no matter what's mounted inside or that file's own permissions. Fixed by writing the kubeconfig to `/opt/monitoring/kube/config` instead and mounting `user: "0:0"` on that one container.
+
+**A fourth bug, found right after that:** with the permission issue fixed, `kube-state-metrics` failed with `exec: executable aws not found` — the image has no AWS CLI, so `aws eks update-kubeconfig`'s exec-based auth (`aws eks get-token`) can never work from inside this specific container, regardless of file permissions. Fixed by switching to a static bearer token instead: a `refresh-kube-token.sh` script (run once at boot, then via cron every 10 minutes, since EKS tokens are short-lived) calls `aws eks get-token` **on the host** (where the CLI does exist) and writes a plain `token:`-auth kubeconfig — no exec plugin needed inside the container at all. Same pattern already used for the Prometheus node-exporter target list (`update-prom-targets.sh`, refreshed every 5 min via cron) — this project already had the right pattern for "value that goes stale, refresh it on a timer," it just hadn't been applied here yet.
+
+**Fix applied:** all four fixed live via SSH on the running instance (`make monitoring-status`/`docker ps` confirmed all 5 containers `Up`, Grafana/Prometheus/Alertmanager all returning `200` externally), and all four fixed in `modules/monitoring-ec2/user-data.sh.tftpl` so a future fresh `terraform apply` doesn't need any of this manual surgery again.
+
+**Status:** fixed live and in git. Loki intentionally returns nothing when checked from outside the VPC — its security group scopes it to the VPC CIDR only (Fluent Bit push traffic), Grafana reaches it over the internal Docker network, this is by design, not a bug.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
