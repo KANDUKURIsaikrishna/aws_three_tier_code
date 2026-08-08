@@ -12,4 +12,4 @@ resources:
 images:
 - name: bookstore-catalog-service
   newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-catalog-service
-  newTag: 1bf75186
+  newTag: 66956dd8
