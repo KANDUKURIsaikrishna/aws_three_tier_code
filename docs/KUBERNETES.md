@@ -188,7 +188,7 @@ spec:
             backend: { service: { name: gateway-service, port: { number: 80 } } }
 ```
 
-**This collides with the old monolith's ingress.** `k8s/base/ingress/ingress.yaml` (still deployed, still ArgoCD-managed via `k8s/argocd/application.yaml`) declares `api.bookstore.<domain>` too, routing to `backend-service` in the `bookstore` namespace instead. Two Ingress objects, two namespaces, same host — until this is resolved (remove the old rule, or delete `k8s/base/ingress` as part of finishing the cutover), don't assume `api.bookstore.<domain>` traffic is actually reaching `api-gateway`. See [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) gap #12.
+**This used to collide with the old monolith's ingress; it no longer does.** `k8s/base/ingress/ingress.yaml` (still deployed, still ArgoCD-managed via `k8s/argocd/application.yaml`) used to declare `api.bookstore.<domain>` too, routing to `backend-service` in the `bookstore` namespace. That rule was removed as part of the frontend build ([Plan 5](superpowers/plans/2026-08-08-frontend-microservices-integration.md)) — `api-gateway`'s `Ingress` is now the sole owner of that host, verified live: `POST /books` without a JWT returns `401` from the gateway. `k8s/base/ingress/ingress.yaml` now only routes `bookstore.<domain>` (frontend static assets). See [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) gap #12.
 
 `api-gateway`'s own `network-policy.yaml` allows ingress from the ingress-nginx controller (it's the one service meant to receive external traffic) and egress to the other 4 services' namespaces plus RDS-adjacent DNS.
 
