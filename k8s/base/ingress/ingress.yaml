@@ -12,7 +12,6 @@ spec:
   tls:
     - hosts:
         - bookstore.b17facebook.xyz
-        - api.bookstore.b17facebook.xyz
       secretName: bookstore-tls
   rules:
     - host: bookstore.b17facebook.xyz
@@ -23,15 +22,5 @@ spec:
             backend:
               service:
                 name: frontend-service
-                port:
-                  number: 80
-    - host: api.bookstore.b17facebook.xyz
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: backend-service
                 port:
                   number: 80
