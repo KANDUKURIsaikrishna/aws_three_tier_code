@@ -1,17 +1,22 @@
 # Future Improvements
 
-What's next, in three buckets: finish what's in flight, fix known gaps, then the longer-term roadmap. Written from the actual current state of `observability` (2026-07-31) — not aspirational, and not a copy of the old `FUTURE.md` (which described a pre-EC2-monitoring, pre-microservices state that no longer matches this codebase).
+What's next, in three buckets: finish what's in flight, fix known gaps, then the longer-term roadmap. Written from the actual current state of `observability` (2026-08-05) — not aspirational, and not a copy of the old `FUTURE.md` (which described a pre-EC2-monitoring, pre-microservices state that no longer matches this codebase).
 
 ## In flight: the microservices platform
 
-`catalog-service` is done (Plan 1 of 5 — see [Plan 1](superpowers/plans/2026-07-30-catalog-service.md)). Four more plans remain, per the [design spec](superpowers/specs/2026-07-29-microservices-observability-design.md):
+All 5 plans are implemented and committed:
 
-1. **`user-service`** — auth/JWT, register/login, own `user_db` schema. Nothing to extract from — this is entirely net-new logic, no existing code to port.
-2. **`order-service` + `notification-service`** — place order/list orders, plus a best-effort (not queued) call to notification-service on order placement. Also entirely net-new.
-3. **`api-gateway`** — Node/Express + `http-proxy-middleware`, centralized JWT verification, path-routes to all four backend services. **This is also where public traffic actually cuts over** from the old `backend/` — the old monolith gets deleted in this same plan, not before, to avoid a parallel-run state.
-4. **Observability extension** — once all 5 services expose real `/metrics`, extend the EC2 Prometheus's scrape config (a `kubernetes_sd_configs` job or a cron-refreshed `file_sd_configs` target list, matching the existing node-exporter pattern) to cover the 5 new namespaces, plus per-service and cross-service Grafana dashboards with PromQL.
+1. **`catalog-service`** — done ([Plan 1](superpowers/plans/2026-07-30-catalog-service.md)).
+2. **`user-service`** — done ([Plan 2](superpowers/plans/2026-08-01-user-service.md)) — auth/JWT, register/login, own `user_db` schema.
+3. **`order-service` + `notification-service`** — done ([Plan 3](superpowers/plans/2026-08-01-order-notification-service.md)) — place order/list orders, plus a best-effort (not queued) call to notification-service on order placement.
+4. **`api-gateway`** — done ([Plan 4](superpowers/plans/2026-08-01-api-gateway.md)) — Node/Express + `http-proxy-middleware`, centralized JWT verification, path-routes to all four backend services, real public `Ingress` for `api.bookstore.<domain>`.
 
-Explicitly **not** in scope for this platform, by deliberate design-spec decision (see the spec's Non-goals): service mesh/mTLS, async messaging (SQS), per-service RDS instances, distributed tracing, NetworkPolicy hardening beyond default-deny. These are real gaps, not oversights — see "Longer term" below for where they'd fit if this platform keeps growing.
+**Still open — the actual cutover.** Plan 4's own final task (deleting `backend/` and its K8s manifests once api-gateway proves out) was **intentionally not executed** — it's the one irreversible step in the whole series, and it was paused rather than run blind. Concretely, two things are still true:
+- `backend/` and `k8s/base/` (the old monolith) are still on disk and still deployed via `k8s/argocd/application.yaml`.
+- `k8s/base/ingress/ingress.yaml` and `k8s/services/api-gateway/base/ingress.yaml` **both declare `api.bookstore.<domain>` as a host**, in different namespaces (`bookstore` vs `gateway`). Both Ingress objects would be live simultaneously if both apps are synced — undefined which one nginx actually routes to. This has to be resolved (delete the old rule, or delete `k8s/base/ingress` outright as part of finishing the cutover) before api-gateway can safely own that hostname. See [`ARCHITECTURE.md`](ARCHITECTURE.md#the-microservices-platform-built-not-yet-live).
+- **Observability extension** (per the design spec's step 4) hasn't happened either — the EC2 Prometheus's scrape config doesn't yet cover the 5 new namespaces, and there are no per-service/cross-service Grafana dashboards.
+
+Explicitly **not** in scope for this platform, by deliberate design-spec decision (see the spec's Non-goals): service mesh/mTLS, async messaging (SQS), per-service RDS instances, distributed tracing. These are real gaps, not oversights — see "Longer term" below for where they'd fit if this platform keeps growing.
 
 ## Known gaps that should get fixed properly
 
@@ -39,6 +44,10 @@ These aren't "nice to haves" — they're specific, already-identified problems w
 
 11. **ingress-nginx metrics are never actually scraped, so `backend`'s canary analysis (`error-rate` AnalysisTemplate) is a no-op that always passes.** See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) OBS-016 — the analysis query now points at the real EC2 Prometheus (was pointing at a dead in-cluster address before), but that Prometheus's scrape config (`modules/monitoring-ec2`'s templated `prometheus.yml`) only has jobs for itself, `kube-state-metrics`, and node-exporter — nothing scrapes ingress-nginx's own `/metrics` endpoint for `nginx_ingress_controller_requests`. The query's `or vector(0)`/`or vector(1)` fallbacks mean it silently returns "0% error rate" forever rather than erroring, so this is easy to miss — the canary analysis step always looks green, but isn't actually measuring anything. Real fix: add a scrape target for ingress-nginx's metrics service (same `file_sd_configs` pattern already used for node-exporter, or a static target if ingress-nginx's Service ClusterIP is stable enough) to the EC2 Prometheus's config.
 
+12. **`k8s/base/ingress/ingress.yaml` and `k8s/services/api-gateway/base/ingress.yaml` both claim the host `api.bookstore.<domain>`.** Found by inspecting both manifests directly, not yet hit live (the cluster was torn down before this was checked against a real ArgoCD sync). Two different namespaces (`bookstore` and `gateway`) each define an `Ingress` object with `host: api.bookstore.<domain>`, `path: /`, `pathType: Prefix` — nginx ingress controller behavior with two Ingress objects claiming the same host is undefined/order-dependent, not a clean split. This is the literal blocker on finishing the api-gateway cutover (Plan 4's final task): either delete `k8s/base/ingress/ingress.yaml`'s `api.bookstore.<domain>` rule, or delete `k8s/base/` entirely once api-gateway is proven out. Don't re-sync both ArgoCD apps against a live cluster without resolving this first.
+
+13. **`terraform destroy` doesn't clean up everything it created.** Confirmed via a real AWS-account audit after a full destroy cycle on 2026-08-05: EKS/EC2/RDS/NAT/ELB/EIPs/Secrets Manager/CloudFront/VPC endpoints all torn down cleanly, but (a) EBS volumes created dynamically by the EBS CSI driver for K8s `PersistentVolumeClaim`s are never in Terraform state, so they're orphaned as `available` (unattached) volumes after the cluster is gone — cost keeps accruing until deleted by hand; (b) ECR repos (`ecr` module) don't have `force_delete` set, so `terraform destroy` on a repo with images in it fails or leaves the repo+images behind depending on how it's invoked; (c) K8s-created security groups (e.g. `k8s-elb-...`, created by the in-tree cloud provider for LoadBalancer Services) aren't in Terraform state either and can block the VPC itself from being deleted if destroy runs before the LoadBalancer Service is cleaned up. None of these are large dollar amounts individually, but on a project that gets destroyed/recreated often during development (see TROUBLESHOOTING TF-015/TF-017), they add up silently. Worth a documented post-destroy checklist, or a `make destroy-verify` target that runs the same audit queries.
+
 ## Test coverage
 
 - `catalog-service`'s tests verify HTTP response shape but (as of the original implementation) didn't assert on what was actually passed to the DB query mock — a params-order regression (e.g. swapping `price`/`desc`) could have shipped silently. Fixed for catalog-service during code review (added `toHaveBeenCalledWith` assertions on POST/PUT), but **apply the same pattern to every future service's tests from the start**, not as a retrofit.
@@ -65,9 +74,13 @@ Once the 5-service platform is stable and the deferred items above are actually 
 - **GitHub OIDC over static AWS keys** — no long-lived credentials in GitHub Secrets anywhere in this pipeline. A misconfigured trust policy fails loudly at auth time; a leaked static key fails silently and much worse.
 - **Monitoring on EC2, not in-cluster** — not a preference, a resource-constraint decision (see TROUBLESHOOTING TF-006). Revisit only if the node group grows meaningfully past its current size, and even then, weigh the operational simplicity of "monitoring lives outside the thing it's monitoring" before moving back in-cluster.
 - **Microservices split is platform-first, not feature-first** — the design spec deliberately scoped this as "5 real services + observability" and explicitly deferred mesh/async/tracing/full-isolation rather than trying to build the complete distributed-systems stack in one pass. Don't accidentally scope-creep a future plan into rebuilding what was deliberately deferred.
+- **The old backend/monolith cutover was deliberately left as a separate, manual decision, not automated away.** All 5 microservices and api-gateway are done, but deleting `backend/`/`k8s/base/` was paused rather than run as part of the same session that built api-gateway — irreversible deletion of a still-referenced production path deserves its own explicit go-ahead, not a plan auto-completing through it.
 
 ## Related
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md), [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md), [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md)
 - [design spec](superpowers/specs/2026-07-29-microservices-observability-design.md) — the authoritative source for what's in/out of scope for the microservices platform
-- [Plan 1](superpowers/plans/2026-07-30-catalog-service.md) — catalog-service, the only plan executed so far
+- [Plan 1](superpowers/plans/2026-07-30-catalog-service.md) — catalog-service
+- [Plan 2](superpowers/plans/2026-08-01-user-service.md) — user-service
+- [Plan 3](superpowers/plans/2026-08-01-order-notification-service.md) — order-service + notification-service
+- [Plan 4](superpowers/plans/2026-08-01-api-gateway.md) — api-gateway (final cutover task paused)

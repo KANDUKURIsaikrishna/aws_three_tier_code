@@ -2,7 +2,7 @@
 
 A production-grade, cloud-native bookstore application deployed on AWS using a classic three-tier architecture. The infrastructure is fully codified in Terraform, containerised with Docker, orchestrated on Kubernetes (EKS), and protected by a DevSecOps CI/CD pipeline.
 
-> **Note:** this README describes the original monolith. As of the `observability` branch, a microservices split is in progress alongside it (`services/catalog-service/` is live; more planned) and monitoring has moved off-cluster onto a dedicated EC2 instance. The docs below reflect the actual current state — start there if anything here seems out of date.
+> **Note:** this README describes the original monolith. As of the `observability` branch, all 5 planned microservices (`catalog-service`, `user-service`, `order-service`, `notification-service`, `api-gateway`) are built and registered with ArgoCD — but the cutover from the old `backend/` hasn't happened yet (a real Ingress-host collision blocks it; see [`docs/FUTURE_IMPROVEMENTS.md`](docs/FUTURE_IMPROVEMENTS.md)), and monitoring has moved off-cluster onto a dedicated EC2 instance. The docs below reflect the actual current state — start there if anything here seems out of date.
 
 ## Documentation
 

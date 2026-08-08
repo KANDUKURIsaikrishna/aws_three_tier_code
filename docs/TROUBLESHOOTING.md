@@ -572,6 +572,48 @@ and cannot be overwritten because the tag is immutable.
 
 **Status:** not a bug to fix in code. Recorded here so a future partial `build-and-push` failure isn't mistaken for something `gh run rerun` should be able to fix — it can't, once any image in the same run has already landed under an immutable tag. Push a new commit instead.
 
+### OBS-029 — `terraform destroy` real-run findings: one orphaned pre-Terraform record, a false-alarm timeout, and confirmed post-destroy leftovers outside state
+
+**Symptom, run 1:** `terraform destroy` failed on the Route53 public zone with `HostedZoneNotEmpty`, even after `prevent_destroy` was removed (see OBS-018). `aws route53 list-resource-record-sets` on the zone showed one `CNAME` record that was never in Terraform state — created directly via the console before this project's Route53 was ever managed by Terraform, so `destroy` had no way to know about it or remove it.
+
+**Fix:** deleted the orphaned `CNAME` record directly via `aws route53 change-resource-record-sets` (one-off, not a code change — Terraform can't clean up what it never created). Re-running `terraform destroy` after that completed the zone deletion.
+
+**Symptom, run 1 continued:** a `helm_release` resource appeared to time out during the same destroy. Turned out to be a false alarm — the underlying Helm uninstall had actually completed; the resource was just slow to report state back to Terraform. No fix needed, just don't assume every destroy-time timeout is a real stuck resource — check the underlying AWS/K8s state before treating it as an incident.
+
+**Post-destroy audit (2026-08-05):** ran a full AWS-account sweep across `us-west-1`/`us-west-2` afterward specifically to confirm no leftover billable resources remained. EKS, EC2, RDS, NAT gateways, Classic ELB/NLB/ALB, Elastic IPs, Secrets Manager, CloudFront, and VPC endpoints were all confirmed clean. Three categories were **not** clean — see [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) gap #13 for the underlying cause and fix direction:
+- 10 orphaned EBS volumes (K8s CSI-driver-created `PersistentVolumeClaim` volumes, never in Terraform state)
+- 6 ECR repos in `us-west-2` still holding pushed images (no `force_delete` on the `ecr` module)
+- An empty but undeleted VPC (`MAIN-3-TIER-VPC`) with one orphaned `k8s-elb-...` security group left by the in-tree cloud provider — blocks the VPC itself from going away even though it has no subnets/IGW/instances left
+
+None of this blocked the destroy from completing; it's cost hygiene, not correctness. **Status:** found, not yet deleted — flagged to the user for confirmation before any manual cleanup, since none of it is Terraform-managed and deletion is one-way.
+
+### OBS-030 — On a genuinely fresh cluster, every `ExternalSecret` fails its first sync: `ClusterSecretStore` has no hook annotation, so it's always created *after* every `PreSync` hook, not before
+
+**Symptom**, hit re-applying from scratch after the OBS-029 destroy: `terraform apply` succeeded, but every ArgoCD Application (`bookstore` + all 5 microservices) failed to sync, retried 5 times, then gave up (`operationState.phase: Failed`). Every `ExternalSecret` across every namespace showed the identical error:
+```
+could not get secret data from provider
+```
+and the ESO controller's own logs were explicit:
+```
+could not get ClusterSecretStore "aws-secretsmanager", ClusterSecretStore.external-secrets.io "aws-secretsmanager" not found
+```
+Applying `k8s/base/secrets/external-secret.yaml` directly with `kubectl apply -f` worked instantly and every time — so the manifest itself was never wrong.
+
+**Root cause:** `k8s/base/secrets/external-secret.yaml`'s `db-secret` `ExternalSecret` (and every microservice's own `ExternalSecret`) is annotated `argocd.argoproj.io/hook: PreSync`, `sync-wave: "-1"` — this was done deliberately (OBS-013) so it's guaranteed to exist before the schema-init Jobs that need it. But the `ClusterSecretStore` it depends on, `aws-secretsmanager`, had **no hook annotation at all** — a plain resource, applied during ArgoCD's normal Sync phase. ArgoCD always runs every `PreSync` hook to completion *before* the Sync phase starts, for every application, on every sync — this isn't a race that sometimes loses, it's a guaranteed ordering violation every single time the store doesn't already exist from a previous run. It only ever "worked" before because the store was already sitting in the cluster from an earlier apply, never actually created by a from-scratch `PreSync`-first bootstrap until this destroy/recreate cycle exposed it. Once ArgoCD retries were exhausted, the failed operation's own hook cleanup also removed the just-created `ExternalSecret` between attempts, so even a lucky sync couldn't have shortcut the ordering problem.
+
+**Fix:** gave `ClusterSecretStore` its own `PreSync` hook annotation at an earlier wave than every `ExternalSecret` that depends on it (`sync-wave: "-2"`, vs. the existing `-1`), so ArgoCD now creates it strictly before any `ExternalSecret` tries to resolve against it, on every sync, not just ones where it happened to already exist:
+```yaml
+metadata:
+  name: aws-secretsmanager
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "-2"
+```
+
+**Immediate unblock used while diagnosing:** manually created the `ClusterSecretStore` via `kubectl apply -f k8s/base/secrets/external-secret.yaml`, then applied `k8s/overlays/prod` directly via `kubectl apply -k` to get the monolith live without waiting on ArgoCD's flaky hook-retry loop — ArgoCD's `selfHeal` reconciles cleanly against already-live resources on its next pass rather than fighting them. The microservice `Application`s recovered on their own once the store existed and a fresh sync was triggered (`kubectl -n argocd patch application <name> --type merge -p '{"operation":{"sync":{"syncStrategy":{"hook":{}}}}}'`).
+
+**Status:** fixed in `k8s/base/secrets/external-secret.yaml`, committed. Not yet proven on a second from-scratch destroy/apply cycle — the manual `kubectl apply` workaround above got this specific cluster unblocked before the git fix was pushed and picked up by ArgoCD's poll.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)

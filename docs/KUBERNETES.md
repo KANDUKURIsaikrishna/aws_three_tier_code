@@ -15,12 +15,24 @@ k8s/
     applicationset-microservices.yaml  ← manages k8s/services/*/overlays/prod
 
   services/
-    catalog-service/
-      base/                 ← NEW microservice, namespace "catalog"
+    catalog-service/        ← namespace "catalog"
+      base/
+      overlays/prod/
+    user-service/           ← namespace "user"
+      base/
+      overlays/prod/
+    order-service/          ← namespace "order"
+      base/
+      overlays/prod/
+    notification-service/   ← namespace "notification"
+      base/
+      overlays/prod/
+    api-gateway/             ← namespace "gateway"
+      base/
       overlays/prod/
 ```
 
-These are deliberately separate. `catalog-service` is not folded into `k8s/base` because it's a different namespace, different lifecycle, different ArgoCD-managed object — mixing them would make the eventual old-backend removal (Plan 4 of the microservices work) much messier than swapping one `targetRevision`/one `Application`.
+These are deliberately separate. Each microservice is not folded into `k8s/base` because it's a different namespace, different lifecycle, different ArgoCD-managed object — mixing them would make the old-backend removal (the still-paused final task of the api-gateway plan) much messier than swapping one `targetRevision`/one `Application`. All 5 service directories now exist and follow the same layout; `catalog-service` below is the reference example, with per-service differences called out where they matter (`api-gateway` in particular has no DB schema and owns the public `Ingress`).
 
 ## `k8s/base/` — the monolith
 
@@ -94,6 +106,14 @@ generators:
       elements:
         - service: catalog-service
           namespace: catalog
+        - service: user-service
+          namespace: user
+        - service: notification-service
+          namespace: notification
+        - service: order-service
+          namespace: order
+        - service: api-gateway
+          namespace: gateway
 template:
   spec:
     source:
@@ -102,7 +122,7 @@ template:
       namespace: '{{namespace}}'
 ```
 
-Adding `user-service`, `order-service`, etc. later is a one-line addition to `elements` — no new YAML file. **`targetRevision` is currently pinned to `observability`**, not `main`, since this whole platform is being built on that branch — there's a comment in the file as a reminder to switch it once the work merges, but nothing enforces that automatically. Don't assume it self-corrects.
+All 5 services are now in `elements` — adding a 6th later is still just a one-line addition, no new YAML file. **`targetRevision` is currently pinned to `observability`**, not `main`, since this whole platform is being built on that branch — there's a comment in the file as a reminder to switch it once the work merges, but nothing enforces that automatically. Don't assume it self-corrects.
 
 **Both are Terraform-managed, not manual `kubectl apply`.** ArgoCD itself is installed via `helm_release` in `modules/eks-addons/gitops.tf`, and `argocd.tf` (root) applies both YAML files as-is via `kubectl_manifest` (the `gavinbunney/kubectl` provider, not `hashicorp/kubernetes`'s `kubernetes_manifest` — the latter needs the target CRD to already exist at `plan` time, which breaks on a fresh cluster where the `Application`/`ApplicationSet` CRDs are installed by the same apply's `argocd` Helm release; `kubectl_manifest` defers validation to apply time instead):
 
@@ -117,7 +137,7 @@ The YAML files in `k8s/argocd/` stay the single source of truth — Terraform re
 
 ## `k8s/services/catalog-service/`
 
-The first (and so far only) built microservice.
+The reference microservice — `user-service`, `order-service`, and `notification-service` follow the identical layout below (own namespace, own schema, own `ExternalSecret`/`admin-db-secret`, own `schema-init-job.yaml` PreSync hook). `api-gateway` is the one structural exception — see [`k8s/services/api-gateway/`](#k8sservicesapi-gateway) below.
 
 ```
 base/
@@ -136,14 +156,41 @@ overlays/prod/
   kustomization.yaml                    — image tag placeholder, same pattern as the monolith's prod overlay
 ```
 
-### Why the NetworkPolicy allows all ingress
+### NetworkPolicy — now scoped to the gateway namespace
+
+The original interim state (`ingress: - {}`, allow-all, because there was no `api-gateway` namespace yet to scope to) is gone. Now that `api-gateway` exists, `catalog-service`/`user-service`/`order-service`'s `network-policy.yaml` restricts ingress to pods in the `gateway` namespace (commit `153bed2`):
 
 ```yaml
 ingress:
-  - {} # tightened in Plan 4 once api-gateway exists and owns ingress
+  - from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: gateway
 ```
 
-There's no `api-gateway` namespace yet to scope traffic to, and no public Ingress object routes to `catalog-service` at all right now (it's only reachable via `kubectl port-forward` for verification). The egress rule right next to it *is* properly scoped (RDS CIDR + DNS only, nothing else) — the permissive ingress is a deliberate, documented interim state tied to a specific future plan, not an oversight. Don't "fix" it without also building the api-gateway plan it's waiting on.
+The egress rule stays scoped to RDS CIDR + DNS only, unchanged from before. There is still no public Ingress routing directly to these services — they're reachable only via `api-gateway`'s proxy or `kubectl port-forward` for local verification.
+
+## `k8s/services/api-gateway/`
+
+Structurally different from the other 4 services: no DB schema, no `schema-init-job.yaml`, no `admin-db-secret.yaml`. Its `base/` adds `ingress.yaml` — the one microservice with a real public `Ingress`:
+
+```yaml
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [api.bookstore.<domain>]
+      secretName: gateway-tls
+  rules:
+    - host: api.bookstore.<domain>
+      http:
+        paths:
+          - path: /
+            backend: { service: { name: gateway-service, port: { number: 80 } } }
+```
+
+**This collides with the old monolith's ingress.** `k8s/base/ingress/ingress.yaml` (still deployed, still ArgoCD-managed via `k8s/argocd/application.yaml`) declares `api.bookstore.<domain>` too, routing to `backend-service` in the `bookstore` namespace instead. Two Ingress objects, two namespaces, same host — until this is resolved (remove the old rule, or delete `k8s/base/ingress` as part of finishing the cutover), don't assume `api.bookstore.<domain>` traffic is actually reaching `api-gateway`. See [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) gap #12.
+
+`api-gateway`'s own `network-policy.yaml` allows ingress from the ingress-nginx controller (it's the one service meant to receive external traffic) and egress to the other 4 services' namespaces plus RDS-adjacent DNS.
 
 ### The schema-init Job — an ArgoCD PreSync hook, not a manual one-off
 

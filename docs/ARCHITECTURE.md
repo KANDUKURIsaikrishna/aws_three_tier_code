@@ -6,8 +6,8 @@ Current state of the `observability` branch. This describes what the code actual
 
 A bookstore web app built as a learning/reference implementation of a production-grade AWS three-tier architecture, now mid-migration to a microservices split. Two things are true at once right now:
 
-1. The **original monolith** (`client/` React frontend + `backend/` Node/Express API + RDS MySQL) is the thing that has actually been deployed and tested end-to-end.
-2. A **microservices platform** is being built alongside it (`services/catalog-service/` is done; `user-service`, `order-service`, `notification-service`, `api-gateway` are planned) per [`docs/superpowers/specs/2026-07-29-microservices-observability-design.md`](superpowers/specs/2026-07-29-microservices-observability-design.md). Traffic has **not** cut over yet — the old backend still owns production traffic until the api-gateway plan lands.
+1. The **original monolith** (`client/` React frontend + `backend/` Node/Express API + RDS MySQL) is the thing that has actually been deployed and tested end-to-end, and still owns production traffic.
+2. The **microservices platform** is now fully built: all 5 services (`catalog-service`, `user-service`, `order-service`, `notification-service`, `api-gateway`) are implemented, tested, and registered with ArgoCD, per [`docs/superpowers/specs/2026-07-29-microservices-observability-design.md`](superpowers/specs/2026-07-29-microservices-observability-design.md) and [Plans 1-4](#related). Traffic has **still not cut over** — `backend/` and `k8s/base/` were never deleted (the api-gateway plan's own cutover task was intentionally paused before that irreversible step), and `k8s/base/ingress/ingress.yaml` and `k8s/services/api-gateway/base/ingress.yaml` currently both declare the same host (`api.bookstore.<domain>`) in different namespaces — a real Ingress collision that has to be resolved (delete the old rule, or delete `k8s/base/ingress` entirely) before api-gateway can safely take over that hostname.
 
 ## Top-level system diagram (current, monolith serving traffic)
 
@@ -61,7 +61,7 @@ iam.tf / cloudtrail.tf / guardduty.tf (independent)         any Helm install)
 | `acm` | Wildcard ACM cert (DNS validation) for the ingress domain | — |
 | `rds` | MySQL 8.0 `db.t3.micro`, Multi-AZ, Secrets Manager admin credentials, enhanced monitoring, optional cross-region backup replication | `network`, `security` |
 | `route53` | Private zone (RDS internal DNS) + public zone with active-passive failover records | `network`, `rds`, `eks` (needs ALB DNS) |
-| `ecr` | ECR repos for `frontend`, `backend`, plus any `extra_repos` (currently `catalog-service`), 10-image lifecycle policy, optional cross-region replication | — |
+| `ecr` | ECR repos for `frontend`, `backend`, plus any `extra_repos` (currently `catalog-service`, `user-service`, `order-service`, `notification-service`, `api-gateway`), 10-image lifecycle policy, optional cross-region replication | — |
 | `eks` | EKS 1.31 cluster, managed node group (`t3.medium`, min 1 / max 2 / desired 2), OIDC provider (enables IRSA), node launch template running node-exporter + Fluent Bit as systemd services | `network`, `security` |
 | `eks-addons` | Helm-installed cluster add-ons: cert-manager, External Secrets Operator, ingress-nginx, ArgoCD, Argo Rollouts, EBS CSI driver | `eks` |
 | `monitoring-ec2` | Standalone EC2 (`t3.small`) running Prometheus + Grafana + Loki + Alertmanager + kube-state-metrics via Docker Compose | `network`, `eks-addons` |
@@ -124,23 +124,25 @@ git push → GitHub Actions CI
 
 CI never runs `kubectl` directly — it only edits image tags in git, and ArgoCD does the actual apply. Full detail: [`CICD.md`](CICD.md).
 
-## The microservices platform (in progress)
+## The microservices platform (built, not yet live)
 
-Per the design spec, the target shape once fully built:
+All 5 services are implemented and registered with ArgoCD:
 
 ```
 frontend (React)
-    |  HTTP
-api-gateway (Node/Express + http-proxy-middleware, JWT verification)
-    ├── /books        → catalog-service    (done — this branch)
-    ├── /auth,/users   → user-service       (planned)
-    ├── /orders        → order-service      (planned)
-    └── (internal)     → notification-service (planned, called by order-service)
+    |  HTTP (not yet pointed here — see below)
+api-gateway (Node/Express + http-proxy-middleware, JWT verification)   — done
+    ├── /books        → catalog-service        — done
+    ├── /auth,/users   → user-service           — done
+    ├── /orders        → order-service          — done
+    └── (internal)     → notification-service    — done, called by order-service
 ```
 
-Each service: own ECR repo, own K8s namespace, own Deployment/Service/HPA/PDB, own schema inside the *same* shared RDS instance (schema-level isolation, not per-service RDS — that's an explicit non-goal for now), own `/metrics` endpoint labeled `service="<name>"`. Deployed via a single ArgoCD `ApplicationSet` (`k8s/argocd/applicationset-microservices.yaml`) with a list generator — each new service is one more entry, not a new Application manifest.
+Each service: own ECR repo, own K8s namespace, own Deployment/Service/HPA/PDB, own schema inside the *same* shared RDS instance (schema-level isolation, not per-service RDS — that's an explicit non-goal for now), own `/metrics` endpoint labeled `service="<name>"`. Deployed via a single ArgoCD `ApplicationSet` (`k8s/argocd/applicationset-microservices.yaml`) with a list generator, now listing all 5 services.
 
-Explicitly deferred (see the design spec's Non-goals): service mesh / mTLS, async messaging (SQS), per-service RDS instances, distributed tracing, NetworkPolicy hardening beyond a basic default-deny. `catalog-service`'s `NetworkPolicy` currently allows all ingress on purpose — there's no `api-gateway` namespace yet to scope it to.
+`catalog-service`/`user-service`/`order-service`'s `NetworkPolicy`s were tightened once `api-gateway` existed — ingress is now scoped to the `gateway` namespace instead of allowing all traffic (see commit `153bed2`). `api-gateway` itself has a real public `Ingress` (`k8s/services/api-gateway/base/ingress.yaml`) for `api.bookstore.<domain>` — but the **old monolith's `k8s/base/ingress/ingress.yaml` still declares the same host**, so both Ingress objects are live in the cluster at once. This is the one remaining blocker before traffic can actually cut over; see the note above.
+
+Explicitly deferred (see the design spec's Non-goals): service mesh / mTLS, async messaging (SQS), per-service RDS instances, distributed tracing, NetworkPolicy hardening beyond what's described above.
 
 ## Subnet layout
 
@@ -178,3 +180,6 @@ Internet → Route53 → (CloudFront, optional) → Nginx Ingress NLB
 - [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) — what's next
 - [design spec](superpowers/specs/2026-07-29-microservices-observability-design.md) — the microservices platform design
 - [Plan 1](superpowers/plans/2026-07-30-catalog-service.md) — catalog-service implementation plan (done)
+- [Plan 2](superpowers/plans/2026-08-01-user-service.md) — user-service implementation plan (done)
+- [Plan 3](superpowers/plans/2026-08-01-order-notification-service.md) — order-service + notification-service implementation plan (done)
+- [Plan 4](superpowers/plans/2026-08-01-api-gateway.md) — api-gateway implementation plan (done; final cutover/backend-deletion task paused, not executed)

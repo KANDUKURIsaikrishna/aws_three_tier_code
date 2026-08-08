@@ -68,21 +68,33 @@ kubectl get externalsecret db-secret -n bookstore
 # STATUS column should show SecretSynced, not an error
 ```
 
-## Step 6 — Watch both apps come up
+## Step 6 — Watch all apps come up
 
-Both `k8s/argocd/application.yaml` (the old monolith) and `k8s/argocd/applicationset-microservices.yaml` (catalog-service) were already applied by Terraform in Step 3 — nothing to `kubectl apply` here. Just watch ArgoCD reconcile, within 3 minutes of the apply finishing:
+Both `k8s/argocd/application.yaml` (the old monolith) and `k8s/argocd/applicationset-microservices.yaml` (all 5 microservices: catalog, user, order, notification, api-gateway) were already applied by Terraform in Step 3 — nothing to `kubectl apply` here. Just watch ArgoCD reconcile, within 3 minutes of the apply finishing:
 
 ```bash
 kubectl get applications -n argocd
+kubectl get applicationsets -n argocd
 kubectl get pods -n bookstore
 kubectl get pods -n catalog
+kubectl get pods -n user
+kubectl get pods -n order
+kubectl get pods -n notification
+kubectl get pods -n gateway
 ```
 
-For catalog-service, ArgoCD's sync also runs the `catalog-schema-init` PreSync hook Job automatically (creates the `catalog_db` schema, migrates `books` rows, creates `catalog_user`) — no manual secret-copying, no manual Job apply. It reads its own admin credentials from the `admin-db-secret` ExternalSecret, which pulls the same `/bookstore/db-credentials` entry the old monolith already uses, materialized into the `catalog` namespace by ESO. Watch it if you want to confirm it ran cleanly:
+For catalog-service/user-service/order-service/notification-service, ArgoCD's sync also runs each service's own `<service>-schema-init` PreSync hook Job automatically (creates its schema, creates its own DB user) — no manual secret-copying, no manual Job apply. Each reads its own admin credentials from an `admin-db-secret` ExternalSecret, which pulls the same `/bookstore/db-credentials` entry the old monolith already uses, materialized into that service's namespace by ESO. `api-gateway` has no schema-init Job — it's stateless. Watch any service's hook if you want to confirm it ran cleanly:
 
 ```bash
 kubectl get jobs -n catalog
 kubectl logs job/catalog-schema-init -n catalog   # only exists briefly — hook-delete-policy removes it after success
+```
+
+**Before relying on `api.bookstore.<domain>` reaching `api-gateway`:** `k8s/base/ingress/ingress.yaml` (old monolith, still deployed) and `k8s/services/api-gateway/base/ingress.yaml` (new) both declare that exact host in different namespaces — see [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) gap #12. Resolve that collision before treating api-gateway as the live path for that hostname; until then, verify it directly instead:
+
+```bash
+kubectl port-forward -n gateway svc/gateway-service 8082:80
+curl -s http://localhost:8082/health
 ```
 
 If images haven't been built/pushed by CI yet (first-ever deploy, before any CI run has landed on `main`), pods will sit in `ImagePullBackOff` until real images exist in ECR — either wait for CI, or push once by hand:
