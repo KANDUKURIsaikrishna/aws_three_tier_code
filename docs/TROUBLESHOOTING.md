@@ -614,6 +614,44 @@ metadata:
 
 **Status:** fixed in `k8s/base/secrets/external-secret.yaml`, committed. Not yet proven on a second from-scratch destroy/apply cycle — the manual `kubectl apply` workaround above got this specific cluster unblocked before the git fix was pushed and picked up by ArgoCD's poll.
 
+### OBS-031 — Real production downtime: a `terraform apply` for an unrelated node-count bump deleted the live ingress-nginx `LoadBalancer` Service
+
+**Symptom:** ran `terraform apply` purely to bump `node_desired_size`/`node_max_size` from 2 to 3 (see OBS-030's node-capacity trigger). The plan showed 2 unrelated null_resources being replaced — `null_resource.wait_for_alb_hostname` (expected every apply, see its own comment) and, unexpectedly, `module.eks_addons.null_resource.delete_ingress_nginx_lb`. That second resource's **only** provisioner is `when = destroy` — meant purely for `terraform destroy`-time cleanup (releasing the NLB before VPC teardown, TF-017) — but replacement (destroy-then-create of the null_resource itself) is enough to fire a `when = destroy` provisioner too. It ran for real:
+```
+kubectl delete svc ingress-nginx-controller -n ingress-nginx --wait --timeout=120s --ignore-not-found
+```
+against the live cluster, deleting the actual production ingress LoadBalancer. The site was unreachable externally until recovered.
+
+**Root cause, only partially pinned down:** `delete_ingress_nginx_lb`'s `triggers` (`cluster_name`, `region`) are static values (`var.cluster_name`/`data.aws_region.current.name`) that shouldn't change between applies, and `aws_eks_cluster.this.name` (the source of `cluster_name`) has no dependency on the node group being resized — so the specific mechanism that caused Terraform to decide this resource needed replacing on *that* apply is still unconfirmed. A follow-up `terraform plan -replace=...` for an unrelated fix (recreating the ingress-nginx Helm release) did **not** show `delete_ingress_nginx_lb` as needing replacement, so whatever caused it appears to have been tied to that specific apply, not a guaranteed every-time repro. Needs closer investigation before the next node-group or eks-module change — **always read the full plan output for any `null_resource` in `modules/eks-addons/` before applying**, not just the resource you meant to change.
+
+**Recovery:**
+```bash
+terraform plan -replace="module.eks_addons.helm_release.ingress_nginx" -out=fix-ingress.tfplan
+# verify delete_ingress_nginx_lb does NOT appear in the plan before applying
+terraform apply "fix-ingress.tfplan"
+```
+Reinstalls the ingress-nginx chart → new Service → new NLB → `wait_for_alb_hostname` (tainted from the earlier failed apply, always replaces anyway) picks up the new hostname → `api`/`frontend`/`primary` Route53 alias records update automatically via `data.kubernetes_service.ingress_nginx`.
+
+**Status:** recovered. Root cause of why `delete_ingress_nginx_lb` replaced on the node-scaling apply specifically is not fully explained — treat any `terraform plan` touching `modules/eks-addons` or `module.eks` as a reason to scan the full resource list for this null_resource before applying, until this is properly root-caused.
+
+### OBS-032 — Every canary rollout aborts after a destroy/recreate: the Argo Rollouts `AnalysisTemplate` hardcodes the monitoring EC2's Elastic IP as a literal
+
+**Symptom:** after OBS-031's recovery, the `backend` Rollout's canary (revision 2, the freshly-pushed `9228e980` image) aborted:
+```
+Rollout aborted update to revision 2: Background analysis phase error/failed: Metric "error-rate" assessed
+Error due to consecutiveErrors (5) > consecutiveErrorLimit (4): "Error Message: Post
+\"http://13.57.1.221:9090/api/v1/query\": dial tcp 13.57.1.221:9090: i/o timeout"
+```
+The old ReplicaSet's pod was stuck `ImagePullBackOff` (referencing a tag deleted along with the destroyed ECR repos), and the Rollout stayed `Degraded`.
+
+**Root cause:** `k8s/base/monitoring/analysis-template.yaml`'s `provider.prometheus.address` is a hardcoded literal IP (`http://13.57.1.221:9090`) — the monitoring EC2's `aws_eip.monitoring` **at the time this file was last edited**. A full `terraform destroy` tears down the `aws_eip` resource itself (not just the instance — OBS-027 established the EIP survives an *instance* replacement, but that's different from the whole resource being destroyed), so the very next `apply` allocates a **brand-new** Elastic IP address (`18.144.141.146` this cycle). Nothing re-templates this manifest from the new `terraform output prometheus_url` — it silently goes stale, and every canary analysis after a destroy/recreate fails with a connection timeout until someone notices and hand-edits the IP.
+
+**Fix applied this cycle:** updated the literal to `http://18.144.141.146:9090`, applied directly (`kubectl apply -f`), then forced the Rollout to attempt a fresh revision (`kubectl patch rollout backend -n bookstore --type merge -p '{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"<timestamp>"}}}}}'` — a template annotation bump, since `restartAt` alone only restarts existing pods in place and doesn't create a new revision, so it doesn't re-run analysis against a fixed target).
+
+**Real fix, not yet done:** this manifest should read the monitoring EC2's IP dynamically instead of a checked-in literal — e.g., templated via `kustomize` from a `ConfigMap` populated by Terraform (matching the pattern other services already use for config), or the schema-init-job pattern of reading from an `ExternalSecret`. Whatever the mechanism, "hardcoded literal IP in a git-committed K8s manifest, sourced from a resource that gets a new value on every full recreate" is exactly the same class of bug as the Route53/ECR/EBS orphan findings in OBS-029 — anything that assumes AWS resource identity is stable across a destroy/recreate cycle on this project will eventually be wrong.
+
+**Status:** live cluster fixed and unblocked (not yet committed to git as of this entry — the file still needs the literal-IP problem actually solved, not just patched to a new literal). See `docs/FUTURE_IMPROVEMENTS.md` for the tracked gap.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)

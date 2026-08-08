@@ -30,7 +30,15 @@ spec:
         # scraped by the EC2 Prometheus (not wired up yet — see
         # FUTURE_IMPROVEMENTS.md's observability-extension item) — this
         # unblocks the Rollout, it doesn't yet make the analysis meaningful.
-        address: http://13.57.1.221:9090
+        #
+        # This IP is the monitoring EC2's Elastic IP (aws_eip.monitoring) and
+        # is a HARDCODED LITERAL, not templated from `terraform output
+        # prometheus_url` — a full destroy/recreate allocates a brand-new EIP
+        # every time, silently staling this address and aborting every
+        # canary rollout with dial-timeout analysis errors until someone
+        # manually updates it. See TROUBLESHOOTING.md OBS-031. Verify this
+        # matches `terraform output prometheus_url` before trusting a canary.
+        address: http://18.144.141.146:9090
         query: |
           (
             sum(rate(nginx_ingress_controller_requests{status=~"5..",ingress="{{args.ingress-name}}"}[2m]))
