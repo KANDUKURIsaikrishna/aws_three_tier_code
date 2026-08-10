@@ -836,6 +836,24 @@ App pods' own `prom-client` `/metrics` endpoints were real but never scraped (se
 
 **Status:** fixed live and in git. Verified via `up{job="app-metrics"}` returning 7 targets (all 6 app services + cert-manager) all `1`, and `process_cpu_user_seconds_total{job="app-metrics"}` returning real per-pod data.
 
+### OBS-046 — deleted the old backend monolith entirely (not an incident — the deferred cutover finally executed)
+
+Confirmed live before touching anything: `backend-service` had zero ingress routes (only `bookstore.<domain>` → `frontend-service` exists in `k8s/base/ingress/ingress.yaml`), and a grep of `client/src` turned up zero references to `backend-service` anywhere — the new frontend calls only `api-gateway`. So the `backend` Rollout was running, consuming a pod slot and DB connections, for genuinely nothing reaching it. This was the deliberately-paused final task from Plan 4 (see `docs/FUTURE_IMPROVEMENTS.md`'s "lessons learned" — irreversible deletion of a once-production path was left for its own explicit go-ahead, not automated through).
+
+**What got deleted**, in full:
+- `k8s/base/backend/` (Rollout + Service), `configmaps/backend-config.yaml`, `database/schema-init-job.yaml` (backend's own DB bootstrap — **not** the shared `/bookstore/db-credentials` secret, which `catalog`/`user`/`order`/`notification`'s own schema-init jobs still depend on and was left untouched), `monitoring/analysis-template.yaml` (backend's canary `AnalysisTemplate` — meaningless without the Rollout it gated), `overlays/prod/hpa-backend.yaml`
+- `backend-pdb` from `pdb.yaml`; `backend-policy` and frontend's now-dead egress-to-backend rule from `network-policy.yaml`
+- the `db-secret` `ExternalSecret` (backend's only consumer) from `secrets/external-secret.yaml` — the `ClusterSecretStore` in that same file was **kept**, since every microservice's own `ExternalSecret` references it by name
+- `backend/` source directory entirely (Dockerfile, app.js, tests, package.json)
+- 6 CI steps (install/test/npm-audit/build/Trivy-scan/push) and the `BACKEND_REPO` env var + its `kustomize edit set image` line in `.github/workflows/ci-cd.yml`
+- the `bookstore-backend` ECR repository, via `terraform apply` (`force_delete = true` on the module already — all image history permanently gone) — required editing `modules/ecr/main.tf`'s hardcoded `locals.repos` list (backend was one of two always-created repos alongside frontend, not part of the removable `extra_repos` list) and dropping the now-dangling `backend_repo_url` output from both `modules/ecr/outputs.tf` and root `outputs.tf`
+
+**A real finding along the way:** after pushing and letting ArgoCD auto-sync (`prune: true`), every backend resource pruned cleanly from the live cluster except the `db-secret` `ExternalSecret` — it stayed present, `status.resources` showing no health/sync status for it at all, minutes after `Synced`. Root cause: it carried `argocd.argoproj.io/hook: PreSync` — **ArgoCD's normal prune-on-removal-from-git diff doesn't clean up resources that were originally applied as sync hooks**; hooks are lifecycle-managed by their own `hook-delete-policy` at the time of the sync that created them, not by the general prune mechanism for the ongoing desired-vs-live diff. Once a hook resource's manifest is deleted from git entirely (not just changed), nothing automatically deletes the orphaned live object. Fixed with a one-off `kubectl delete externalsecret db-secret -n bookstore` — legitimate here since the resource no longer exists in git and a fresh cluster provisioning would never create it. Worth remembering for any future deletion of a resource that carries an ArgoCD hook annotation: **expect to delete it manually**, prune won't do it.
+
+**Verification:** `kubectl kustomize k8s/overlays/prod` built clean with zero backend references (one grep false-positive: Ingress's own `spec.backend` field, unrelated). Live cluster post-sync: only `frontend`/`frontend-service` + shared namespace resources (`Namespace`, `ResourceQuota`, `StorageClass`, `ClusterIssuer`, `ClusterSecretStore`, `Ingress`, `NetworkPolicy`, `PodDisruptionBudget`) remain in `bookstore` namespace. `frontend` pods `2/2 Running`, TLS cert `Ready=True`, `ClusterIssuer` `Ready=True`.
+
+**Status:** done. The Application's top-level health briefly showed `Degraded` with a stale `lastTransitionTime` even after a hard refresh and with every individual resource reporting no unhealthy status — appears to be an ArgoCD status-cache artifact (the `api-gateway` Application has shown the same cosmetic `Degraded` label all session despite being repeatedly curl-verified healthy), not a real problem.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
