@@ -854,6 +854,20 @@ Confirmed live before touching anything: `backend-service` had zero ingress rout
 
 **Status:** done. The Application's top-level health briefly showed `Degraded` with a stale `lastTransitionTime` even after a hard refresh and with every individual resource reporting no unhealthy status — appears to be an ArgoCD status-cache artifact (the `api-gateway` Application has shown the same cosmetic `Degraded` label all session despite being repeatedly curl-verified healthy), not a real problem.
 
+### OBS-047 — both auto-imported Grafana dashboards were empty, on every single apply, for two unrelated reasons
+
+**Symptom:** user reported "pod cpu/memory usage, system services cpu/memory usage dashboard empty" — both Grafana dashboards imported (see OBS-040) showed blank panels despite Prometheus itself having confirmed real data (per OBS-044/OBS-045 verification earlier the same day).
+
+**Root cause #1 (Node Exporter Full, dashboard 1860):** its `$job`/`$node` template variables are Grafana single-select variables with no `includeAll` and no hardcoded default. When the dashboard is imported via the API (as `import-grafana-dashboards.sh` does), Grafana evaluates the variable's `label_values(...)` query at import time to populate `current` — but the import runs in a race against Prometheus's first scrape cycle, so `current` frequently saves as empty. Once empty, every panel's PromQL interpolates `job=""`, matching nothing, and **nothing about this self-heals later** — the variable doesn't re-evaluate just because real data eventually shows up; it stays stuck on its saved (empty) value until a human opens the dashboard and picks from the dropdown, or something else sets it programmatically.
+
+**Root cause #2 (Kubernetes cluster monitoring, dashboard 315):** unrelated to timing — this dashboard's `$Node` variable queries `label_values(kubernetes_io_hostname)`, a label that **does not exist anywhere in this Prometheus at all** (confirmed via `/api/v1/series` returning zero matches). This is an old community dashboard assuming a kube-state-metrics label convention this setup doesn't produce. No amount of waiting or variable-poking fixes this one — the panels are querying data that fundamentally isn't there under that name.
+
+**Fix:**
+1. For 1860: `import-grafana-dashboards.sh` now polls Prometheus for `node_uname_info` before considering the import complete, then explicitly PATCHes the saved dashboard's `job`/`node` `current` values via the Grafana API (`job=node-exporter`, `node=<a real instance from the live query>`). The dashboard's `uid` (`rYdddlPWk`) is stable across imports (baked into grafana.com's exported JSON), so it's safe to target directly.
+2. For 315: dropped entirely, replaced with a small custom dashboard (`modules/monitoring-ec2/dashboards/pod-node-resources.json`) built against metrics this setup actually exposes — per-pod CPU/memory usage (kubelet cAdvisor, see OBS-044), node CPU/memory usage (node-exporter), pod status by phase, container restart rate. File-provisioned (dropped into the existing `dashboards/` provisioning path already watched by Grafana's file provisioner, `updateIntervalSeconds: 30`), not API-imported — simpler and more robust than fighting grafana.com's download/variable quirks for a dashboard this project owns outright.
+
+**Status:** fixed live and in git. Verified on a freshly replaced instance (not just the live-patched one): both dashboards' variables/panels populate correctly with zero manual steps, confirmed via direct Prometheus queries matching every panel's expression (36 pod series for CPU/memory, 3 node series for system usage).
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
