@@ -12,4 +12,4 @@ resources:
 images:
 - name: bookstore-user-service
   newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-user-service
-  newTag: 66956dd8
+  newTag: 2dac9f92
