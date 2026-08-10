@@ -63,6 +63,18 @@ chmod 600 /run/grafana-pass
 # `aws eks get-token`-based exec auth can never work from inside it. A cron
 # job refreshes the token before it expires (EKS tokens are short-lived).
 # See TROUBLESHOOTING.md OBS-033.
+#
+# The refresh script also restarts the kube-state-metrics container every
+# time it writes a new token -- client-go loads a static-bearer-token
+# kubeconfig ONCE when the client is constructed and never re-reads the file,
+# so without a restart the container keeps using its original token forever
+# and starts failing every list/watch with `Unauthorized` the moment that
+# token's ~15min EKS-token TTL expires, regardless of how often the file on
+# disk gets refreshed. Confirmed live: the container stayed `Up` (no crash)
+# but every kube_pod_*/kube_deployment_*/etc. metric silently went empty.
+# `|| true` on the restart: the very first invocation below runs before
+# `docker compose up -d` has created the container at all.
+# See TROUBLESHOOTING.md OBS-042.
 mkdir -p /opt/monitoring/kube
 cat > /usr/local/bin/refresh-kube-token.sh << REFRESH_EOF
 #!/bin/bash
@@ -92,6 +104,7 @@ users:
     token: \$TOKEN
 CONF_EOF
 chmod 644 /opt/monitoring/kube/config
+docker restart kube-state-metrics || true
 REFRESH_EOF
 chmod +x /usr/local/bin/refresh-kube-token.sh
 /usr/local/bin/refresh-kube-token.sh

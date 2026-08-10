@@ -794,6 +794,21 @@ All 5 synced successfully on the retry.
 
 **Status:** fixed in git for future applies. Not retroactively fixed on any already-running instance from before this fix (would need a manual `usermod` + reconnect on any such box, or a fresh `terraform apply`).
 
+### OBS-042 — kube-state-metrics silently went from "all pod data" to "zero pod data" ~15 minutes after every boot: it never re-reads its refreshed token
+
+**Symptom:** Grafana's "Kubernetes cluster monitoring" dashboard showed `N/A` across every panel. `docker ps` showed `kube-state-metrics` as `Up` (no crash-loop), and Prometheus's `/targets` page showed the `kube-state-metrics` job as `up` (the HTTP scrape itself succeeds — it's serving its own process metrics fine). But `curl .../api/v1/query?query=kube_pod_info` against Prometheus returned an empty result set, and `docker logs kube-state-metrics` was flooded with:
+```
+W reflector.go:547 failed to list *v1.Pod: Unauthorized
+E reflector.go:150 Failed to watch *v1.Pod: failed to list *v1.Pod: Unauthorized
+```
+(and the same for every other watched resource type — `Unauthorized`, a 401, not `Forbidden`/403).
+
+**Root cause:** `refresh-kube-token.sh` (see OBS-033) runs via cron every 10 minutes and correctly writes a fresh `aws eks get-token`-issued bearer token to `/opt/monitoring/kube/config` on disk. But `kubectl` / client-go — including inside the `kube-state-metrics` container, which is given `--kubeconfig=/root/.kube/config` at container start — loads a **static bearer token** kubeconfig exactly once, when the REST client is constructed, and never re-reads the file afterward. EKS-issued tokens are short-lived (~15 minutes). So every `kube-state-metrics` container works fine for roughly its first 15 minutes of uptime, then silently and permanently loses the ability to list/watch anything — the cron job keeps faithfully refreshing a file on disk that the already-running process will never look at again. Since Docker Compose's `restart: unless-stopped` only restarts on a crash, and this failure mode isn't a crash (the process just returns errors and keeps running), it never self-heals.
+
+**Fix applied live and in git:** appended `docker restart kube-state-metrics || true` to the end of `refresh-kube-token.sh` (the `|| true` because the very first invocation of this script, at boot, runs before `docker compose up -d` has created the container at all — a hard failure there would abort the entire boot script under `set -e`). Now every 10-minute token refresh also recycles the container, so it never runs on a token older than 10 minutes. `kube-state-metrics` is fully stateless (everything it serves is derived live from list/watch against the API server), so restarting it every 10 minutes is safe — a few seconds of `up=0`/empty metrics per restart, not a real gap.
+
+**Status:** fixed live and in git. Confirmed via `curl .../api/v1/query?query=count(kube_pod_info)` returning a real pod count (`38`) immediately after a manual restart, and Grafana's Kubernetes dashboard populating.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
