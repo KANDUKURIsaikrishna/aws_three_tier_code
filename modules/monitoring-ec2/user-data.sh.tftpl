@@ -511,7 +511,47 @@ json.dump(payload, open('$payload', 'w'))
 }
 
 import_dash 1860 37 "DS_PROMETHEUS"  # Node Exporter Full
-import_dash 315  3  "DS_PROMETHEUS"  # Kubernetes cluster monitoring
+
+# Dashboard 1860's $job/$node template variables save with no default value
+# (empty at import time, before Prometheus has scraped anything) and don't
+# self-populate afterward -- every panel interpolates job="" and stays
+# permanently empty even once real data exists, until something explicitly
+# sets a value. UID is stable across imports (baked into the dashboard JSON
+# itself by grafana.com), so it's safe to hardcode here.
+for i in $(seq 1 12); do
+  curl -sf -G "http://localhost:9090/api/v1/query" --data-urlencode 'query=node_uname_info' \
+    2>/dev/null | grep -q '"instance"' && break
+  sleep 10
+done
+DASH_JSON=$(curl -sf -u "admin:$PASS" "$GRAFANA/api/dashboards/uid/rYdddlPWk")
+NODE_INSTANCE=$(curl -sf -G "http://localhost:9090/api/v1/query" --data-urlencode 'query=node_uname_info' \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['result'][0]['metric']['instance'])" 2>/dev/null || echo "")
+if [ -n "$NODE_INSTANCE" ]; then
+  echo "$DASH_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)['dashboard']
+for v in d.get('templating', {}).get('list', []):
+    if v['name'] == 'job':
+        v['current'] = {'text': 'node-exporter', 'value': 'node-exporter'}
+    if v['name'] == 'node':
+        v['current'] = {'text': '$NODE_INSTANCE', 'value': '$NODE_INSTANCE'}
+json.dump({'dashboard': d, 'overwrite': True, 'folderId': 0}, open('/tmp/node-exporter-fix.json', 'w'))
+"
+  curl -sf -X POST "$GRAFANA/api/dashboards/db" -u "admin:$PASS" \
+    -H "Content-Type: application/json" -d @/tmp/node-exporter-fix.json > /dev/null \
+    && echo "Fixed Node Exporter Full's stuck job/node variables" \
+    || echo "Failed to fix Node Exporter Full variables"
+fi
+
+# Dashboard 315 ("Kubernetes cluster monitoring") is dropped -- its $Node
+# variable queries the label `kubernetes_io_hostname`, which doesn't exist
+# anywhere in this Prometheus at all (confirmed: zero matching series), a
+# real convention mismatch with this kube-state-metrics/cAdvisor setup, not
+# an import-timing artifact. Replaced by a small custom dashboard below,
+# built against metrics this setup actually exposes.
+cat > /opt/monitoring/grafana/provisioning/dashboards/pod-node-resources.json << 'CUSTOM_DASH_EOF'
+${custom_dashboard_json}
+CUSTOM_DASH_EOF
 
 echo "Dashboard import complete"
 IMPORT_EOF

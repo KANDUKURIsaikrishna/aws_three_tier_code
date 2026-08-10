@@ -253,6 +253,7 @@ resource "aws_instance" "monitoring" { # nosemgrep: aws-ec2-has-public-ip
     kubelet_port              = 10250
     eks_api_server            = var.eks_api_server
     eks_api_host              = local.eks_api_host
+    custom_dashboard_json     = file("${path.module}/dashboards/pod-node-resources.json")
   }))
 
   root_block_device {
