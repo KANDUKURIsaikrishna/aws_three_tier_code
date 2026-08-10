@@ -98,6 +98,22 @@ resource "aws_security_group_rule" "monitoring_scrape_eks_api" {
   description              = "kube-state-metrics on monitoring EC2 reaches the EKS API server"
 }
 
+# Allow the monitoring EC2's Prometheus to scrape each node's kubelet
+# directly for cAdvisor container-level metrics (real per-pod CPU/memory
+# usage -- kube-state-metrics only has requests/limits/status, never actual
+# usage). Same shared cluster security group as the node-exporter and API
+# server rules above (var.eks_node_sg_id is EKS's cluster security group,
+# auto-attached to every managed-node-group instance too).
+resource "aws_security_group_rule" "monitoring_scrape_kubelet" {
+  type                     = "ingress"
+  from_port                = 10250
+  to_port                  = 10250
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.monitoring.id
+  security_group_id        = var.eks_node_sg_id
+  description              = "Prometheus on monitoring EC2 scrapes kubelet /metrics/cadvisor on each node"
+}
+
 # ── EKS Access Entry (monitoring EC2 IAM role → read-only K8s API) ─────────────
 # Enables kube-state-metrics Docker container on EC2 to authenticate via kubeconfig
 
@@ -105,6 +121,16 @@ resource "aws_eks_access_entry" "monitoring" {
   cluster_name  = var.cluster_name
   principal_arn = aws_iam_role.monitoring.arn
   type          = "STANDARD"
+
+  # A stable RBAC group, not the raw principal ARN. Without this, EKS maps
+  # the entry to a k8s username derived from the assumed-role SESSION (which
+  # embeds the specific EC2 instance ID), so any RBAC binding made directly
+  # to that username breaks the moment the instance is replaced. Binding to
+  # a group name here instead keeps the RBAC grant in observability-rbac.tf
+  # stable across instance replacement, since group membership is decided by
+  # this access entry (tied to the IAM role, not the instance), not by the
+  # binding.
+  kubernetes_groups = ["monitoring-metrics-readers"]
 }
 
 resource "aws_eks_access_policy_association" "monitoring_view" {
@@ -194,18 +220,31 @@ resource "aws_instance" "monitoring" { # nosemgrep: aws-ec2-has-public-ip
   key_name                    = aws_key_pair.monitoring.key_name
   associate_public_ip_address = true # intentional — SG restricts to admin_cidr_blocks, EIP needed for monitoring UIs
 
+  # Without this, changing user_data only updates the instance's stored
+  # attribute at the AWS API level -- cloud-init only ever runs user-data
+  # once per instance, on first boot, so an already-running box would never
+  # actually pick up script changes. This box is fully stateless/rebuildable
+  # (Docker Compose + auto-imported dashboards), so replacing it on every
+  # script change is the correct behavior, not a risk to avoid.
+  user_data_replace_on_change = true
+
   metadata_options {
     http_endpoint               = "enabled"
     http_tokens                 = "required"
     http_put_response_hop_limit = 1
   }
 
-  user_data = templatefile("${path.module}/user-data.sh.tftpl", {
+  # gzip'd: EC2/cloud-init auto-detects and decompresses gzip user-data at
+  # boot, and the 16KB limit applies to the compressed bytes -- this script
+  # has been bumping against the plain-text limit as features get added, so
+  # compressing buys real headroom instead of trimming comments every time.
+  user_data_base64 = base64gzip(templatefile("${path.module}/user-data.sh.tftpl", {
     cluster_name              = var.cluster_name
     region                    = var.region
     grafana_admin_secret_name = var.grafana_admin_secret_name
     ne_port                   = 9100
-  })
+    kubelet_port              = 10250
+  }))
 
   root_block_device {
     volume_type = "gp3"

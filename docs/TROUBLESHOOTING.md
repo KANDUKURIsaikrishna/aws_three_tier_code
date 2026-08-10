@@ -809,6 +809,23 @@ E reflector.go:150 Failed to watch *v1.Pod: failed to list *v1.Pod: Unauthorized
 
 **Status:** fixed live and in git. Confirmed via `curl .../api/v1/query?query=count(kube_pod_info)` returning a real pod count (`38`) immediately after a manual restart, and Grafana's Kubernetes dashboard populating.
 
+### OBS-043 — `modules/monitoring-ec2/user-data.sh.tftpl` outgrew AWS's 16KB `user_data` limit
+
+**Symptom:** adding the kubelet-cadvisor scrape job (and its accompanying comments) to the monitoring EC2's boot script broke `terraform plan` with:
+```
+Error: expected length of user_data to be in the range (0 - 16384), got #!/bin/bash...
+```
+
+**Root cause:** the script had been growing incrementally across many OBS-0xx fixes (each with its own explanatory comment) and was already close to the 16KB ceiling AWS enforces on raw EC2 `user_data`. The cAdvisor addition tipped it over.
+
+**Fix:** trimmed the more verbose inline comments (the full narrative for each already lives in this file, no need to duplicate it in the shell script) and, more durably, switched `aws_instance.monitoring` from `user_data` to `user_data_base64 = base64gzip(templatefile(...))`. EC2/cloud-init auto-detects and decompresses gzip user-data at boot, and the 16KB limit applies to the *compressed* bytes — buying real headroom instead of needing another round of comment-trimming the next time this script grows. Also added `user_data_replace_on_change = true`, which wasn't previously set: without it, changing `user_data`/`user_data_base64` only updates the instance's stored attribute at the AWS API level — cloud-init runs user-data exactly once, on first boot, so an already-running instance would silently never pick up script changes at all. This box is fully stateless (Docker Compose + auto-imported dashboards), so replacing it on every script change is correct, not a risk.
+
+**Status:** fixed in git. Confirmed via a real apply — new instance booted clean with the gzip'd script and all 5 containers came up.
+
+### OBS-044 — wired up real per-pod CPU/memory usage via kubelet cAdvisor (not an incident — a gap closed on request)
+
+Previously, kube-state-metrics only ever exposed pod *requests/limits/status* — never actual resource usage. Added a `kubelet-cadvisor` Prometheus scrape job hitting each node's kubelet directly (`https://<node-ip>:10250/metrics/cadvisor`), which required three real infra additions, none of which existed before: a security-group rule (port 10250, same shared cluster SG as the existing node-exporter/API-server rules), a `ClusterRole`/`ClusterRoleBinding` granting `get` on `nodes/proxy`/`nodes/metrics`/`nodes/stats` (new `observability-rbac.tf`, bound to a stable `monitoring-metrics-readers` group set on the monitoring EC2's access entry — not the raw IAM principal ARN, which embeds the specific EC2 instance ID and would break on every replacement), and a plain bearer-token file Prometheus re-reads on every scrape (unlike kube-state-metrics's kubeconfig, see OBS-042 — no restart needed for this one). Verified live: `container_memory_working_set_bytes` returning 147 real series with actual pod names and byte values. See `docs/OBSERVABILITY.md`'s "Real per-pod CPU/memory usage" section for the full wiring.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)

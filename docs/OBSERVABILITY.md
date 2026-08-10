@@ -14,6 +14,7 @@ Every tool this project uses to see what's actually happening — metrics, logs,
 | Alertmanager | Docker Compose, monitoring EC2 | Alert routing/grouping | same |
 | kube-state-metrics | Docker container, monitoring EC2 | Kubernetes object-state metrics (pod status, restarts, etc.) | same, talks to EKS API over the network |
 | node-exporter | systemd service, on every EKS node | Host-level metrics (CPU/mem/disk) | `modules/eks/node-user-data.sh.tftpl` |
+| kubelet cAdvisor | built into kubelet, every EKS node | Real per-pod/per-container CPU + memory **usage** (not just requests/limits) | Prometheus scrapes `:10250/metrics/cadvisor` directly, `observability-rbac.tf` |
 | Fluent Bit | systemd service, on every EKS node | Ships container logs to Loki | same |
 | prom-client | In-process, every Node.js service | Exposes `/metrics` (HTTP counters/histograms) | `services/*/app.js`, `backend/app.js` — **not currently scraped**, see Gaps |
 | Argo Rollouts AnalysisTemplate | In-cluster, `bookstore` namespace | Canary error-rate gate, queries EC2 Prometheus | `k8s/base/monitoring/analysis-template.yaml` |
@@ -86,6 +87,13 @@ Routes `severity=critical` and `severity=warning` to separate repeat intervals (
 ### Loki — logs
 
 No standalone Loki UI — query it through Grafana's **Explore** view (top-left compass icon), select the `Loki` datasource, and filter by label, e.g. `{job="eks-containers", cluster="bookstore-eks"}`. Fluent Bit tags every line with `job=eks-containers,cluster=<cluster_name>` and pulls the Kubernetes namespace/pod/container out of the CRI log format automatically.
+
+### Real per-pod CPU/memory usage (kubelet cAdvisor)
+
+Prometheus scrapes `https://<node-ip>:10250/metrics/cadvisor` directly on every node (job `kubelet-cadvisor`), giving real usage — `container_cpu_usage_seconds_total`, `container_memory_working_set_bytes`, etc. — labeled by `namespace`/`pod`/`container`. This is distinct from kube-state-metrics, which only ever has *requests/limits* and *status*, never actual usage. Wired via:
+- `modules/monitoring-ec2/main.tf`'s `aws_security_group_rule.monitoring_scrape_kubelet` (port 10250 on the shared cluster SG, same pattern as the node-exporter rule)
+- `observability-rbac.tf` — a `ClusterRole`/`ClusterRoleBinding` granting `get` on `nodes/proxy`, `nodes/metrics`, `nodes/stats`, bound to the `monitoring-metrics-readers` group set on the monitoring EC2's EKS access entry (a stable group, not the raw IAM principal ARN, which would break on every instance replacement)
+- The refresh cron also writes a plain bearer-token file (`/opt/monitoring/kube/token`) that Prometheus's `bearer_token_file` re-reads on every scrape — no restart needed here, unlike kube-state-metrics (see OBS-042)
 
 ### App-level metrics (`prom-client`)
 

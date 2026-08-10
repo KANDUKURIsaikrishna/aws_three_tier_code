@@ -8,12 +8,8 @@ SECRET_NAME="${grafana_admin_secret_name}"
 NE_PORT="${ne_port}"
 
 # ── Install Docker + tools ────────────────────────────────────────────────────
-# docker-compose-plugin is NOT in Ubuntu's default apt repos (jammy) -- only
-# Docker's own repo has it. Installing it in the same apt-get line as
-# docker.io used to fail the whole command (apt-get aborts on any unknown
-# package name in the list), and with `set -e` that silently killed the rest
-# of this script before Prometheus/Grafana/Loki/Alertmanager ever got
-# configured or started. See TROUBLESHOOTING.md OBS-033.
+# docker-compose-plugin isn't in Ubuntu's default repos, only Docker's own.
+# See TROUBLESHOOTING.md OBS-033.
 apt-get update -y
 apt-get install -y ca-certificates curl gnupg jq awscli
 install -m 0755 -d /etc/apt/keyrings
@@ -27,12 +23,8 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 systemctl enable docker
 systemctl start docker
 
-# Docker's own apt repo (unlike Ubuntu's docker.io package) never adds any
-# user to the docker group -- confirmed live: `ubuntu`'s groups had no
-# `docker` entry, so the plain `docker ps` in Makefile's monitoring-status
-# target always needed `sudo` it never actually had. Group membership only
-# takes effect on a user's next login, which is fine here since this runs at
-# boot before anyone has SSH'd in yet.
+# Docker's own apt repo (unlike docker.io) never adds a user to the docker
+# group. See TROUBLESHOOTING.md OBS-041.
 usermod -aG docker ubuntu
 
 # ── Install kubectl ───────────────────────────────────────────────────────────
@@ -56,25 +48,11 @@ echo "$GRAFANA_PASSWORD" > /run/grafana-pass
 chmod 600 /run/grafana-pass
 
 # ── kubeconfig for kube-state-metrics Docker container ───────────────────────
-# Written to /opt/monitoring/kube, NOT /root/.kube -- /root is 0700 on Ubuntu,
-# which blocks the container's non-root user from traversing into it at all,
-# regardless of the file's own permissions inside. Static bearer token, not
-# exec-based auth: the kube-state-metrics image has no `aws` CLI, so
-# `aws eks get-token`-based exec auth can never work from inside it. A cron
-# job refreshes the token before it expires (EKS tokens are short-lived).
-# See TROUBLESHOOTING.md OBS-033.
-#
-# The refresh script also restarts the kube-state-metrics container every
-# time it writes a new token -- client-go loads a static-bearer-token
-# kubeconfig ONCE when the client is constructed and never re-reads the file,
-# so without a restart the container keeps using its original token forever
-# and starts failing every list/watch with `Unauthorized` the moment that
-# token's ~15min EKS-token TTL expires, regardless of how often the file on
-# disk gets refreshed. Confirmed live: the container stayed `Up` (no crash)
-# but every kube_pod_*/kube_deployment_*/etc. metric silently went empty.
-# `|| true` on the restart: the very first invocation below runs before
-# `docker compose up -d` has created the container at all.
-# See TROUBLESHOOTING.md OBS-042.
+# /opt/monitoring/kube, not /root/.kube (0700, blocks the container's
+# non-root user). Static bearer token refreshed by cron. See OBS-033.
+# Restarts kube-state-metrics on every refresh -- it loads the kubeconfig
+# once at start and never re-reads it, so a stale token otherwise sticks
+# forever. See OBS-042. `|| true`: first run predates the container existing.
 mkdir -p /opt/monitoring/kube
 cat > /usr/local/bin/refresh-kube-token.sh << REFRESH_EOF
 #!/bin/bash
@@ -105,6 +83,11 @@ users:
 CONF_EOF
 chmod 644 /opt/monitoring/kube/config
 docker restart kube-state-metrics || true
+
+# Plain token file for Prometheus's kubelet scrape job (bearer_token_file) --
+# Prometheus re-reads this on every scrape, no restart needed.
+echo -n "\$TOKEN" > /opt/monitoring/kube/token
+chmod 644 /opt/monitoring/kube/token
 REFRESH_EOF
 chmod +x /usr/local/bin/refresh-kube-token.sh
 /usr/local/bin/refresh-kube-token.sh
@@ -118,6 +101,7 @@ cat > /usr/local/bin/update-prom-targets.sh << 'SCRIPT_EOF'
 REGION="${region}"
 CLUSTER_NAME="${cluster_name}"
 NE_PORT="${ne_port}"
+KUBELET_PORT="${kubelet_port}"
 
 NODE_IPS=$(aws ec2 describe-instances \
   --region "$REGION" \
@@ -141,6 +125,7 @@ build_json() {
 }
 
 build_json "$NE_PORT" > /opt/monitoring/prometheus/targets/ne.json
+build_json "$KUBELET_PORT" > /opt/monitoring/prometheus/targets/kubelet.json
 SCRIPT_EOF
 
 chmod +x /usr/local/bin/update-prom-targets.sh
@@ -175,6 +160,18 @@ scrape_configs:
   - job_name: 'node-exporter'
     file_sd_configs:
       - files: ['/etc/prometheus/targets/ne.json']
+        refresh_interval: 5m
+
+  # Real per-pod CPU/memory usage (kube-state-metrics only has
+  # requests/limits/status). bearer_token_file auto-refreshes, no restart.
+  - job_name: 'kubelet-cadvisor'
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    bearer_token_file: /etc/prometheus/kube/token
+    metrics_path: /metrics/cadvisor
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/kubelet.json']
         refresh_interval: 5m
 PROM_EOF
 
@@ -362,6 +359,7 @@ services:
       - "9090:9090"
     volumes:
       - /opt/monitoring/prometheus:/etc/prometheus
+      - /opt/monitoring/kube:/etc/prometheus/kube:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -452,15 +450,8 @@ for i in $(seq 1 36); do
 done
 
 import_dash() {
-  # Community dashboard JSON (e.g. "Node Exporter Full", #1860) can exceed
-  # 128KB -- Linux's MAX_ARG_STRLEN caps any single exec() argument at 32
-  # pages regardless of the much larger ARG_MAX, so passing it via
-  # `curl -d "$json"` fails with "Argument list too long" even though the
-  # overall command line is nowhere near ARG_MAX. Confirmed live: dashboard
-  # 1860's payload is ~683KB. Under `set -e` that failure killed this whole
-  # script before the next dashboard was even attempted, so nothing ever got
-  # imported. Fixed by writing the payload to a file and using `curl -d
-  # @file`, which only ever passes a short filename as the argument.
+  # Large dashboard JSON (e.g. #1860, ~683KB) blows Linux's 128KB per-arg
+  # exec limit if passed inline to curl -d -- use -d @file instead. OBS-040.
   local id=$1 rev=$2 ds_input=$3
   local raw="/tmp/dash-$id.json"
   local payload="/tmp/payload-$id.json"
