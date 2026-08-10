@@ -3,38 +3,19 @@ kind: Kustomization
 
 resources:
 - ../../base
-- hpa-backend.yaml
 - hpa-frontend.yaml
 
 # Account ID is intentionally NOT hardcoded here.
-# CI (deploy stage) overwrites these from secrets.AWS_ACCOUNT_ID every push:
-#   kustomize edit set image bookstore-backend=${ECR_REGISTRY}/bookstore-backend:${SHA}
+# CI (deploy stage) overwrites this from secrets.AWS_ACCOUNT_ID every push:
+#   kustomize edit set image bookstore-frontend=${ECR_REGISTRY}/bookstore-frontend:${SHA}
 # Placeholder 000000000000 is replaced automatically on first CI deploy.
 # For manual local deploy: replace 000000000000 with your real AWS account ID.
 images:
-- name: bookstore-backend
-  newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
-  newTag: 2dac9f92
 - name: bookstore-frontend
   newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
   newTag: 2dac9f92
 
 patches:
-- patch: |-
-    - op: replace
-      path: /spec/template/spec/containers/0/resources
-      value:
-        requests:
-          cpu: "128m"
-          memory: "128Mi"
-        limits:
-          cpu: "500m"
-          memory: "256Mi"
-  target:
-    group: argoproj.io
-    kind: Rollout
-    name: backend
-    version: v1alpha1
 - patch: |-
     - op: replace
       path: /spec/acme/email

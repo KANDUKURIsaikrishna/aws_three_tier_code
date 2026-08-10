@@ -1,17 +1,6 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: backend-pdb
-  namespace: bookstore
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app: backend
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
   name: frontend-pdb
   namespace: bookstore
 spec:

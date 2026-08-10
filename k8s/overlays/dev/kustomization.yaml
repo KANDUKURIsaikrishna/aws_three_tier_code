@@ -6,15 +6,6 @@ resources:
 
 patches:
 - target:
-    group: argoproj.io
-    version: v1alpha1
-    kind: Rollout
-    name: backend
-  patch: |-
-    - op: replace
-      path: /spec/replicas
-      value: 1
-- target:
     kind: Deployment
     name: frontend
   patch: |-

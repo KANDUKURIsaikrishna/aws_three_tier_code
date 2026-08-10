@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: backend-config
-  namespace: bookstore
-data:
-  DB_PORT: "3306"
-  DB_NAME: "test"
-  APP_PORT: "3000"

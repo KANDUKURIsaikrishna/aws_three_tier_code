@@ -10,12 +10,11 @@ on:
 # Required secrets:
 #   AWS_ACCOUNT_ID  — used only to construct the ECR registry URL
 #   AWS_ROLE_ARN    — OIDC role; no static AWS keys anywhere
-#   API_URL         — backend API URL injected at frontend build time
+#   API_URL         — api-gateway URL injected at frontend build time
 #   SEMGREP_APP_TOKEN (optional) — needed only if Semgrep Cloud is used
 
 env:
   AWS_REGION:    us-west-1
-  BACKEND_REPO:  bookstore-backend
   FRONTEND_REPO: bookstore-frontend
   CATALOG_REPO:  bookstore-catalog-service
   USER_REPO:     bookstore-user-service
@@ -65,19 +64,12 @@ jobs:
           node-version: "18"
           cache: npm
           cache-dependency-path: |
-            backend/package-lock.json
             client/package-lock.json
             services/catalog-service/package-lock.json
             services/user-service/package-lock.json
             services/notification-service/package-lock.json
             services/order-service/package-lock.json
             services/api-gateway/package-lock.json
-
-      - name: Install backend dependencies
-        run: cd backend && npm ci
-
-      - name: Run backend tests
-        run: cd backend && npm test
 
       - name: Install catalog-service dependencies
         run: cd services/catalog-service && npm ci
@@ -126,9 +118,6 @@ jobs:
 
       - name: Install frontend dependencies
         run: cd client && npm ci
-
-      - name: npm audit — backend production deps (fail on high/critical CVEs)
-        run: cd backend && npm audit --audit-level=high --omit=dev
 
       - name: npm audit — frontend (fail on critical CVEs; react-scripts build tooling has unfixable highs)
         run: cd client && npm audit --audit-level=critical
@@ -220,48 +209,6 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
-
-      # ── Backend image ────────────────────────────────────────────────────
-      - name: Build backend image (no push yet)
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
-        with:
-          context:   ./backend
-          push:      false
-          load:      true
-          tags:      ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:${{ steps.tag.outputs.tag }}
-          cache-from: type=gha
-          cache-to:   type=gha,mode=max
-
-      - name: Trivy — scan backend (CRITICAL + HIGH = hard fail)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        with:
-          image-ref:      ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:${{ steps.tag.outputs.tag }}
-          format:         sarif
-          output:         trivy-backend.sarif
-          severity:       CRITICAL,HIGH
-          exit-code:      "1"
-          ignore-unfixed: true
-
-      - name: Show backend CVEs in CI log (diagnostic on failure)
-        if: failure()
-        run: |
-          [ -f trivy-backend.sarif ] && \
-            jq -r '.runs[].results[] |
-              "[" + (.level | ascii_upcase) + "] " + .ruleId +
-              ": " + (.message.text | split("\n")[0])' \
-            trivy-backend.sarif \
-          || echo "trivy-backend.sarif not found"
-
-      - name: Upload backend Trivy SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4
-        if: always()
-        with:
-          sarif_file: trivy-backend.sarif
-          category:   trivy-backend
-
-      - name: Push backend image
-        run: |
-          docker push ${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:${{ steps.tag.outputs.tag }}
 
       # ── Catalog service image ────────────────────────────────────────────
       - name: Build catalog-service image (no push yet)
@@ -560,7 +507,6 @@ jobs:
           TAG: ${{ needs.build-and-push.outputs.image-tag }}
         run: |
           (cd k8s/overlays/prod && \
-            kustomize edit set image bookstore-backend=${{ env.ECR_REGISTRY }}/${{ env.BACKEND_REPO }}:${TAG} && \
             kustomize edit set image bookstore-frontend=${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:${TAG})
           (cd k8s/services/catalog-service/overlays/prod && \
             kustomize edit set image bookstore-catalog-service=${{ env.ECR_REGISTRY }}/${{ env.CATALOG_REPO }}:${TAG})

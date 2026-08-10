@@ -25,11 +25,6 @@ output "frontend_repo_url" {
   value       = module.ecr.frontend_repo_url
 }
 
-output "backend_repo_url" {
-  description = "ECR repository URL for the backend image"
-  value       = module.ecr.backend_repo_url
-}
-
 output "catalog_service_repo_url" {
   description = "ECR repository URL for the catalog-service image"
   value       = module.ecr.repo_urls["catalog-service"]

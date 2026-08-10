@@ -1,6 +1,6 @@
 locals {
   repos = concat(
-    ["${var.prefix}-frontend", "${var.prefix}-backend"],
+    ["${var.prefix}-frontend"],
     [for r in var.extra_repos : "${var.prefix}-${r}"]
   )
 }
