@@ -173,6 +173,41 @@ scrape_configs:
     file_sd_configs:
       - files: ['/etc/prometheus/targets/kubelet.json']
         refresh_interval: 5m
+
+  # App-level /metrics (prom-client, per-service HTTP counters/histograms).
+  # Pod IPs aren't reachable from outside the cluster network, so this
+  # scrapes through the API server's pod-proxy instead -- same 443 route
+  # already open to the API server, no new SG rule needed. Only pods
+  # annotated prometheus.io/scrape: "true" are kept (see the 6 service
+  # Deployments/Rollout in k8s/services/*/base + k8s/base/backend).
+  - job_name: 'app-metrics'
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    bearer_token_file: /etc/prometheus/kube/token
+    kubernetes_sd_configs:
+      - role: pod
+        api_server: ${eks_api_server}
+        tls_config:
+          insecure_skip_verify: true
+        bearer_token_file: /etc/prometheus/kube/token
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_pod_name, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+);(.+);(.+)
+        replacement: /api/v1/namespaces/$1/pods/$2:$3/proxy/metrics
+      - target_label: __address__
+        replacement: ${eks_api_host}
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: app
 PROM_EOF
 
 # ── Prometheus alerting rules ─────────────────────────────────────────────────

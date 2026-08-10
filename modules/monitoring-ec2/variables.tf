@@ -33,6 +33,11 @@ variable "eks_node_sg_id" {
   type        = string
 }
 
+variable "eks_api_server" {
+  description = "EKS cluster API server endpoint URL (e.g. https://XXXX.gr7.<region>.eks.amazonaws.com) — used by Prometheus's kubernetes_sd_configs to discover pods and scrape app-level /metrics via the API server's pod-proxy, since pod IPs aren't reachable from outside the cluster network. Templated, not hardcoded, so it doesn't go stale like OBS-032's literal IP did — a fresh endpoint every apply is picked up automatically."
+  type        = string
+}
+
 variable "grafana_admin_secret_arn" {
   description = "Secrets Manager secret ARN for Grafana admin password — EC2 IAM policy allows GetSecretValue on this ARN"
   type        = string

@@ -239,6 +239,7 @@ module "monitoring_ec2" {
   cluster_name              = module.eks.cluster_name
   region                    = var.aws_region
   eks_node_sg_id            = module.eks.cluster_security_group_id
+  eks_api_server            = module.eks.cluster_endpoint
   grafana_admin_secret_arn  = module.eks_addons.grafana_admin_secret_arn
   grafana_admin_secret_name = "/bookstore/grafana-admin"
   admin_cidr_blocks         = var.monitoring_admin_cidr

@@ -1,3 +1,10 @@
+locals {
+  # Bare host:port for the app-metrics job's scrape target address --
+  # api_server (used for pod discovery) wants the full URL, but the actual
+  # per-target __address__ relabel needs just host:port.
+  eks_api_host = replace(var.eks_api_server, "https://", "")
+}
+
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
@@ -244,6 +251,8 @@ resource "aws_instance" "monitoring" { # nosemgrep: aws-ec2-has-public-ip
     grafana_admin_secret_name = var.grafana_admin_secret_name
     ne_port                   = 9100
     kubelet_port              = 10250
+    eks_api_server            = var.eks_api_server
+    eks_api_host              = local.eks_api_host
   }))
 
   root_block_device {
