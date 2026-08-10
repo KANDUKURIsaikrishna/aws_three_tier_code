@@ -15,6 +15,7 @@ A production-grade, cloud-native bookstore application deployed on AWS using a c
 | [`docs/TERRAFORM.md`](docs/TERRAFORM.md) | Every Terraform module in depth |
 | [`docs/KUBERNETES.md`](docs/KUBERNETES.md) | Manifests, Kustomize layout, ArgoCD wiring |
 | [`docs/CICD.md`](docs/CICD.md) | The GitHub Actions pipeline, job by job |
+| [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | Every monitoring/logging/alerting tool, how it's wired, how to use it |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Real errors hit, root causes, fixes |
 | [`docs/FUTURE_IMPROVEMENTS.md`](docs/FUTURE_IMPROVEMENTS.md) | What's next, known gaps, longer-term roadmap |
 
