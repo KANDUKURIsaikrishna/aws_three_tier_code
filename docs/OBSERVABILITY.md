@@ -68,14 +68,31 @@ ArgoCD (in-cluster)
 ```bash
 terraform output grafana_url        # http://<monitoring-EIP>:3000
 ```
-Login: `admin` / the password in Secrets Manager (`/bookstore/grafana-admin`), auto-provisioned as the `GF_SECURITY_ADMIN_PASSWORD` on first boot. Two dashboards auto-import in the background on first launch (Grafana community IDs `1860` "Node Exporter Full" and `315` "Kubernetes cluster monitoring") into a `Bookstore` folder — give it a couple minutes after `terraform apply` if they're not there yet (`monitoring-logs` tails the import log, see below).
+Login: `admin` / the password in Secrets Manager (`/bookstore/grafana-admin`), auto-provisioned as the `GF_SECURITY_ADMIN_PASSWORD` on first boot. Three dashboards are ready with zero manual steps after `terraform apply` (give it a couple minutes — `monitoring-logs` tails the import log, see below):
+- **Node Exporter Full** (community dashboard `1860`, API-imported with its `$job`/`$node` variables explicitly pre-set — see OBS-047 for why that's necessary) — per-node system CPU/memory/disk/network.
+- **Bookstore - Pod & Node Resource Usage** (custom, file-provisioned, `modules/monitoring-ec2/dashboards/pod-node-resources.json`) — real per-pod CPU/memory usage, node CPU/memory %, pod status by phase, container restart rate.
+- **Kubernetes Cluster Overview** (custom, file-provisioned, `modules/monitoring-ec2/dashboards/k8s-cluster-overview.json`) — cluster-wide: nodes reporting, running pod count, cluster CPU/memory utilization %, pods by namespace, deployment replica health (desired vs. available), active alerts table, cluster-wide restart rate.
 
 ### Prometheus — raw metrics + alert rule status
 
 ```bash
 terraform output prometheus_url     # http://<monitoring-EIP>:9090
 ```
-Useful pages: `/targets` (confirms all 3 scrape jobs are `up`), `/alerts` (current alert state), `/graph` for ad-hoc PromQL. Current alert rules (`modules/monitoring-ec2/user-data.sh.tftpl`'s `rules/bookstore.yml`): `NodeDown`, `HighCPUUsage` (>80% for 10m), `HighMemoryUsage` (>85% for 10m), `PodCrashLooping`, `KubeStateMetricsDown`.
+Useful pages: `/targets` (confirms all scrape jobs are `up`), `/alerts` (current alert state), `/graph` for ad-hoc PromQL. Current alert rules (`modules/monitoring-ec2/user-data.sh.tftpl`'s `rules/bookstore.yml`):
+
+| Alert | Trigger | `for` | Severity |
+|---|---|---|---|
+| `NodeDown` | `up{job="node-exporter"} == 0` | 5m | critical |
+| `HighCPUUsage` | node CPU >80% | 10m | warning |
+| `HighMemoryUsage` | node memory >85% | 10m | warning |
+| `PodCrashLooping` | restarts >3/15m | 5m | warning |
+| `KubeStateMetricsDown` | `up{job="kube-state-metrics"} == 0` | 5m | critical |
+| `HighPodCPUUsage` | a single pod's real usage (cAdvisor) >0.3 cores | 1m | warning |
+| `HighPodMemoryUsage` | a single pod's real usage (cAdvisor) >200Mi | 2m | warning |
+| `HighRequestRate` | a service's `http_requests_total` rate >3 req/s | 1m | warning |
+| `HighErrorRate` | 5xx share of `http_requests_total` >5% | 2m | critical |
+
+The last 4 are deliberately short (`for: 1m`/`2m` vs. 5-10m on the node-level ones) so they're demo-friendly — a short load test or stress pod trips them within a couple of scrape cycles, not a sustained 10-minute condition. Verified live: a temporary `polinux/stress` pod (`kubectl run cpu-stress-demo --image=polinux/stress -- stress --cpu 2 --timeout 400s`) tripped `HighPodCPUUsage` within ~2 minutes; a sustained `curl` loop against the real ELB (`https://<ELB>/books` with the `api.bookstore.<domain>` `Host:` header — **must be HTTPS**, plain HTTP gets a `308` redirect at the nginx layer itself and never reaches the backend, so it won't move any counter) at ~20 req/s tripped `HighRequestRate` on both `api-gateway` and `catalog-service` within ~2 minutes. Both cleared back to 0 active alerts within a few minutes of stopping the load. See `docs/TROUBLESHOOTING.md` OBS-048 for the full walkthrough.
 
 ### Alertmanager — alert routing
 

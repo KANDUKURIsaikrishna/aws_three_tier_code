@@ -1,0 +1,88 @@
+{
+  "id": null,
+  "uid": "bookstore-k8s-cluster-overview",
+  "title": "Kubernetes Cluster Overview",
+  "tags": ["bookstore", "custom", "kubernetes"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Nodes Reporting",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [{ "expr": "count(up{job=\"node-exporter\"} == 1)", "refId": "A", "instant": true }]
+    },
+    {
+      "id": 2,
+      "title": "Running Pods",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [{ "expr": "sum(kube_pod_status_phase{phase=\"Running\"})", "refId": "A", "instant": true }]
+    },
+    {
+      "id": 3,
+      "title": "Cluster CPU Utilization",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100, "min": 0, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 85 }] } }, "overrides": [] },
+      "targets": [{ "expr": "sum(rate(container_cpu_usage_seconds_total{container!=\"\", container!=\"POD\"}[5m])) / count(node_cpu_seconds_total{mode=\"idle\"}) * 100", "refId": "A", "instant": true }]
+    },
+    {
+      "id": 4,
+      "title": "Cluster Memory Utilization",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100, "min": 0, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "red", "value": 85 }] } }, "overrides": [] },
+      "targets": [{ "expr": "sum(container_memory_working_set_bytes{container!=\"\", container!=\"POD\"}) / sum(node_memory_MemTotal_bytes) * 100", "refId": "A", "instant": true }]
+    },
+    {
+      "id": 5,
+      "title": "Running Pods by Namespace",
+      "type": "barchart",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [{ "expr": "sum by (namespace) (kube_pod_status_phase{phase=\"Running\"})", "legendFormat": "{{namespace}}", "refId": "A", "instant": true }]
+    },
+    {
+      "id": 6,
+      "title": "Active Alerts",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "targets": [{ "expr": "ALERTS{alertstate=\"firing\"}", "format": "table", "instant": true, "refId": "A" }]
+    },
+    {
+      "id": 7,
+      "title": "Deployment Replicas: Desired vs Available",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "expr": "kube_deployment_spec_replicas", "legendFormat": "{{namespace}}/{{deployment}} desired", "refId": "A" },
+        { "expr": "kube_deployment_status_replicas_available", "legendFormat": "{{namespace}}/{{deployment}} available", "refId": "B" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Cluster-wide Pod Restart Rate (per min)",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [{ "expr": "sum by (namespace) (rate(kube_pod_container_status_restarts_total[15m]) * 60)", "legendFormat": "{{namespace}}", "refId": "A" }]
+    }
+  ]
+}

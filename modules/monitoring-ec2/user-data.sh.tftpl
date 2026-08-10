@@ -254,6 +254,49 @@ groups:
           severity: critical
         annotations:
           summary: "kube-state-metrics is unreachable — no Kubernetes metrics"
+
+      # Real per-pod usage (kubelet cAdvisor, see OBS-044) -- catches a
+      # single runaway pod, not just whole-node pressure like HighCPUUsage
+      # above. `for: 1m` deliberately short (vs. 10m on the node-level
+      # alerts) so this is demo-friendly: a short CPU-stress pod trips it
+      # within a couple of scrape cycles instead of requiring a sustained
+      # 10-minute load.
+      - alert: HighPodCPUUsage
+        expr: sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{container!="", container!="POD"}[2m])) > 0.3
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} CPU usage {{ $value | printf \"%.2f\" }} cores"
+
+      - alert: HighPodMemoryUsage
+        expr: sum by (namespace, pod) (container_memory_working_set_bytes{container!="", container!="POD"}) > 200 * 1024 * 1024
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} memory usage {{ $value | humanize1024 }}B"
+
+      # Traffic, from each service's own prom-client http_requests_total
+      # counter (see OBS-045 for how this gets scraped). Threshold is low
+      # on purpose -- this app has near-zero idle traffic, so a modest load
+      # test trips it fast without risking a false-positive at rest.
+      - alert: HighRequestRate
+        expr: sum by (service) (rate(http_requests_total[2m])) > 3
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} request rate {{ $value | printf \"%.1f\" }} req/s"
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[2m])) / sum(rate(http_requests_total[2m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "5xx error rate {{ $value | humanizePercentage }} across app-metrics"
 RULES_EOF
 
 # ── Alertmanager config ───────────────────────────────────────────────────────
@@ -552,6 +595,12 @@ fi
 cat > /opt/monitoring/grafana/provisioning/dashboards/pod-node-resources.json << 'CUSTOM_DASH_EOF'
 ${custom_dashboard_json}
 CUSTOM_DASH_EOF
+
+# Cluster-wide view (nodes/pods/deployments/alerts) alongside the per-pod
+# resource dashboard above -- same file-provisioning approach, no API call.
+cat > /opt/monitoring/grafana/provisioning/dashboards/k8s-cluster-overview.json << 'CLUSTER_DASH_EOF'
+${cluster_dashboard_json}
+CLUSTER_DASH_EOF
 
 echo "Dashboard import complete"
 IMPORT_EOF

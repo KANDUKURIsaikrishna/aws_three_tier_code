@@ -868,6 +868,18 @@ Confirmed live before touching anything: `backend-service` had zero ingress rout
 
 **Status:** fixed live and in git. Verified on a freshly replaced instance (not just the live-patched one): both dashboards' variables/panels populate correctly with zero manual steps, confirmed via direct Prometheus queries matching every panel's expression (36 pod series for CPU/memory, 3 node series for system usage).
 
+### OBS-048 — added pod-level/traffic alert rules + a cluster overview dashboard, verified live with a real fire-and-resolve cycle (not an incident — a feature request, documented for the demo methodology)
+
+User asked for pod CPU/memory and traffic alerts, plus a live demonstration that they actually fire, plus a cluster-wide dashboard (kept the existing per-pod one too, not a replacement). Four new rules added to `rules/bookstore.yml`: `HighPodCPUUsage`, `HighPodMemoryUsage` (both from kubelet cAdvisor, OBS-044), `HighRequestRate`, `HighErrorRate` (both from the `app-metrics` job's `http_requests_total` counter, OBS-045). All four use short `for:` windows (1-2m, vs. 5-10m on the pre-existing node-level alerts) specifically so a demo doesn't require a sustained multi-minute condition.
+
+**Live verification, not just "should work":**
+1. `kubectl run cpu-stress-demo --image=polinux/stress --namespace=default -- stress --cpu 2 --timeout 400s` — a throwaway pod with no NetworkPolicy concerns (doesn't need network, and `default` namespace has none anyway). cAdvisor picks up **any** pod's container metrics regardless of namespace or the `prometheus.io/scrape` annotation gating (that annotation only gates the separate `app-metrics` job) — no extra wiring needed.
+2. A sustained `curl` loop against the real ELB, `Host: api.bookstore.<domain>` header, hitting `/books`. **First attempt used plain HTTP and generated almost no signal** — `nginx.ingress.kubernetes.io/force-ssl-redirect: "true"` makes ingress-nginx issue the `308` redirect at the nginx layer itself, before ever proxying to `api-gateway`, so the request never touches the app and `http_requests_total` barely moves. Fixed by switching the load generator to `https://` (`-k` to skip cert verification from the ELB's raw hostname) — real backend hits started immediately (api-gateway went from 0.6 req/s to 17.5 req/s).
+3. Polled `/api/v1/alerts` — both `HighPodCPUUsage` (`1.54 cores`) and `HighRequestRate` (`api-gateway 17.5 req/s`, `catalog-service 17.2 req/s`) reached `state: firing` within ~2 minutes. Cross-checked in Alertmanager's own `/api/v2/alerts` — same two alerts, `state: active`. Bonus: `HighCPUUsage` (the pre-existing node-level alert) went to `pending`, since the stress pod's 2 cores saturated its entire node.
+4. Cleaned up (killed the load loop, deleted the stress pod) and re-polled — `0` active alerts within a few minutes, confirming the full fire→resolve lifecycle, not just a one-way trip.
+
+**Status:** done, verified live end-to-end. See `docs/OBSERVABILITY.md`'s alert table and dashboard list for the durable reference.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)

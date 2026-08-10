@@ -254,6 +254,7 @@ resource "aws_instance" "monitoring" { # nosemgrep: aws-ec2-has-public-ip
     eks_api_server            = var.eks_api_server
     eks_api_host              = local.eks_api_host
     custom_dashboard_json     = file("${path.module}/dashboards/pod-node-resources.json")
+    cluster_dashboard_json    = file("${path.module}/dashboards/k8s-cluster-overview.json")
   }))
 
   root_block_device {
