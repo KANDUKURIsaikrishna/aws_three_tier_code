@@ -94,6 +94,8 @@ Useful pages: `/targets` (confirms all scrape jobs are `up`), `/alerts` (current
 
 The last 4 are deliberately short (`for: 1m`/`2m` vs. 5-10m on the node-level ones) so they're demo-friendly — a short load test or stress pod trips them within a couple of scrape cycles, not a sustained 10-minute condition. Verified live: a temporary `polinux/stress` pod (`kubectl run cpu-stress-demo --image=polinux/stress -- stress --cpu 2 --timeout 400s`) tripped `HighPodCPUUsage` within ~2 minutes; a sustained `curl` loop against the real ELB (`https://<ELB>/books` with the `api.bookstore.<domain>` `Host:` header — **must be HTTPS**, plain HTTP gets a `308` redirect at the nginx layer itself and never reaches the backend, so it won't move any counter) at ~20 req/s tripped `HighRequestRate` on both `api-gateway` and `catalog-service` within ~2 minutes. Both cleared back to 0 active alerts within a few minutes of stopping the load. See `docs/TROUBLESHOOTING.md` OBS-048 for the full walkthrough.
 
+**Trigger this on demand:** `./scripts/simulate-load.sh` runs both simulations together (default 180s, ~20 req/s), auto-cleans up on exit/Ctrl-C, and prints firing alerts as they appear so you can watch it live without a browser. `--cpu-only` / `--traffic-only` / `--duration <seconds>` / `--rps <n>` to narrow or tune it.
+
 ### Alertmanager — alert routing
 
 ```bash
