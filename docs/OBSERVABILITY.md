@@ -16,7 +16,7 @@ Every tool this project uses to see what's actually happening — metrics, logs,
 | node-exporter | systemd service, on every EKS node | Host-level metrics (CPU/mem/disk) | `modules/eks/node-user-data.sh.tftpl` |
 | kubelet cAdvisor | built into kubelet, every EKS node | Real per-pod/per-container CPU + memory **usage** (not just requests/limits) | Prometheus scrapes `:10250/metrics/cadvisor` directly, `observability-rbac.tf` |
 | Fluent Bit | systemd service, on every EKS node | Ships container logs to Loki | same |
-| prom-client | In-process, every Node.js service | Exposes `/metrics` (HTTP counters/histograms) | `services/*/app.js`, `backend/app.js` — **not currently scraped**, see Gaps |
+| prom-client | In-process, every Node.js service | Exposes `/metrics` (HTTP counters/histograms) | `services/*/app.js`, `backend/app.js` — scraped via API server pod-proxy, `observability-rbac.tf` |
 | Argo Rollouts AnalysisTemplate | In-cluster, `bookstore` namespace | Canary error-rate gate, queries EC2 Prometheus | `k8s/base/monitoring/analysis-template.yaml` |
 | ArgoCD | In-cluster | GitOps sync/health status per service | `k8s/argocd/*.yaml` |
 | AWS CloudTrail | AWS-native | Multi-region API audit trail → S3 | `cloudtrail.tf` |
@@ -101,7 +101,7 @@ Every Node.js service (`api-gateway`, `catalog-service`, `user-service`, `order-
 ```bash
 kubectl exec -n gateway deploy/api-gateway -- curl -s localhost:PORT/metrics | head -30
 ```
-**This endpoint is not currently scraped by the EC2 Prometheus** — see Gaps below.
+Scraped by the EC2 Prometheus's `app-metrics` job via the API server's pod-proxy — pod IPs and ClusterIPs aren't reachable from outside the cluster network the way node-hosted processes are, so this reuses the existing 443 route to the API server instead of a new SG rule. Only pods with a `prometheus.io/scrape: "true"` annotation are scraped (set on all 6 service pod templates); any other pod in the cluster carrying that same annotation gets picked up too — e.g. cert-manager's own pod, which ships one by default in its upstream chart. Query in Prometheus with `job="app-metrics"`.
 
 ### Canary safety (Argo Rollouts)
 
@@ -143,8 +143,7 @@ aws logs tail /aws/vpc/flowlogs/bookstore --follow
 
 ## Known gaps
 
-- **App-level `/metrics` (`prom-client`) is never scraped.** The EC2 Prometheus's scrape config only has 3 jobs — itself, `kube-state-metrics`, `node-exporter` (see `modules/monitoring-ec2/user-data.sh.tftpl`). None of the 6 Node.js services' `/metrics` endpoints are targets. The code and the endpoint are both real; the wiring to actually collect it isn't there yet. Fixing this means adding a 4th scrape job — either a static target list per service `ClusterIP:PORT`, or the same `file_sd_configs` pattern node-exporter uses if service IPs need to be discovered dynamically.
-- **The canary's error-rate gate always passes, regardless of real error rate.** `nginx_ingress_controller_requests` (the metric the `AnalysisTemplate` queries) is never scraped either — same root cause as above, one level up the stack. The query's `or vector(0)`/`or vector(1)` fallbacks mean it silently returns "0% errors" forever instead of erroring loudly, so this is easy to miss in practice. See `docs/FUTURE_IMPROVEMENTS.md` gap #11 and `docs/TROUBLESHOOTING.md` OBS-016.
+- **The canary's error-rate gate always passes, regardless of real error rate.** `nginx_ingress_controller_requests` (the metric the `AnalysisTemplate` queries) is never scraped — ingress-nginx's pod doesn't carry the `prometheus.io/scrape` annotation the way the 6 app services now do, so it isn't picked up by the `app-metrics` job either. The query's `or vector(0)`/`or vector(1)` fallbacks mean it silently returns "0% errors" forever instead of erroring loudly, so this is easy to miss in practice. Fixable the same way app-metrics was: add the annotation to ingress-nginx's pod template (via `helm_release` values in `modules/eks-addons`). See `docs/FUTURE_IMPROVEMENTS.md` gap #11 and `docs/TROUBLESHOOTING.md` OBS-016.
 - **The `AnalysisTemplate`'s Prometheus address is a hardcoded literal EIP**, not templated from `terraform output prometheus_url`. A full destroy/recreate allocates a new Elastic IP every time, silently staling this address until someone notices canary rollouts failing with connection timeouts and hand-edits the file. See `docs/TROUBLESHOOTING.md` OBS-032.
 - **Alertmanager has no real receiver** — alerts route correctly (critical vs. warning, grouping, inhibition) but land on an unconfigured `localhost:5001` webhook. Nobody gets paged. Slack/email config is commented-out and ready to fill in in `modules/monitoring-ec2/user-data.sh.tftpl`.
 - **`k8s/base/monitoring/prometheus-rules.yaml` exists but is dead code.** It's a `PrometheusRule` CRD (`monitoring.coreos.com/v1`) from the era before monitoring moved to EC2 — deliberately excluded from `k8s/base/kustomization.yaml` (see the comment there) since there's no Prometheus Operator in-cluster to consume it. Safe to delete, or keep as a reference for what rules *would* look like if the stack ever moves back in-cluster.
