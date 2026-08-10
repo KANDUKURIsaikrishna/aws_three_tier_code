@@ -771,6 +771,29 @@ All 5 synced successfully on the retry.
 
 **Status:** known, manual step required after every full destroy/recreate cycle. A durable fix isn't really possible without either (a) never destroying the public zone (give it `prevent_destroy` again, accepting that a full destroy leaves the zone behind as a real orphan cost), or (b) automating the registrar update via its API if the registrar supports one — nic.xyz/nowhere in this repo currently does. Worth calling out explicitly in `DEPLOYMENT.md`'s destroy/recreate instructions so it isn't a surprise next time.
 
+### OBS-040 — Grafana dashboard auto-import silently imported nothing: a single large dashboard's JSON blew past Linux's per-argument limit, killing the whole import under `set -e`
+
+**Symptom:** after a fresh `terraform apply`, Grafana came up healthy with all 3 datasources correctly provisioned, but `curl .../api/search?type=dash-db` returned `[]` — zero dashboards, on every apply, not just this one. `/var/log/grafana-dashboard-import.log` showed:
+```
+/usr/local/bin/import-grafana-dashboards.sh: line 21: /usr/bin/curl: Argument list too long
+```
+
+**Root cause:** `import-grafana-dashboards.sh` (templated into `modules/monitoring-ec2/user-data.sh.tftpl`) downloads each community dashboard's JSON into a shell variable, then passes it inline as a single `curl -d "{...$json...}"` argument. Dashboard `1860` ("Node Exporter Full") is genuinely large — confirmed live at 683,275 bytes. `getconf ARG_MAX` on the box reports 2MB, so 683KB looks like it should fit — but Linux caps any **individual** exec argument at `MAX_ARG_STRLEN` (32 pages = 131,072 bytes / 128KB), a separate, much smaller limit than total `ARG_MAX`. A single argument over ~128KB always fails with `E2BIG`/"Argument list too long" regardless of how much headroom `ARG_MAX` has. Reproduced directly: `curl -d "$json"` with the same 683KB string failed identically outside the script. Because the script runs under `set -e` and this `curl` call wasn't guarded by `||`, the whole script died right there — dashboard `315` ("Kubernetes cluster monitoring"), which is small enough to have worked fine, never even got attempted.
+
+**Fix applied live and in git:** rewrote `import_dash()` to download the dashboard JSON to a file, use `python3` to wrap it into the full import payload (also written to a file), and pass it to curl as `-d @/tmp/payload-<id>.json` — curl reads the request body from the file directly, so only a short filename ever becomes an argv string, sidestepping `MAX_ARG_STRLEN` entirely regardless of how large a future dashboard's JSON is. Also added a guard around the import `curl` call so one dashboard failing (network blip, dashboard ID retired upstream, etc.) logs and continues instead of killing the rest of the import. Both dashboards imported successfully live via the fixed logic, then the fix was committed to `modules/monitoring-ec2/user-data.sh.tftpl` so a future `terraform apply` doesn't need this repeated by hand.
+
+**Status:** fixed live and in git. Confirmed via `GET /api/search?type=dash-db` returning both `Node Exporter Full` and `Kubernetes cluster monitoring (via Prometheus)`.
+
+### OBS-041 — `ubuntu` was never added to the `docker` group, so `make monitoring-status`/`monitoring-logs`-style plain `docker` commands always needed `sudo` they never had
+
+**Symptom:** SSH'd into the monitoring EC2 and ran a plain `docker ps` (no `sudo`) to check container health — failed with `permission denied while trying to connect to the Docker daemon socket`. `groups` showed `ubuntu adm dialout cdrom floppy sudo audio dip video plugdev netdev lxd` — no `docker` group anywhere, despite Docker CE being installed and all 5 containers actually running fine under it.
+
+**Root cause:** `modules/monitoring-ec2/user-data.sh.tftpl` installs Docker from Docker's own official apt repository (`docker-ce`/`docker-ce-cli`/`containerd.io`), not Ubuntu's `docker.io` package. Some distro-packaged installs auto-add the invoking user to the `docker` group as a postinst step; Docker's own upstream packages deliberately do not — creating the `docker` group and adding users to it is left entirely to the operator. Nothing in this project's bootstrap script ever did that step, so every monitoring EC2 this project has ever provisioned has had this gap; it just hadn't been hit because prior checks (`make monitoring-status`) apparently either weren't run with a plain `docker ps` in a plain shell, or were run before the group requirement was noticed.
+
+**Fix:** added `usermod -aG docker ubuntu` right after the Docker install step in `modules/monitoring-ec2/user-data.sh.tftpl`. Since this runs during boot's `user-data`, before anyone has SSH'd in yet, the group membership is already in place by the time the first real SSH session starts — no "log out and back in" caveat applies here the way it normally would for an already-running session.
+
+**Status:** fixed in git for future applies. Not retroactively fixed on any already-running instance from before this fix (would need a manual `usermod` + reconnect on any such box, or a fresh `terraform apply`).
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)

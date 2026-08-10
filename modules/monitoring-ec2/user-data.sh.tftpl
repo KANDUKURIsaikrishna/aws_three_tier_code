@@ -27,6 +27,14 @@ apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 systemctl enable docker
 systemctl start docker
 
+# Docker's own apt repo (unlike Ubuntu's docker.io package) never adds any
+# user to the docker group -- confirmed live: `ubuntu`'s groups had no
+# `docker` entry, so the plain `docker ps` in Makefile's monitoring-status
+# target always needed `sudo` it never actually had. Group membership only
+# takes effect on a user's next login, which is fine here since this runs at
+# boot before anyone has SSH'd in yet.
+usermod -aG docker ubuntu
+
 # ── Install kubectl ───────────────────────────────────────────────────────────
 KUBECTL_VER="v1.31.0"
 curl -sL "https://dl.k8s.io/release/$${KUBECTL_VER}/bin/linux/amd64/kubectl" \
@@ -431,21 +439,35 @@ for i in $(seq 1 36); do
 done
 
 import_dash() {
+  # Community dashboard JSON (e.g. "Node Exporter Full", #1860) can exceed
+  # 128KB -- Linux's MAX_ARG_STRLEN caps any single exec() argument at 32
+  # pages regardless of the much larger ARG_MAX, so passing it via
+  # `curl -d "$json"` fails with "Argument list too long" even though the
+  # overall command line is nowhere near ARG_MAX. Confirmed live: dashboard
+  # 1860's payload is ~683KB. Under `set -e` that failure killed this whole
+  # script before the next dashboard was even attempted, so nothing ever got
+  # imported. Fixed by writing the payload to a file and using `curl -d
+  # @file`, which only ever passes a short filename as the argument.
   local id=$1 rev=$2 ds_input=$3
-  local json
-  json=$(curl -sf "https://grafana.com/api/dashboards/$id/revisions/$rev/download") || {
+  local raw="/tmp/dash-$id.json"
+  local payload="/tmp/payload-$id.json"
+  if ! curl -sf "https://grafana.com/api/dashboards/$id/revisions/$rev/download" -o "$raw"; then
     echo "Failed to download dashboard $id"
     return 0
-  }
-  curl -sf -X POST "$GRAFANA/api/dashboards/import" \
+  fi
+  python3 -c "
+import json
+d = json.load(open('$raw'))
+payload = {'dashboard': d, 'overwrite': True, 'inputs': [{'name': '$ds_input', 'type': 'datasource', 'pluginId': 'prometheus', 'value': 'prometheus'}], 'folderId': 0}
+json.dump(payload, open('$payload', 'w'))
+"
+  if ! curl -sf -X POST "$GRAFANA/api/dashboards/import" \
     -u "admin:$PASS" \
     -H "Content-Type: application/json" \
-    -d "{
-      \"dashboard\": $json,
-      \"overwrite\": true,
-      \"inputs\": [{\"name\": \"$ds_input\",\"type\": \"datasource\",\"pluginId\": \"prometheus\",\"value\": \"prometheus\"}],
-      \"folderId\": 0
-    }" > /dev/null
+    -d "@$payload" > /dev/null; then
+    echo "Failed to import dashboard $id"
+    return 0
+  fi
   echo "Imported Grafana dashboard $id (rev $rev)"
 }
 
