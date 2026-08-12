@@ -132,56 +132,56 @@ export function createApp(db, notifyFn) {
     );
   });
 
-  app.post("/orders/checkout", requireUserId, (req, res) => {
-    db.query(
-      "SELECT book_id, quantity FROM cart_items WHERE user_id = ?",
-      [req.userId],
-      (err, cartItems) => {
-        if (err) {
-          console.error("order-service DB error:", err);
-          return res.status(500).json({ error: "internal error" });
-        }
-        if (cartItems.length === 0) {
-          return res.status(400).json({ error: "cart is empty" });
-        }
+  // A real transaction, not the original per-item loop with no rollback:
+  // that version left previously-succeeded inserts committed if a later
+  // item's insert failed, and never cleared the cart on that path either
+  // (a phantom order the user never got a response for, plus a stale cart
+  // that could produce a duplicate order on retry). beginTransaction/
+  // commit/rollback via db.promise() keeps every insert + the cart delete
+  // atomic: any failure rolls back the whole checkout, cart included.
+  const promiseDb = db.promise();
 
-        const createdOrders = [];
-        let remaining = cartItems.length;
-        let failed = false;
+  app.post("/orders/checkout", requireUserId, async (req, res) => {
+    let connection;
+    try {
+      const [cartItems] = await promiseDb.query(
+        "SELECT book_id, quantity FROM cart_items WHERE user_id = ?",
+        [req.userId]
+      );
+      if (cartItems.length === 0) {
+        return res.status(400).json({ error: "cart is empty" });
+      }
 
-        cartItems.forEach((item) => {
-          db.query(
-            "INSERT INTO orders (user_id, book_id, quantity, status) VALUES (?, ?, ?, 'pending')",
-            [req.userId, item.book_id, item.quantity],
-            (insertErr, result) => {
-              if (failed) return;
-              if (insertErr) {
-                failed = true;
-                console.error("order-service DB error:", insertErr);
-                return res.status(500).json({ error: "internal error" });
-              }
-              createdOrders.push({
-                id: result.insertId,
-                book_id: item.book_id,
-                quantity: item.quantity,
-                status: "pending",
-              });
-              remaining -= 1;
-              if (remaining === 0) {
-                db.query("DELETE FROM cart_items WHERE user_id = ?", [req.userId], (deleteErr) => {
-                  if (deleteErr) {
-                    console.error("order-service DB error:", deleteErr);
-                    return res.status(500).json({ error: "internal error" });
-                  }
-                  res.status(201).json(createdOrders);
-                  createdOrders.forEach((order) => dispatchNotification(notifyFn, order.id));
-                });
-              }
-            }
-          );
+      connection = await promiseDb.getConnection();
+      await connection.beginTransaction();
+
+      const createdOrders = [];
+      for (const item of cartItems) {
+        const [result] = await connection.query(
+          "INSERT INTO orders (user_id, book_id, quantity, status) VALUES (?, ?, ?, 'pending')",
+          [req.userId, item.book_id, item.quantity]
+        );
+        createdOrders.push({
+          id: result.insertId,
+          book_id: item.book_id,
+          quantity: item.quantity,
+          status: "pending",
         });
       }
-    );
+      await connection.query("DELETE FROM cart_items WHERE user_id = ?", [req.userId]);
+
+      await connection.commit();
+      res.status(201).json(createdOrders);
+      createdOrders.forEach((order) => dispatchNotification(notifyFn, order.id));
+    } catch (err) {
+      if (connection) {
+        await connection.rollback();
+      }
+      console.error("order-service DB error:", err);
+      res.status(500).json({ error: "internal error" });
+    } finally {
+      if (connection) connection.release();
+    }
   });
 
   app.post("/orders", requireUserId, (req, res) => {

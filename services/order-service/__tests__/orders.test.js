@@ -4,12 +4,40 @@ import { createApp } from "../app.js";
 
 const mockQuery = vi.fn();
 const mockNotify = vi.fn().mockResolvedValue(undefined);
-const app = createApp({ query: mockQuery }, mockNotify);
+
+// Checkout uses db.promise().query() for the initial cart read and a
+// transactional connection (getConnection/beginTransaction/query/commit/
+// rollback/release) for the inserts + cart clear -- separate mocks from
+// mockQuery, which every other (callback-style) route still uses.
+const mockPromiseQuery = vi.fn();
+const mockConnQuery = vi.fn();
+const mockBeginTransaction = vi.fn().mockResolvedValue(undefined);
+const mockCommit = vi.fn().mockResolvedValue(undefined);
+const mockRollback = vi.fn().mockResolvedValue(undefined);
+const mockRelease = vi.fn();
+const mockConnection = {
+  query: mockConnQuery,
+  beginTransaction: mockBeginTransaction,
+  commit: mockCommit,
+  rollback: mockRollback,
+  release: mockRelease,
+};
+const mockGetConnection = vi.fn().mockResolvedValue(mockConnection);
+const mockPromiseDb = { query: mockPromiseQuery, getConnection: mockGetConnection };
+
+const app = createApp({ query: mockQuery, promise: () => mockPromiseDb }, mockNotify);
 
 beforeEach(() => {
   mockQuery.mockReset();
   mockNotify.mockReset();
   mockNotify.mockResolvedValue(undefined);
+  mockPromiseQuery.mockReset();
+  mockConnQuery.mockReset();
+  mockBeginTransaction.mockClear().mockResolvedValue(undefined);
+  mockCommit.mockClear().mockResolvedValue(undefined);
+  mockRollback.mockClear().mockResolvedValue(undefined);
+  mockRelease.mockClear();
+  mockGetConnection.mockClear().mockResolvedValue(mockConnection);
 });
 
 describe("GET /health", () => {
@@ -107,11 +135,11 @@ describe("POST /orders/checkout", () => {
       { id: 1, book_id: 10, quantity: 2 },
       { id: 2, book_id: 20, quantity: 1 },
     ];
-    mockQuery
-      .mockImplementationOnce((_q, _p, cb) => cb(null, cartItems))
-      .mockImplementationOnce((_q, _p, cb) => cb(null, { insertId: 100, affectedRows: 1 }))
-      .mockImplementationOnce((_q, _p, cb) => cb(null, { insertId: 101, affectedRows: 1 }))
-      .mockImplementationOnce((_q, _p, cb) => cb(null, { affectedRows: 2 }));
+    mockPromiseQuery.mockResolvedValueOnce([cartItems]);
+    mockConnQuery
+      .mockResolvedValueOnce([{ insertId: 100, affectedRows: 1 }])
+      .mockResolvedValueOnce([{ insertId: 101, affectedRows: 1 }])
+      .mockResolvedValueOnce([{ affectedRows: 2 }]); // cart DELETE
 
     const res = await request(app).post("/orders/checkout").set("X-User-Id", "3");
 
@@ -121,26 +149,50 @@ describe("POST /orders/checkout", () => {
       { id: 101, book_id: 20, quantity: 1, status: "pending" },
     ]);
     expect(mockNotify).toHaveBeenCalledTimes(2);
+    expect(mockBeginTransaction).toHaveBeenCalledTimes(1);
+    expect(mockCommit).toHaveBeenCalledTimes(1);
+    expect(mockRollback).not.toHaveBeenCalled();
+    expect(mockRelease).toHaveBeenCalledTimes(1);
   });
 
   it("returns 400 when the cart is empty", async () => {
-    mockQuery.mockImplementationOnce((_q, _p, cb) => cb(null, []));
+    mockPromiseQuery.mockResolvedValueOnce([[]]);
 
     const res = await request(app).post("/orders/checkout").set("X-User-Id", "3");
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: "cart is empty" });
+    expect(mockGetConnection).not.toHaveBeenCalled();
   });
 
   it("still returns 201 to the caller even if the notify call fails", async () => {
     const cartItems = [{ id: 1, book_id: 10, quantity: 2 }];
-    mockQuery
-      .mockImplementationOnce((_q, _p, cb) => cb(null, cartItems))
-      .mockImplementationOnce((_q, _p, cb) => cb(null, { insertId: 100, affectedRows: 1 }))
-      .mockImplementationOnce((_q, _p, cb) => cb(null, { affectedRows: 1 }));
+    mockPromiseQuery.mockResolvedValueOnce([cartItems]);
+    mockConnQuery
+      .mockResolvedValueOnce([{ insertId: 100, affectedRows: 1 }])
+      .mockResolvedValueOnce([{ affectedRows: 1 }]);
     mockNotify.mockRejectedValue(new Error("notification-service unreachable"));
 
     const res = await request(app).post("/orders/checkout").set("X-User-Id", "3");
     expect(res.status).toBe(201);
+  });
+
+  it("rolls back and returns 500 if an insert fails partway through", async () => {
+    const cartItems = [
+      { id: 1, book_id: 10, quantity: 2 },
+      { id: 2, book_id: 20, quantity: 1 },
+    ];
+    mockPromiseQuery.mockResolvedValueOnce([cartItems]);
+    mockConnQuery
+      .mockResolvedValueOnce([{ insertId: 100, affectedRows: 1 }])
+      .mockRejectedValueOnce(new Error("insert failed"));
+
+    const res = await request(app).post("/orders/checkout").set("X-User-Id", "3");
+
+    expect(res.status).toBe(500);
+    expect(mockRollback).toHaveBeenCalledTimes(1);
+    expect(mockCommit).not.toHaveBeenCalled();
+    expect(mockRelease).toHaveBeenCalledTimes(1);
+    expect(mockNotify).not.toHaveBeenCalled();
   });
 });
 

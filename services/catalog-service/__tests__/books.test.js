@@ -42,6 +42,30 @@ describe("GET /books", () => {
   });
 });
 
+describe("GET /books/:id", () => {
+  it("returns a single book by id", async () => {
+    const book = { id: 1, title: "Test", desc: "Desc", price: 9.99, cover: "url" };
+    mockQuery.mockImplementation((_q, _p, cb) => cb(null, [book]));
+
+    const res = await request(app).get("/books/1");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(book);
+    expect(mockQuery).toHaveBeenCalledWith(
+      "SELECT * FROM books WHERE id = ?",
+      ["1"],
+      expect.any(Function)
+    );
+  });
+
+  it("returns 404 when the book does not exist", async () => {
+    mockQuery.mockImplementation((_q, _p, cb) => cb(null, []));
+
+    const res = await request(app).get("/books/999");
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "Book not found" });
+  });
+});
+
 describe("POST /books", () => {
   it("inserts a book and returns insert result", async () => {
     const result = { insertId: 5, affectedRows: 1 };

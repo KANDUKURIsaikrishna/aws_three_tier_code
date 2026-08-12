@@ -3,9 +3,21 @@ import cors from "cors";
 import morgan from "morgan";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import rateLimit from "express-rate-limit";
 import { Registry, collectDefaultMetrics, Counter, Histogram } from "prom-client";
 
 const SERVICE_NAME = "user-service";
+
+// The timing-safe dummy-hash compare below only protects against
+// enumeration-by-timing, not raw brute force -- nothing else in this
+// service throttled repeated attempts against the same IP.
+const authRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "too many attempts, try again later" },
+});
 
 // Computed once at startup; compared against on every login where the email
 // isn't found, so that branch takes comparable time to the real-user path
@@ -39,7 +51,11 @@ function verifyJwt(jwtSecret) {
     }
     const token = header.slice("Bearer ".length);
     try {
-      req.user = jwt.verify(token, jwtSecret);
+      // Algorithm pinned to match api-gateway's equivalent check on this
+      // same secret (services/api-gateway/app.js) -- verifying an HMAC
+      // secret with no algorithms restriction is the standard setup for
+      // JWT algorithm-confusion issues.
+      req.user = jwt.verify(token, jwtSecret, { algorithms: ["HS256"] });
       next();
     } catch {
       return res.status(401).json({ error: "invalid or expired token" });
@@ -73,7 +89,7 @@ export function createApp(db, jwtSecret) {
     res.status(200).json({ status: "ok" });
   });
 
-  app.post("/auth/register", (req, res) => {
+  app.post("/auth/register", authRateLimiter, (req, res) => {
     const { email, password } = req.body;
     if (!email || !password || typeof email !== "string" || typeof password !== "string") {
       return res.status(400).json({ error: "email and password are required" });
@@ -108,7 +124,7 @@ export function createApp(db, jwtSecret) {
     });
   });
 
-  app.post("/auth/login", (req, res) => {
+  app.post("/auth/login", authRateLimiter, (req, res) => {
     const { email, password } = req.body;
     if (!email || !password || typeof email !== "string" || typeof password !== "string") {
       return res.status(400).json({ error: "email and password are required" });

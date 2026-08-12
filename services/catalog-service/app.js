@@ -52,8 +52,16 @@ export function createApp(db) {
 
   app.get("/books", (_req, res) => {
     db.query("SELECT * FROM books", (err, data) => {
-      if (err) { console.log(err); return res.json(err); }
+      if (err) { console.log(err); return res.status(500).json({ error: "Failed to fetch books" }); }
       return res.json(data);
+    });
+  });
+
+  app.get("/books/:id", (req, res) => {
+    db.query("SELECT * FROM books WHERE id = ?", [req.params.id], (err, data) => {
+      if (err) { console.log(err); return res.status(500).json({ error: "Failed to fetch book" }); }
+      if (data.length === 0) return res.status(404).json({ error: "Book not found" });
+      return res.json(data[0]);
     });
   });
 
@@ -61,14 +69,14 @@ export function createApp(db) {
     const q = "INSERT INTO books(`title`, `desc`, `price`, `cover`) VALUES (?)";
     const values = [req.body.title, req.body.desc, req.body.price, req.body.cover];
     db.query(q, [values], (err, data) => {
-      if (err) return res.send(err);
+      if (err) { console.log(err); return res.status(500).json({ error: "Failed to create book" }); }
       return res.json(data);
     });
   });
 
   app.delete("/books/:id", (req, res) => {
     db.query(" DELETE FROM books WHERE id = ? ", [req.params.id], (err, data) => {
-      if (err) return res.send(err);
+      if (err) { console.log(err); return res.status(500).json({ error: "Failed to delete book" }); }
       return res.json(data);
     });
   });
@@ -77,7 +85,7 @@ export function createApp(db) {
     const q = "UPDATE books SET `title`= ?, `desc`= ?, `price`= ?, `cover`= ? WHERE id = ?";
     const values = [req.body.title, req.body.desc, req.body.price, req.body.cover];
     db.query(q, [...values, req.params.id], (err, data) => {
-      if (err) return res.send(err);
+      if (err) { console.log(err); return res.status(500).json({ error: "Failed to update book" }); }
       return res.json(data);
     });
   });
