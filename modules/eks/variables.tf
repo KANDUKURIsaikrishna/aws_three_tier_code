@@ -51,10 +51,9 @@ variable "public_access_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
-variable "loki_url" {
-  description = "Loki push URL on the monitoring EC2 (e.g. http://<eip>:3100) — Fluent Bit on nodes ships container logs here. Empty string disables Fluent Bit output."
+variable "region" {
+  description = "AWS region — nodes use this to call ec2:DescribeInstances at boot, discovering the monitoring EC2's private IP for Fluent Bit's Loki output. Not templated as a static loki_url: that would need this module to depend on module.monitoring_ec2's actual instance, which itself depends on this module's cluster_name -- a circular dependency. Runtime discovery via the same AWS-API-lookup pattern already used elsewhere in this project (see modules/monitoring-ec2's own node-IP discovery) sidesteps it entirely. See docs/TROUBLESHOOTING.md OBS-050."
   type        = string
-  default     = ""
 }
 
 variable "admin_principal_arns" {

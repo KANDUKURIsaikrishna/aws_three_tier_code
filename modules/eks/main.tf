@@ -76,8 +76,7 @@ resource "aws_launch_template" "nodes" {
 
   user_data = base64encode(templatefile("${path.module}/node-user-data.sh.tftpl", {
     cluster_name = var.cluster_name
-    loki_url     = var.loki_url
-    # LOKI_HOST    = "bypass"
+    region       = var.region
   }))
 
   # hop_limit=2 required: containers on node need one extra hop to reach IMDS

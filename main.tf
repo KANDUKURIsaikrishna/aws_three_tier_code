@@ -153,7 +153,7 @@ module "eks" {
   node_min_size      = 1
   node_max_size      = 3
   node_desired_size  = 3 # t3.medium caps at 17 pods (ENI IP limit); 2 nodes (34 slots) filled up once all 5 microservices + api-gateway (2 replicas) joined the monolith — see TF-014, OBS-030
-  loki_url           = "http://${aws_eip.monitoring.public_ip}:3100"
+  region             = var.aws_region
 
   # Whoever runs `terraform apply` always gets cluster-admin, regardless of who
   # originally created the cluster — see TF-013 in docs/phase-2-troubleshooting.md.

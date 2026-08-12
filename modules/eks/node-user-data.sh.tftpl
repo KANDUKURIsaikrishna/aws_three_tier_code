@@ -33,11 +33,20 @@ systemctl daemon-reload
 systemctl enable --now node_exporter
 
 # -- Fluent Bit (container logs -> Loki on monitoring EC2) -----------------
-# Single-quoted heredoc: $basearch is a yum variable (expanded by yum, not bash)
+# baseurl has no /$basearch/ segment -- an earlier version of this file had
+# one, which 404'd against the real repo (confirmed live via `kubectl debug
+# node`: https://packages.fluentbit.io/amazonlinux/2/x86_64/repodata/... is
+# 404, .../amazonlinux/2/repodata/... -- no arch segment -- is 200, matching
+# Fluent Bit's own current docs). yum install silently failed on every node
+# this project has ever provisioned as a result: Fluent Bit was never
+# actually installed, so zero container logs ever reached Loki despite the
+# rest of the observability stack (node-exporter, kube-state-metrics,
+# cAdvisor, app-metrics) all working fine. See docs/TROUBLESHOOTING.md
+# OBS-050.
 cat > /etc/yum.repos.d/fluent-bit.repo << 'FB_REPO'
 [fluent-bit]
 name=Fluent Bit
-baseurl=https://packages.fluentbit.io/amazonlinux/2/$basearch/
+baseurl=https://packages.fluentbit.io/amazonlinux/2/
 gpgcheck=1
 gpgkey=https://packages.fluentbit.io/fluentbit.key
 enabled=1
@@ -45,8 +54,28 @@ FB_REPO
 
 yum install -y fluent-bit
 
-# Terraform substitutes ${loki_url} at apply time; bash extracts just the host
-LOKI_HOST=$(echo "${loki_url}" | sed 's|http://||' | cut -d: -f1)
+# Discovered at boot via the EC2 API, not templated from Terraform: a
+# static loki_url baked in by templatefile() had to use the monitoring EC2's
+# PUBLIC Elastic IP (the only value available without a circular module
+# dependency -- see modules/eks/variables.tf's region variable comment), but
+# nodes are in private subnets, and traffic from a private subnet to another
+# instance's public IP within the same VPC doesn't route back cleanly (no
+# public-IP hairpinning) -- confirmed live: security group was correctly
+# scoped for VPC-internal traffic, but every connection attempt timed out
+# regardless. The monitoring EC2's actual private IP, discovered here, is
+# reachable directly. Retried: this node's own IAM policy for
+# ec2:DescribeInstances is created in the same apply as the node itself, so
+# early attempts can race IAM propagation the same way the monitoring EC2's
+# own secretsmanager:GetSecretValue call did (see OBS-050).
+LOKI_HOST=""
+for i in $(seq 1 10); do
+  LOKI_HOST=$(aws ec2 describe-instances --region "${region}" \
+    --filters "Name=tag:Name,Values=bookstore-monitoring" "Name=instance-state-name,Values=running" \
+    --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text 2>/dev/null)
+  [ -n "$LOKI_HOST" ] && [ "$LOKI_HOST" != "None" ] && break
+  echo "Waiting to discover the monitoring EC2's private IP (attempt $i)..."
+  sleep 6
+done
 
 # Own cri parser definition, not relying on whatever the fluent-bit RPM's
 # default /etc/fluent-bit/parsers.conf happens to ship (version-dependent,

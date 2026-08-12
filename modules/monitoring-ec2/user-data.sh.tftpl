@@ -37,11 +37,28 @@ chmod +x /usr/local/bin/kubectl
 mkdir -p /opt/monitoring/{prometheus/{targets,rules},grafana/provisioning/{datasources,dashboards},loki}
 
 # ── Grafana admin password from Secrets Manager ───────────────────────────────
-GRAFANA_PASSWORD=$(aws secretsmanager get-secret-value \
-  --secret-id "$SECRET_NAME" \
-  --region "$REGION" \
-  --query SecretString \
-  --output text)
+# Retried: this instance's IAM role policy is created in the same apply as
+# the instance itself, and IAM changes aren't instantly consistent -- the
+# very first boot can hit this call before the policy has propagated.
+# Confirmed live: AccessDeniedException on secretsmanager:GetSecretValue
+# immediately after boot, same call succeeding seconds later with zero
+# config changes. Under set -e this killed the rest of the script (and so
+# the entire monitoring stack -- nothing after this line ever ran) with no
+# automatic retry, since user-data only runs once. See OBS-050.
+GRAFANA_PASSWORD=""
+for i in $(seq 1 10); do
+  GRAFANA_PASSWORD=$(aws secretsmanager get-secret-value \
+    --secret-id "$SECRET_NAME" \
+    --region "$REGION" \
+    --query SecretString \
+    --output text 2>/dev/null) && break
+  echo "Waiting for IAM policy propagation before retrying secretsmanager get-secret-value (attempt $i)..."
+  sleep 6
+done
+if [ -z "$GRAFANA_PASSWORD" ]; then
+  echo "FATAL: could not fetch $SECRET_NAME after 10 attempts" >&2
+  exit 1
+fi
 
 # Write to temp file so background dashboard importer can read it
 echo "$GRAFANA_PASSWORD" > /run/grafana-pass
