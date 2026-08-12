@@ -4,7 +4,15 @@ metadata:
   name: catalog-service-pdb
   namespace: catalog
 spec:
-  minAvailable: 1
+  # maxUnavailable, not minAvailable: 1 -- this service runs replicas:1 (see
+  # deployment.yaml, no overlay bumps it), and minAvailable:1 equal to the
+  # total replica count meant Kubernetes could never permit a voluntary
+  # eviction of the only pod at all -- kubectl drain, an EKS managed-node-
+  # group upgrade, or autoscaler consolidation on that node would hang
+  # indefinitely. maxUnavailable:1 still creates a real PDB object but
+  # doesn't block maintenance on a single-replica service. See
+  # docs/TROUBLESHOOTING.md OBS-049.
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: catalog-service

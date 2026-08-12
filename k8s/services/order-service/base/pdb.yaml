@@ -4,7 +4,9 @@ metadata:
   name: order-service-pdb
   namespace: order
 spec:
-  minAvailable: 1
+  # maxUnavailable, not minAvailable: 1 -- see catalog-service/base/pdb.yaml's
+  # comment (same replicas:1 + PDB-blocks-drain issue). OBS-049.
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: order-service

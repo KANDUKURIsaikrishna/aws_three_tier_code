@@ -28,25 +28,32 @@ spec:
               kubernetes.io/metadata.name: ingress-nginx
       ports:
         - port: 3000
+  # ports below use 3000 (the pods' real containerPort), not 80 (the
+  # Service port). NetworkPolicy egress matching is against the actual
+  # destination pod port after kube-proxy's Service DNAT, not the Service's
+  # own listed port -- an earlier version of this file used 80 here, which
+  # would silently block all api-gateway -> microservice traffic the moment
+  # a NetworkPolicy-enforcing CNI is turned on. See docs/TROUBLESHOOTING.md
+  # OBS-049.
   egress:
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: catalog
       ports:
-        - port: 80
+        - port: 3000
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: user
       ports:
-        - port: 80
+        - port: 3000
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: order
       ports:
-        - port: 80
+        - port: 3000
     - ports:
         - port: 53
           protocol: UDP
