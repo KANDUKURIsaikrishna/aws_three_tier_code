@@ -48,21 +48,47 @@ yum install -y fluent-bit
 # Terraform substitutes ${loki_url} at apply time; bash extracts just the host
 LOKI_HOST=$(echo "${loki_url}" | sed 's|http://||' | cut -d: -f1)
 
+# Own cri parser definition, not relying on whatever the fluent-bit RPM's
+# default /etc/fluent-bit/parsers.conf happens to ship (version-dependent,
+# unverifiable without live access to a fresh box) -- this is the standard,
+# stable CRI log line format containerd writes on EKS 1.24+.
+cat > /etc/fluent-bit/parsers-custom.conf << 'PARSERS_EOF'
+[PARSER]
+    Name        cri
+    Format      regex
+    Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+    Time_Key    time
+    Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+PARSERS_EOF
+
 # Unquoted FBEOF: double-dollar in template becomes single-dollar in rendered script
 cat > /etc/fluent-bit/fluent-bit.conf << FBEOF
 [SERVICE]
     Flush           5
     Log_Level       warn
-    Parsers_File    /etc/fluent-bit/parsers.conf
+    Parsers_File    /etc/fluent-bit/parsers-custom.conf
 
 [INPUT]
     Name             tail
     Path             /var/log/containers/*.log
+    # Filename encodes <pod>_<namespace>_<container>-<container_id>.log --
+    # surfaced into every record so namespace/pod/container are visible and
+    # filterable in Grafana's Loki Explore even without per-record Loki
+    # labels (which would need Fluent Bit reaching the Kubernetes/kubelet
+    # API for enrichment -- this process runs as a bare host systemd
+    # service, not a pod, so it has no in-cluster ServiceAccount token to
+    # authenticate with; same class of problem already solved for
+    # kube-state-metrics on the monitoring EC2, not replicated here yet).
+    Path_Key         filename
     Tag              kube.*
     Parser           cri
     Refresh_Interval 5
     Mem_Buf_Limit    10MB
     Skip_Long_Lines  On
+    # Persists read-offset across a Fluent Bit restart/node reboot -- without
+    # this, a restart could re-tail already-shipped log files from the start
+    # and duplicate lines in Loki.
+    DB               /var/log/flb_kube.db
 
 [OUTPUT]
     Name    loki
