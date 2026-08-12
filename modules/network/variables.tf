@@ -1,13 +1,6 @@
-variable "region" {
-  description = "AWS region"
-  type        = string
-  default     = "us-west-1"
-}
-
 variable "vpc_cidr" {
   description = "CIDR block for the VPC"
   type        = string
-  # default     = "170.20.0.0/16"
 }
 
 variable "public_subnets" {
@@ -16,11 +9,6 @@ variable "public_subnets" {
     cidr = string
     az   = string
   }))
-
-  # default = [
-  #   { cidr = "170.20.1.0/24", az = "us-west-1a" },
-  #   { cidr = "170.20.2.0/24", az = "us-west-1c" }
-  # ]
 }
 
 variable "private_subnets" {
@@ -29,22 +17,4 @@ variable "private_subnets" {
     cidr = string
     az   = string
   }))
-  # default = [
-  #   { cidr = "170.20.3.0/24", az = "us-west-1a" },
-  #   { cidr = "170.20.4.0/24", az = "us-west-1c" },
-  #   { cidr = "170.20.5.0/24", az = "us-west-1a" },
-  #   { cidr = "170.20.6.0/24", az = "us-west-1c" },
-  #   { cidr = "170.20.7.0/24", az = "us-west-1a" },
-  #   { cidr = "170.20.8.0/24", az = "us-west-1c" }
-  # ]
 }
-# variable "private_subnet_cidrs" {
-#   description = "List of private subnet CIDR blocks"
-#   type        = list(string)
-# }
-
-
-# variable "availability_zones" {
-#   description = "List of availability zones for private subnets"
-#   type        = list(string)
-# }

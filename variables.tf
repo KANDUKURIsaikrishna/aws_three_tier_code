@@ -21,9 +21,15 @@ variable "github_repo" {
 }
 
 variable "secondary_region" {
-  description = "Secondary AWS region for DR failover: ECR replication + RDS backup replication. Default: us-west-2 (Oregon). CloudFront ACM always uses us-east-1 regardless of this value."
+  description = "Secondary AWS region for DR failover, IF enable_dr_replication is true (see that variable — this region alone does not turn replication on). Always needs a valid region string regardless, since the \"secondary\" provider alias in providers.tf is configured with it unconditionally. Default: us-west-2 (Oregon). CloudFront ACM always uses us-east-1 regardless of this value."
   type        = string
   default     = "us-west-2"
+}
+
+variable "enable_dr_replication" {
+  description = "Turns on cross-region DR replication: the /bookstore/db-credentials Secrets Manager replica and ECR image replication into var.secondary_region. Off by default -- previously this was silently gated on secondary_region being non-empty, which it always was by default, so both replicas were created on every apply whether DR was wanted or not. See docs/TROUBLESHOOTING.md OBS-049."
+  type        = bool
+  default     = false
 }
 
 variable "primary_alb_dns" {

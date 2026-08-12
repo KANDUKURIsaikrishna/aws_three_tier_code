@@ -28,7 +28,7 @@ variable "region" {
   type        = string
 }
 
-variable "eks_node_sg_id" {
+variable "eks_cluster_sg_id" {
   description = "EKS cluster security group ID — monitoring EC2 gets inbound rule to scrape node-exporter on port 9100"
   type        = string
 }

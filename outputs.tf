@@ -16,7 +16,7 @@ output "rds_secret_arn" {
 
 output "catalog_db_secret_arn" {
   description = "ARN of the Secrets Manager secret at /bookstore/catalog-db-credentials"
-  value       = aws_secretsmanager_secret.catalog_db_credentials.arn
+  value       = aws_secretsmanager_secret.db_credentials["catalog"].arn
   sensitive   = true
 }
 
@@ -118,7 +118,7 @@ output "cloudfront_domain" {
 
 output "user_db_secret_arn" {
   description = "ARN of the Secrets Manager secret at /bookstore/user-db-credentials"
-  value       = aws_secretsmanager_secret.user_db_credentials.arn
+  value       = aws_secretsmanager_secret.db_credentials["user"].arn
   sensitive   = true
 }
 
@@ -130,12 +130,12 @@ output "jwt_secret_arn" {
 
 output "order_db_secret_arn" {
   description = "ARN of the Secrets Manager secret at /bookstore/order-db-credentials"
-  value       = aws_secretsmanager_secret.order_db_credentials.arn
+  value       = aws_secretsmanager_secret.db_credentials["order"].arn
   sensitive   = true
 }
 
 output "notification_db_secret_arn" {
   description = "ARN of the Secrets Manager secret at /bookstore/notification-db-credentials"
-  value       = aws_secretsmanager_secret.notification_db_credentials.arn
+  value       = aws_secretsmanager_secret.db_credentials["notification"].arn
   sensitive   = true
 }

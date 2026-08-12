@@ -17,4 +17,9 @@ locals {
     { cidr = "170.20.7.0/24", az = "us-west-1a" },
     { cidr = "170.20.8.0/24", az = "us-west-1c" },
   ]
+
+  # Just the EKS-node subnets (indices 0-3 above) -- used to scope the RDS
+  # security group to actual node traffic instead of the whole VPC CIDR.
+  # See docs/TROUBLESHOOTING.md OBS-049.
+  eks_node_subnet_cidrs = [for s in slice(local.private_subnets, 0, 4) : s.cidr]
 }

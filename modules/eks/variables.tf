@@ -10,11 +10,6 @@ variable "cluster_version" {
   default     = "1.31"
 }
 
-variable "vpc_id" {
-  description = "VPC ID where the cluster is deployed"
-  type        = string
-}
-
 variable "subnet_ids" {
   description = "Private subnet IDs for the control plane and node groups"
   type        = list(string)

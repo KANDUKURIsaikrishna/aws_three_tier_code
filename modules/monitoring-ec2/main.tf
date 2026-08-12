@@ -84,12 +84,12 @@ resource "aws_security_group_rule" "eks_scrape_node_exporter" {
   to_port                  = 9100
   protocol                 = "tcp"
   source_security_group_id = aws_security_group.monitoring.id
-  security_group_id        = var.eks_node_sg_id
+  security_group_id        = var.eks_cluster_sg_id
   description              = "Prometheus on monitoring EC2 scrapes node-exporter systemd service"
 }
 
 # Allow the monitoring EC2's kube-state-metrics container to reach the EKS API
-# server. `var.eks_node_sg_id` is actually the cluster security group (see the
+# server. `var.eks_cluster_sg_id` is actually the cluster security group (see the
 # module.eks call site) -- without this, kube-state-metrics can resolve the
 # API server's private-endpoint IPs but every connection attempt times out at
 # the security-group layer, crash-looping forever. Confirmed missing on a
@@ -101,7 +101,7 @@ resource "aws_security_group_rule" "monitoring_scrape_eks_api" {
   to_port                  = 443
   protocol                 = "tcp"
   source_security_group_id = aws_security_group.monitoring.id
-  security_group_id        = var.eks_node_sg_id
+  security_group_id        = var.eks_cluster_sg_id
   description              = "kube-state-metrics on monitoring EC2 reaches the EKS API server"
 }
 
@@ -109,7 +109,7 @@ resource "aws_security_group_rule" "monitoring_scrape_eks_api" {
 # directly for cAdvisor container-level metrics (real per-pod CPU/memory
 # usage -- kube-state-metrics only has requests/limits/status, never actual
 # usage). Same shared cluster security group as the node-exporter and API
-# server rules above (var.eks_node_sg_id is EKS's cluster security group,
+# server rules above (var.eks_cluster_sg_id is EKS's cluster security group,
 # auto-attached to every managed-node-group instance too).
 resource "aws_security_group_rule" "monitoring_scrape_kubelet" {
   type                     = "ingress"
@@ -117,7 +117,7 @@ resource "aws_security_group_rule" "monitoring_scrape_kubelet" {
   to_port                  = 10250
   protocol                 = "tcp"
   source_security_group_id = aws_security_group.monitoring.id
-  security_group_id        = var.eks_node_sg_id
+  security_group_id        = var.eks_cluster_sg_id
   description              = "Prometheus on monitoring EC2 scrapes kubelet /metrics/cadvisor on each node"
 }
 

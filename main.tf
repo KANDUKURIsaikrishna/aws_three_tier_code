@@ -10,17 +10,10 @@ module "network" {
 # ── Security Groups ────────────────────────────────────────────────────────────
 
 module "security_groups" {
-  source = "./modules/security"
-  vpc_id = module.network.vpc_id
-  prefix = "bookstore"
-}
-
-# ── ACM Certificate (us-west-1 — used by ingress-nginx) ───────────────────────
-
-module "acm" {
-  source      = "./modules/acm"
-  domain_name = var.domain
-  san_names   = ["*.${var.domain}"]
+  source               = "./modules/security"
+  vpc_id               = module.network.vpc_id
+  prefix               = "bookstore"
+  eks_node_cidr_blocks = local.eks_node_subnet_cidrs
 }
 
 # ── RDS ────────────────────────────────────────────────────────────────────────
@@ -44,55 +37,49 @@ module "rds" {
   backup_retention_period = 7
   deletion_protection     = false # flipped off for today's destroy — AWS refuses DeleteDBInstance while true
   skip_final_snapshot     = true  # avoids a lingering snapshot + naming collision on next apply
-  secondary_region        = var.secondary_region
+  # Empty unless explicitly opted in -- var.secondary_region alone used to be
+  # enough to silently create a live cross-region secret replica on every
+  # apply, DR intent or not. See OBS-049.
+  secondary_region = var.enable_dr_replication ? var.secondary_region : ""
 }
 
-# ── Catalog Service — DB credentials ──────────────────────────────────────────
-# Own schema + own DB user inside the existing RDS instance. Full per-service
-# RDS isolation is explicitly deferred (see design spec Non-goals) — this is
-# schema-level isolation, the cheap intermediate step.
+# ── Per-service DB credentials ─────────────────────────────────────────────────
+# Own schema + own DB user inside the existing RDS instance, per service. Full
+# per-service RDS isolation is explicitly deferred (see design spec
+# Non-goals) — this is schema-level isolation, the cheap intermediate step.
+# One for_each block instead of 4 near-identical copies (previously ~110
+# lines, one per service, differing only in secret name/DB username/DB name).
 
-resource "random_password" "catalog_db_password" {
+locals {
+  db_service_credentials = {
+    catalog      = { db_name = "catalog_db", db_username = "catalog_user" }
+    user         = { db_name = "user_db", db_username = "user_service_user" }
+    order        = { db_name = "order_db", db_username = "order_service_user" }
+    notification = { db_name = "notification_db", db_username = "notification_service_user" }
+  }
+}
+
+resource "random_password" "db_credentials" {
+  for_each         = local.db_service_credentials
   length           = 32
   special          = true
   override_special = "!#$%&*()-_=+[]{}?"
 }
 
-resource "aws_secretsmanager_secret" "catalog_db_credentials" {
-  name                    = "/bookstore/catalog-db-credentials"
+resource "aws_secretsmanager_secret" "db_credentials" {
+  for_each                = local.db_service_credentials
+  name                    = "/bookstore/${each.key}-db-credentials"
   recovery_window_in_days = 0 # 0 = force delete on destroy, matches modules/rds pattern
 }
 
-resource "aws_secretsmanager_secret_version" "catalog_db_credentials" {
-  secret_id = aws_secretsmanager_secret.catalog_db_credentials.id
+resource "aws_secretsmanager_secret_version" "db_credentials" {
+  for_each  = local.db_service_credentials
+  secret_id = aws_secretsmanager_secret.db_credentials[each.key].id
   secret_string = jsonencode({
-    DB_USERNAME = "catalog_user"
-    DB_PASSWORD = random_password.catalog_db_password.result
+    DB_USERNAME = each.value.db_username
+    DB_PASSWORD = random_password.db_credentials[each.key].result
     DB_HOST     = module.rds.rds_endpoint
-    DB_NAME     = "catalog_db"
-  })
-}
-
-# ── User Service — DB credentials ─────────────────────────────────────────────
-
-resource "random_password" "user_db_password" {
-  length           = 32
-  special          = true
-  override_special = "!#$%&*()-_=+[]{}?"
-}
-
-resource "aws_secretsmanager_secret" "user_db_credentials" {
-  name                    = "/bookstore/user-db-credentials"
-  recovery_window_in_days = 0
-}
-
-resource "aws_secretsmanager_secret_version" "user_db_credentials" {
-  secret_id = aws_secretsmanager_secret.user_db_credentials.id
-  secret_string = jsonencode({
-    DB_USERNAME = "user_service_user"
-    DB_PASSWORD = random_password.user_db_password.result
-    DB_HOST     = module.rds.rds_endpoint
-    DB_NAME     = "user_db"
+    DB_NAME     = each.value.db_name
   })
 }
 
@@ -115,52 +102,6 @@ resource "aws_secretsmanager_secret_version" "jwt_secret" {
   secret_id = aws_secretsmanager_secret.jwt_secret.id
   secret_string = jsonencode({
     JWT_SECRET = random_password.jwt_secret.result
-  })
-}
-
-# ── Order Service — DB credentials ────────────────────────────────────────────
-
-resource "random_password" "order_db_password" {
-  length           = 32
-  special          = true
-  override_special = "!#$%&*()-_=+[]{}?"
-}
-
-resource "aws_secretsmanager_secret" "order_db_credentials" {
-  name                    = "/bookstore/order-db-credentials"
-  recovery_window_in_days = 0
-}
-
-resource "aws_secretsmanager_secret_version" "order_db_credentials" {
-  secret_id = aws_secretsmanager_secret.order_db_credentials.id
-  secret_string = jsonencode({
-    DB_USERNAME = "order_service_user"
-    DB_PASSWORD = random_password.order_db_password.result
-    DB_HOST     = module.rds.rds_endpoint
-    DB_NAME     = "order_db"
-  })
-}
-
-# ── Notification Service — DB credentials ─────────────────────────────────────
-
-resource "random_password" "notification_db_password" {
-  length           = 32
-  special          = true
-  override_special = "!#$%&*()-_=+[]{}?"
-}
-
-resource "aws_secretsmanager_secret" "notification_db_credentials" {
-  name                    = "/bookstore/notification-db-credentials"
-  recovery_window_in_days = 0
-}
-
-resource "aws_secretsmanager_secret_version" "notification_db_credentials" {
-  secret_id = aws_secretsmanager_secret.notification_db_credentials.id
-  secret_string = jsonencode({
-    DB_USERNAME = "notification_service_user"
-    DB_PASSWORD = random_password.notification_db_password.result
-    DB_HOST     = module.rds.rds_endpoint
-    DB_NAME     = "notification_db"
   })
 }
 
@@ -187,8 +128,12 @@ module "ecr" {
   source                = "./modules/ecr"
   prefix                = "bookstore"
   image_retention_count = 10
-  secondary_region      = var.secondary_region
-  extra_repos           = ["catalog-service", "user-service", "order-service", "notification-service", "api-gateway"]
+  # Empty unless explicitly opted in -- see the matching comment on
+  # module.rds's secondary_region above. OBS-029's "6 orphaned ECR repos in
+  # us-west-2 post-destroy" mystery was this: every apply silently created
+  # them regardless of DR intent.
+  secondary_region = var.enable_dr_replication ? var.secondary_region : ""
+  extra_repos      = ["catalog-service", "user-service", "order-service", "notification-service", "api-gateway"]
 }
 
 # ── EKS ────────────────────────────────────────────────────────────────────────
@@ -198,7 +143,6 @@ module "eks" {
   cluster_name    = "bookstore-eks"
   cluster_version = "1.31"
   prefix          = "bookstore"
-  vpc_id          = module.network.vpc_id
   subnet_ids = [
     module.network.private_subnet_ids[0],
     module.network.private_subnet_ids[1],
@@ -238,14 +182,14 @@ module "monitoring_ec2" {
   eip_allocation_id         = aws_eip.monitoring.id
   cluster_name              = module.eks.cluster_name
   region                    = var.aws_region
-  eks_node_sg_id            = module.eks.cluster_security_group_id
+  eks_cluster_sg_id         = module.eks.cluster_security_group_id
   eks_api_server            = module.eks.cluster_endpoint
   grafana_admin_secret_arn  = module.eks_addons.grafana_admin_secret_arn
   grafana_admin_secret_name = "/bookstore/grafana-admin"
   admin_cidr_blocks         = var.monitoring_admin_cidr
 
   # No blanket depends_on module.eks_addons here on purpose. This module only
-  # needs module.eks (cluster_name, eks_node_sg_id) and the grafana secret's
+  # needs module.eks (cluster_name, eks_cluster_sg_id) and the grafana secret's
   # ARN — the latter is already an implicit dependency via the reference above,
   # and that secret (random_password + aws_secretsmanager_secret) is one of the
   # fastest resources in eks_addons, not gated on any of its slow Helm installs

@@ -880,6 +880,36 @@ User asked for pod CPU/memory and traffic alerts, plus a live demonstration that
 
 **Status:** done, verified live end-to-end. See `docs/OBSERVABILITY.md`'s alert table and dashboard list for the durable reference.
 
+### OBS-049 — full codebase review: 16 real findings across app code, k8s manifests, and Terraform, all fixed
+
+Ran three parallel audits (Terraform infra, k8s manifests, app source + CI) specifically for correctness bugs and unused/redundant infrastructure, then independently verified the highest-impact findings against the real code before fixing anything (reading the actual file, not trusting the audit's citation blind). All 16 fixed in one pass; full test suite (78 tests across 5 services + client) and every `kubectl kustomize` overlay confirmed still green afterward.
+
+**Real bugs fixed:**
+- `client/src/pages/Update.jsx` never fetched the existing book before rendering the edit form — every field started blank, so editing one field wiped the rest via the PUT. Added a `GET /books/:id` route to catalog-service (didn't exist at all) and a `useEffect` fetch + controlled inputs in the form.
+- All 4 DB-backed services (`services/{catalog,user,order,notification}-service/index.js`) used `mysql.createConnection()` — a single connection with no `.on('error', ...)` listener, so any DB blip (RDS failover, idle `wait_timeout`) was an unhandled exception that crashed the whole process. Switched to `mysql.createPool()` — same `.query()` API, but a pool evicts and replaces broken connections per-query instead of crashing.
+- `services/order-service/app.js`'s checkout handler ran its per-item `INSERT` loop and the cart-clearing `DELETE` with no transaction — a failed insert partway through left prior inserts committed (a phantom order) and never cleared the cart. Rewrote using `db.promise()` + `beginTransaction`/`commit`/`rollback`, all-or-nothing.
+- `modules/security/main.tf`'s RDS ingress rule opened port 3306 to the entire VPC CIDR despite its own description claiming "EKS nodes only." Scoped to just the 4 EKS-node private subnets via a new `local.eks_node_subnet_cidrs`.
+- `variables.tf`'s `secondary_region` defaulted to a non-empty region, and both `modules/rds` and `modules/ecr` gated their cross-region replication on `secondary_region != ""` — so a live Secrets Manager replica and full ECR image replication were created in us-west-2 on every default apply, regardless of DR intent. This is the actual mechanism behind OBS-029's "orphaned ECR repos in us-west-2" mystery. Added `enable_dr_replication` (default `false`); the root module now only passes a real region through when that's true.
+- 4 single-replica services (`catalog`/`user`/`order`/`notification`-service) each had a PDB requiring `minAvailable: 1` while running `replicas: 1` — mathematically blocks any voluntary eviction of the only pod forever (`kubectl drain`, EKS managed-node-group upgrades, autoscaler consolidation all hang). Changed to `maxUnavailable: 1`.
+- `k8s/services/api-gateway/base/network-policy.yaml`'s egress rules to catalog/user/order used the Service port (80) instead of the actual container port (3000) — NetworkPolicy egress matching is against the real destination pod port, not any Service's port. Currently dormant (no NetworkPolicy-enforcing CNI installed in this cluster), but would silently block all api-gateway traffic the moment one is turned on.
+- `services/user-service/app.js`'s `jwt.verify()` had no `algorithms` restriction, unlike api-gateway's equivalent check on the same secret (which correctly pins `HS256`) — the standard setup for JWT algorithm-confusion issues.
+
+**Real gaps closed:**
+- No rate limiting anywhere on `/auth/login`/`/auth/register` — added `express-rate-limit` (20 requests/15min per IP) to user-service.
+- CI (`.github/workflows/ci-cd.yml`) ran `npm ci` and `npm audit` for the frontend but never `npm test` — the 18 documented frontend tests never ran in CI. Added the test step.
+- `catalog-service`'s `POST`/`PUT`/`DELETE /books*` routes returned the raw mysql2 error object to the client on failure (`res.send(err)`) — information disclosure. Sanitized to generic messages, still logged server-side.
+
+**Dead infrastructure removed:**
+- `module.acm` — a full DNS-validated ACM certificate whose output was referenced nowhere; TLS is actually handled by cert-manager/Let's Encrypt, and CloudFront provisions its own separate cert. Deleted the whole module.
+- `aws_security_group.alb_frontend` and its 3 rules — never attached to anything; the real ingress LB is a Classic ELB provisioned by the K8s cloud-controller entirely outside Terraform's SG management.
+- Unused variables/outputs: `modules/eks`'s `vpc_id` input (never referenced in the module body), `modules/network`'s `region` variable (module uses `data.aws_region` instead) plus several vestigial commented-out blocks, and 6 outputs nothing in the repo consumed (`internet_gateway_id`, `nat_gateway_id`, `rds_private_zone_id`, `rds_record_fqdn`, `node_group_role_arn`, `ingress_nginx_namespace`, `argocd_namespace`).
+
+**Simplification:**
+- `main.tf`'s 4 near-identical DB-credential blocks (catalog/user/order/notification — `random_password` + `aws_secretsmanager_secret` + `aws_secretsmanager_secret_version`, ~110 lines) collapsed into one `for_each` over `local.db_service_credentials` (~35 lines). Secret names/paths in AWS are byte-identical to before, so nothing downstream (k8s `ExternalSecret`s referencing those exact paths) changed. Root-module outputs (`catalog_db_secret_arn` etc.) kept for backward compatibility, just re-pointed at the new addressing.
+- `modules/monitoring-ec2`'s `eks_node_sg_id` variable actually held the EKS *cluster* security group, not a node-specific one — acknowledged in an inline comment but never renamed across 3 earlier fixes to the same file. Renamed to `eks_cluster_sg_id` everywhere.
+
+**Status:** all 16 fixed and verified. Terraform state was empty at fix time (infra had been destroyed), so the Terraform changes carried zero live-migration risk — no `moved` blocks needed for the `for_each` refactor since there was no prior state to preserve. `terraform validate`/`plan` both clean (124 resources to add, down from 129 — matches the dead-infra removal). Every `kubectl kustomize` overlay builds clean. Full test suite green: 60 backend tests (9+12+20+4+15 across the 5 services) + 18 frontend tests, plus new tests added for the fixes themselves (`GET /books/:id`, checkout rollback-on-failure).
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
