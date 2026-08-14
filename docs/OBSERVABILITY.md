@@ -15,7 +15,7 @@ Every tool this project uses to see what's actually happening — metrics, logs,
 | kube-state-metrics | Docker container, monitoring EC2 | Kubernetes object-state metrics (pod status, restarts, etc.) | same, talks to EKS API over the network |
 | node-exporter | systemd service, on every EKS node | Host-level metrics (CPU/mem/disk) | `modules/eks/node-user-data.sh.tftpl` |
 | kubelet cAdvisor | built into kubelet, every EKS node | Real per-pod/per-container CPU + memory **usage** (not just requests/limits) | Prometheus scrapes `:10250/metrics/cadvisor` directly, `observability-rbac.tf` |
-| Fluent Bit | systemd service, on every EKS node | Ships container logs to Loki | same |
+| Fluent Bit | systemd service, on every EKS node | Ships container logs to Loki | same — **currently pinned inactive, see note below** |
 | prom-client | In-process, every Node.js service | Exposes `/metrics` (HTTP counters/histograms) | `services/*/app.js`, `backend/app.js` — scraped via API server pod-proxy, `observability-rbac.tf` |
 | Argo Rollouts AnalysisTemplate | In-cluster, `bookstore` namespace | Canary error-rate gate, queries EC2 Prometheus | `k8s/base/monitoring/analysis-template.yaml` |
 | ArgoCD | In-cluster | GitOps sync/health status per service | `k8s/argocd/*.yaml` |
@@ -34,8 +34,8 @@ EKS nodes (each one)                         Monitoring EC2 (Docker Compose)
 │ fluent-bit (systemd)     │    every 5 min)   │  evaluates: rules/bookstore.yml  │
 │  tails /var/log/containers│                  │  alerts →                       │
 │  ──push logs (3100)──────┼─────────────────►│ Alertmanager :9093               │
-└─────────────────────────┘                  │  (webhook route, unconfigured    │
-                                               │   receiver by default)           │
+│  (code fixed, ROLLOUT     │                  │  (webhook + email receivers,    │
+│   PAUSED -- see note)     │                  │   SES SMTP, see below)          │
 EKS API server                                │                                  │
 ┌─────────────────────────┐                  │ kube-state-metrics container     │
 │ AmazonEKSViewPolicy       │◄── kubeconfig ───┤  static bearer token, refreshed  │
@@ -101,11 +101,17 @@ The last 4 are deliberately short (`for: 1m`/`2m` vs. 5-10m on the node-level on
 ```bash
 terraform output alertmanager_url   # http://<monitoring-EIP>:9093
 ```
-Routes `severity=critical` and `severity=warning` to separate repeat intervals (1h / 6h). **The actual receivers are unconfigured webhooks pointing at `localhost:5001`** (`modules/monitoring-ec2/user-data.sh.tftpl`'s `alertmanager.yml`) — alerts fire and show up in the Alertmanager UI, but nothing external (Slack/PagerDuty/email) is notified yet. The config has commented-out Slack and email blocks ready to fill in.
+Routes `severity=critical` and `severity=warning` to separate repeat intervals (1h / 6h). Both receivers (`default-webhook`, `critical-webhook`) email real alert notifications via SES SMTP, in addition to the still-unconfigured `localhost:5001` webhook stub each one also carries (harmless no-op — Alertmanager tries every integration on a receiver independently, one failing doesn't block the others). Critical alerts get a `[CRITICAL]`-prefixed subject.
+
+**Setup:** set `ALERT_EMAIL` in `config.env`, run `python scripts/configure.py` (writes it into `terraform.tfvars`), then `terraform apply`. This is the same address used for both the SES sender identity and the recipient — SES accounts start in sandbox mode, which requires both to be verified, so one address means one verification email to click (check that inbox after the first apply — alerts silently fail to send until it's confirmed). See `docs/TROUBLESHOOTING.md` OBS-053 for the full wiring (SES identity, a scoped IAM user for SMTP creds, and how the SMTP password is derived without ever putting it in Terraform state).
+
+Outgrowing SES sandbox limits (200 msgs/day, 1/sec) means requesting SES production access and moving to a dedicated verified sender.
 
 ### Loki — logs
 
 No standalone Loki UI — query it through Grafana's **Explore** view (top-left compass icon), select the `Loki` datasource, and filter by label, e.g. `{job="eks-containers", cluster="bookstore-eks"}`. Fluent Bit tags every line with `job=eks-containers,cluster=<cluster_name>` and pulls the Kubernetes namespace/pod/container out of the CRI log format automatically.
+
+**Currently no log streams arrive.** The Fluent Bit → Loki fix (OBS-050 — wrong yum repo `baseurl`, plus a private-subnet-to-public-IP routing bug) is fully implemented in `modules/eks/node-user-data.sh.tftpl`, but rolling it onto real nodes needs a new EKS managed-node-group launch template version, and this AWS account's EC2 vCPU quota has no headroom for the surge node that rolling replacement needs (see OBS-051). `aws_eks_node_group.this` (`modules/eks/main.tf`) carries a `lifecycle.ignore_changes` guard pinning it to whichever launch template version is already live, specifically so this doesn't get attempted again (and fail again) on every unrelated apply. Remove that line once the vCPU quota is raised and there's a deliberate window to re-roll the nodes.
 
 ### Real per-pod CPU/memory usage (kubelet cAdvisor)
 
@@ -164,12 +170,13 @@ aws logs tail /aws/vpc/flowlogs/bookstore --follow
 
 - **The canary's error-rate gate always passes, regardless of real error rate.** `nginx_ingress_controller_requests` (the metric the `AnalysisTemplate` queries) is never scraped — ingress-nginx's pod doesn't carry the `prometheus.io/scrape` annotation the way the 6 app services now do, so it isn't picked up by the `app-metrics` job either. The query's `or vector(0)`/`or vector(1)` fallbacks mean it silently returns "0% errors" forever instead of erroring loudly, so this is easy to miss in practice. Fixable the same way app-metrics was: add the annotation to ingress-nginx's pod template (via `helm_release` values in `modules/eks-addons`). See `docs/FUTURE_IMPROVEMENTS.md` gap #11 and `docs/TROUBLESHOOTING.md` OBS-016.
 - **The `AnalysisTemplate`'s Prometheus address is a hardcoded literal EIP**, not templated from `terraform output prometheus_url`. A full destroy/recreate allocates a new Elastic IP every time, silently staling this address until someone notices canary rollouts failing with connection timeouts and hand-edits the file. See `docs/TROUBLESHOOTING.md` OBS-032.
-- **Alertmanager has no real receiver** — alerts route correctly (critical vs. warning, grouping, inhibition) but land on an unconfigured `localhost:5001` webhook. Nobody gets paged. Slack/email config is commented-out and ready to fill in in `modules/monitoring-ec2/user-data.sh.tftpl`.
+- **No Fluent Bit → Loki logs currently arrive** (fix implemented, rollout deliberately paused) — see the Loki section above and OBS-050/OBS-051.
+- **This AWS account's EC2 vCPU quota (8, `L-1216C47A`) has no headroom for a managed-node-group rolling replacement.** Steady state (3× t3.medium + 1× t3.small monitoring EC2) already uses all 8. Any future launch-template change on `modules/eks`'s node group will hit the same `NodeCreationFailure`/`VcpuLimitExceeded` this hit — request a quota increase (`aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-1216C47A --desired-value 16 --region <region>`) before attempting one. See OBS-051.
 - **`k8s/base/monitoring/prometheus-rules.yaml` exists but is dead code.** It's a `PrometheusRule` CRD (`monitoring.coreos.com/v1`) from the era before monitoring moved to EC2 — deliberately excluded from `k8s/base/kustomization.yaml` (see the comment there) since there's no Prometheus Operator in-cluster to consume it. Safe to delete, or keep as a reference for what rules *would* look like if the stack ever moves back in-cluster.
 
 ## Related
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — where the monitoring EC2 sits in the overall network/infra picture
 - [`TERRAFORM.md`](TERRAFORM.md) — TF-006, the decision to move monitoring out of the cluster
-- [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — OBS-016, OBS-027, OBS-032, OBS-033, OBS-034 (every real incident that's hit this stack)
+- [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — OBS-016, OBS-027, OBS-032, OBS-033, OBS-034, OBS-050, OBS-051, OBS-052, OBS-053 (every real incident that's hit this stack)
 - [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) — gap #11 (ingress metrics not scraped), gap #14 (hardcoded EIP)

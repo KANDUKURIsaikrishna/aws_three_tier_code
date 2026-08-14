@@ -36,17 +36,35 @@ modules/
 ```hcl
 # versions.tf
 backend "s3" {
-  bucket         = ""   # deliberately empty in git
-  key            = "prod/terraform.tfstate"
-  region         = "us-west-1"
-  dynamodb_table = ""   # deliberately empty in git
-  encrypt        = true
+  bucket                = ""   # deliberately empty in git
+  key                   = "terraform.tfstate"
+  workspace_key_prefix  = "environments"
+  region                = "us-west-1"
+  dynamodb_table        = ""   # deliberately empty in git
+  encrypt               = true
 }
 ```
 
 The bucket/table names are account-specific, so they're never committed. Run `scripts/init-backend.sh us-west-1` once per AWS account — it creates the S3 bucket + DynamoDB lock table, patches `versions.tf` in place with the real names, and runs `terraform init`. (`scripts/bootstrap-tf-state.sh` is an older version of the same idea that prints the block for you to paste manually instead of patching the file — redundant now that `init-backend.sh` exists, kept for reference.)
 
 **If you skip this step**, Terraform silently falls back to local state (`.terraform/terraform.tfstate`), which is what makes `terraform plan` show "100 to add" even when a cluster is already running — the plan has no idea anything exists. Always check `terraform state list` before trusting a plan's resource count.
+
+## Environments
+
+`workspace_key_prefix` makes state workspace-aware without changing today's default behavior: the `default` workspace (what a plain `terraform apply` uses if you've never run `terraform workspace`) resolves to exactly `key` (`terraform.tfstate`), so nothing changes for the single-environment usage this project has always had.
+
+To actually run a second, isolated environment:
+
+```bash
+terraform workspace new staging          # once
+terraform workspace select staging       # every session after
+cp environments/staging.tfvars.example environments/staging.tfvars   # gitignored, fill in real values
+terraform apply -var-file=terraform.tfvars -var-file=environments/staging.tfvars
+```
+
+This gets `staging` its own state file (`environments/staging/terraform.tfstate` in the S3 bucket) automatically — no key values to hand-edit, no risk of two environments sharing one state and stomping each other's resources in Terraform's bookkeeping.
+
+**What this does *not* solve:** almost every resource name in this project is a hardcoded `"bookstore-*"` literal (`aws_eks_cluster.this.name = var.cluster_name` defaults to `"bookstore-eks"`, `module.rds`'s `db_identifier = "bookstore-db"` in root `main.tf`, IAM role names, etc.), not derived from `terraform.workspace` or `var.environment`. State is correctly isolated per workspace, but two workspaces pointed at the *same AWS account* would still collide on the real AWS resource names the moment both tried to `apply` — `aws_eks_cluster` named `bookstore-eks` can only exist once per account+region, workspace or not. Safe today only because this project has only ever run one environment at a time. Parameterizing every hardcoded name by environment (e.g. `"${var.prefix}-${var.environment}-eks"`) is real, separate work — see [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) gap #17 — not something the backend change alone fixes.
 
 ## Module: `network`
 
