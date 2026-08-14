@@ -42,6 +42,9 @@ spec:
       labels:
         app: catalog-service
     spec:
+      # No K8s API access needed by this workload -- don't auto-mount a
+      # token nothing here uses.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001
@@ -103,7 +106,7 @@ spec:
               DEALLOCATE PREPARE migrate_stmt;
 
               CREATE USER IF NOT EXISTS 'catalog_user'@'%' IDENTIFIED BY '$CATALOG_DB_PASSWORD';
-              GRANT ALL PRIVILEGES ON catalog_db.* TO 'catalog_user'@'%';
+              GRANT SELECT, INSERT, UPDATE, DELETE ON catalog_db.* TO 'catalog_user'@'%';
               FLUSH PRIVILEGES;
               SQL
           env:

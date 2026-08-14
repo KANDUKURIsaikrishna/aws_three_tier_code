@@ -6,6 +6,7 @@ namespace: bookstore
 resources:
 - storageclass/gp3.yaml
 - namespace.yaml
+- limitrange.yaml
 - cert-manager/cluster-issuer.yaml
 - secrets/external-secret.yaml
 - frontend/deployment.yaml

@@ -5,6 +5,7 @@ namespace: gateway
 
 resources:
 - namespace.yaml
+- limitrange.yaml
 - configmap.yaml
 - external-secret.yaml
 - deployment.yaml

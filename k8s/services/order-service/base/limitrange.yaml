@@ -1,0 +1,17 @@
+# Defense-in-depth default -- every container in this namespace already sets
+# its own requests/limits explicitly, so this LimitRange is a backstop for
+# any future container added without them, not a fix for an active problem.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: order
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi
+      default:
+        cpu: 250m
+        memory: 256Mi

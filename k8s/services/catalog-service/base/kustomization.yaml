@@ -5,6 +5,7 @@ namespace: catalog
 
 resources:
 - namespace.yaml
+- limitrange.yaml
 - configmap.yaml
 - external-secret.yaml
 - admin-db-secret.yaml

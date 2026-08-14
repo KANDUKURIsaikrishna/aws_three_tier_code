@@ -13,6 +13,9 @@ spec:
       labels:
         app: user-service
     spec:
+      # No K8s API access needed by this workload -- don't auto-mount a
+      # token nothing here uses.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001
@@ -51,7 +54,7 @@ spec:
               );
 
               CREATE USER IF NOT EXISTS 'user_service_user'@'%' IDENTIFIED BY '$USER_DB_PASSWORD';
-              GRANT ALL PRIVILEGES ON user_db.* TO 'user_service_user'@'%';
+              GRANT SELECT, INSERT, UPDATE, DELETE ON user_db.* TO 'user_service_user'@'%';
               FLUSH PRIVILEGES;
               SQL
           env:

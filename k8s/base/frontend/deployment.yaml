@@ -15,6 +15,9 @@ spec:
       labels:
         app: frontend
     spec:
+      # No K8s API access needed by this workload -- don't auto-mount a
+      # token nothing here uses.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 101

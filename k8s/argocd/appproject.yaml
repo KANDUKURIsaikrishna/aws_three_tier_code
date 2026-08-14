@@ -1,0 +1,54 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ArgoCD AppProject — Bookstore
+#
+# Both k8s/argocd/application.yaml (frontend) and
+# k8s/argocd/applicationset-microservices.yaml (the 5 backend services) used
+# to run under ArgoCD's built-in "default" AppProject, which imposes NO
+# restrictions at all: any source repo, any destination cluster/namespace,
+# any resource kind including cluster-scoped ones (ClusterRole, other
+# clusters' Namespaces, etc.). This project scopes both Applications down to
+# exactly what they actually use -- one repo, one cluster, the 6 namespaces
+# this platform actually deploys into, and the single cluster-scoped kind
+# (Namespace) any of them actually create.
+#
+# Apply once, before the Application/ApplicationSet that reference it:
+#   kubectl apply -f k8s/argocd/appproject.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: bookstore
+  namespace: argocd
+spec:
+  description: Bookstore platform — frontend + 5 backend microservices
+
+  sourceRepos:
+    - https://github.com/KANDUKURIsaikrishna/aws_three_tier_code.git
+
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: bookstore
+    - server: https://kubernetes.default.svc
+      namespace: catalog
+    - server: https://kubernetes.default.svc
+      namespace: user
+    - server: https://kubernetes.default.svc
+      namespace: order
+    - server: https://kubernetes.default.svc
+      namespace: notification
+    - server: https://kubernetes.default.svc
+      namespace: gateway
+
+  # Omitting this entirely denies ALL cluster-scoped resources. The one kind
+  # actually synced by these Applications is Namespace (each service's own
+  # kustomize base includes a namespace.yaml) -- everything else these apps
+  # deploy (Deployment, Service, ExternalSecret, NetworkPolicy, HPA, PDB, Job,
+  # Ingress, ...) is namespace-scoped and unaffected by this list.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"

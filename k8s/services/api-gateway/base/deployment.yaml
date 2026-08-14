@@ -19,6 +19,9 @@ spec:
         prometheus.io/port: "3000"
         prometheus.io/path: /metrics
     spec:
+      # No K8s API access needed by this workload -- don't auto-mount a
+      # token nothing here uses.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001
@@ -58,6 +61,9 @@ spec:
             - name: ORDER_SERVICE_URL
               valueFrom:
                 configMapKeyRef: { name: gateway-config, key: ORDER_SERVICE_URL }
+            - name: FRONTEND_URL
+              valueFrom:
+                configMapKeyRef: { name: gateway-config, key: FRONTEND_URL }
           readinessProbe:
             httpGet:
               path: /health

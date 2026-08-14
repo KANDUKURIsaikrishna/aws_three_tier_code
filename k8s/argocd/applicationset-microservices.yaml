@@ -11,7 +11,8 @@
 # deploy stage takes over image-tag bumps, matching k8s/argocd/application.yaml.
 #
 # Prerequisites: same as k8s/argocd/application.yaml (ArgoCD installed, repo
-# credentials registered if private). Apply once:
+# credentials registered if private), plus the scoped AppProject. Apply once:
+#   kubectl apply -f k8s/argocd/appproject.yaml
 #   kubectl apply -f k8s/argocd/applicationset-microservices.yaml
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -41,7 +42,7 @@ spec:
       finalizers:
         - resources-finalizer.argocd.argoproj.io
     spec:
-      project: default
+      project: bookstore   # scoped AppProject, see k8s/argocd/appproject.yaml -- apply that first
 
       source:
         repoURL: https://github.com/KANDUKURIsaikrishna/aws_three_tier_code.git
