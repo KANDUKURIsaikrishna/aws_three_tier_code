@@ -1,7 +1,9 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
 import morgan from "morgan";
 import jwt from "jsonwebtoken";
+import rateLimit from "express-rate-limit";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import { Registry, collectDefaultMetrics, Counter, Histogram } from "prom-client";
 
@@ -61,10 +63,30 @@ function protectMutations(jwtSecret) {
   };
 }
 
+// General limiter for the gateway -- the single public entry point for
+// every route. user-service's own authRateLimiter is tighter and specific
+// to /auth/login and /auth/register; this catches everything else
+// (/books, /orders, /cart, ...), which previously had no rate limiting at
+// all anywhere in the request path.
+const gatewayRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // targets = { catalog: url, user: url, order: url }
 export function createApp(jwtSecret, targets) {
   const app = express();
-  app.use(cors());
+  // Behind nginx-ingress/ALB -- without this, req.ip (and anything keyed on
+  // it, e.g. gatewayRateLimiter above) sees the proxy's address instead of
+  // the real client's.
+  app.set("trust proxy", 1);
+  app.use(helmet());
+  // Only the real frontend origin, not cors()'s any-origin default -- this
+  // is the one service in the platform actually reachable from a browser.
+  app.use(cors({ origin: process.env.FRONTEND_URL || "http://localhost:3000" }));
+  app.use(gatewayRateLimiter);
   app.use(morgan("common"));
   // Deliberately NO express.json() here — every sibling service uses
   // app.use(express.json()), but the gateway must not. http-proxy-middleware

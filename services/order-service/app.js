@@ -1,5 +1,5 @@
 import express from "express";
-import cors from "cors";
+import helmet from "helmet";
 import morgan from "morgan";
 import { Registry, collectDefaultMetrics, Counter, Histogram } from "prom-client";
 
@@ -50,7 +50,14 @@ function dispatchNotification(notifyFn, orderId) {
 
 export function createApp(db, notifyFn) {
   const app = express();
-  app.use(cors());
+  // Behind nginx-ingress/ALB -- without this, req.ip (and anything keyed on
+  // it) sees the proxy's address instead of the real client's.
+  app.set("trust proxy", 1);
+  app.use(helmet());
+  // No cors() here: this service is only ever called server-to-server by
+  // api-gateway (enforced at the network layer too, see
+  // k8s/services/order-service/base/network-policy.yaml) -- it has no
+  // legitimate browser-facing origin to allow.
   app.use(express.json());
   app.use(morgan("common"));
 
