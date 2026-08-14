@@ -50,6 +50,11 @@ resource "aws_db_instance" "db" {
   username = var.db_username
   password = random_password.db_password.result
 
+  # ── Storage ──────────────────────────────────────────────────────
+  # gp3 is both cheaper and faster per provisioned GB than the gp2 default
+  # aws_db_instance falls back to when storage_type is left unset.
+  storage_type = "gp3"
+
   # ── High Availability ─────────────────────────────────────────────
   multi_az = var.multi_az
 
@@ -82,6 +87,22 @@ resource "aws_db_instance" "db" {
   db_subnet_group_name   = aws_db_subnet_group.rds_subnet_group.name
 
   tags = { Name = var.db_identifier }
+
+  # Ensures the retention-bounded log groups above exist before RDS's own
+  # auto-create-on-first-write would otherwise make them with no expiry.
+  depends_on = [aws_cloudwatch_log_group.rds]
+}
+
+# ── CloudWatch log retention for the 3 exported log streams ──────────────────
+# enabled_cloudwatch_logs_exports above auto-creates these log groups with no
+# expiry if Terraform doesn't manage them first — unbounded storage cost. RDS
+# creates the group itself only if it doesn't already exist, so declaring it
+# here (and ordering it before the DB instance) makes retention apply from
+# the first log line instead of needing a later import.
+resource "aws_cloudwatch_log_group" "rds" {
+  for_each          = toset(["error", "general", "slowquery"])
+  name              = "/aws/rds/instance/${var.db_identifier}/${each.value}"
+  retention_in_days = 30
 }
 
 # Enhanced Monitoring IAM role

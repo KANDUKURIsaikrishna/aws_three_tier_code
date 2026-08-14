@@ -74,7 +74,7 @@ Not errors — a proactive audit after the EC2 monitoring migration found and fi
 - **K8S-001:** MySQL StatefulSet probes had `timeoutSeconds: 1` (default), too tight under write load, causing spurious liveness-triggered restarts. (Moot now — the StatefulSet is dead code, RDS is the real DB. Historical.)
 - **K8S-002:** Backend base manifest had no `resources` block at all — only the prod overlay patched it in, so dev ran with zero CPU/memory limits.
 - **TF-008:** `modules/security` had an `rds_egress` rule allowing `0.0.0.0/0` — RDS never initiates outbound connections, so this was unnecessary blast radius. Removed.
-- **K8S-003:** ingress-nginx had no PodDisruptionBudget — a `kubectl drain` could evict the only ingress pod and drop all external traffic. Fixed via `controller.podDisruptionBudget.minAvailable: 1`.
+- **K8S-003:** ingress-nginx had no PodDisruptionBudget — a `kubectl drain` could evict the only ingress pod and drop all external traffic. Fixed via `controller.podDisruptionBudget.minAvailable: 1`. (Superseded 2026-08-14 — `minAvailable: 1` at `replicaCount: 1` was itself the OBS-049-shaped undrainable-pod bug; now `replicaCount: 2` / `maxUnavailable: 1`, see OBS-054.)
 
 ---
 
@@ -447,7 +447,7 @@ Node.js v22.23.2
 ERROR 1146 (42S02) at line 11: Table 'test.books' doesn't exist
 ```
 
-**Root cause:** the schema+seed SQL (`CREATE DATABASE`/`CREATE TABLE books`/two seed `INSERT`s) has only ever existed in `k8s/base/database/mysql-init-configmap.yaml` — a ConfigMap mounted by the in-cluster MySQL StatefulSet (`mysql-statefulset.yaml`) that's dead code today (RDS replaced it, confirmed: neither file is referenced by `k8s/base/kustomization.yaml`'s `resources:` list). When the project migrated to RDS, this initialization SQL never got ported over — RDS has been provisioned and empty since. `backend/app.js`'s `/books` route only ever does `SELECT * FROM books`; nothing in the old monolith path ever issued a `CREATE TABLE`. Consistent with OBS-017's finding that no DB connection in this project's history had ever actually succeeded end-to-end before this session — the missing table was simply never reached.
+**Root cause:** the schema+seed SQL (`CREATE DATABASE`/`CREATE TABLE books`/two seed `INSERT`s) had only ever existed in `k8s/base/database/mysql-init-configmap.yaml` — a ConfigMap mounted by the in-cluster MySQL StatefulSet (`mysql-statefulset.yaml`), dead code even at the time (RDS replaced it, confirmed: neither file was ever referenced by `k8s/base/kustomization.yaml`'s `resources:` list). Both files, plus `mysql-service.yaml`, were deleted 2026-08-14 as part of a FinOps/standards cleanup pass — kept here only as historical context for this incident. When the project migrated to RDS, this initialization SQL never got ported over — RDS has been provisioned and empty since. `backend/app.js`'s `/books` route only ever does `SELECT * FROM books`; nothing in the old monolith path ever issued a `CREATE TABLE`. Consistent with OBS-017's finding that no DB connection in this project's history had ever actually succeeded end-to-end before this session — the missing table was simply never reached.
 
 **Fix:** added `k8s/base/database/schema-init-job.yaml`, an ArgoCD PreSync hook Job for the `bookstore` Application, following the exact pattern already proven for `catalog-service` (`k8s/services/catalog-service/base/schema-init-job.yaml`): same `hook-delete-policy: BeforeHookCreation,HookSucceeded` (OBS-015), same pod `securityContext`/container `securityContext` (Semgrep gate), same escaped-backtick heredoc approach for the `` `desc` `` column (OBS-017) — verified locally with the same capture-and-diff heredoc simulation before committing. Idempotent via `WHERE NOT EXISTS (SELECT 1 FROM test.books WHERE title = ...)` rather than catalog's `ON DUPLICATE KEY UPDATE`, since `books.title` has no unique constraint to key off of (unlike catalog's `id`-based migration).
 
@@ -964,6 +964,29 @@ Ran three parallel audits (Terraform infra, k8s manifests, app source + CI) spec
 **Verified:** `terraform plan`/`apply` clean; the local-exec script's `put-secret-value` succeeded (confirmed by reading the resulting secret back, minus the password); `terraform validate` clean after every edit. The monitoring EC2 was replaced (its `user_data_replace_on_change = true`, sequential destroy-then-create — no vCPU quota risk, unlike OBS-051's node-group surge) picking up the new `alertmanager.yml`.
 
 **Status:** implemented and applied. Actual end-to-end delivery (a real alert firing and an email landing) depends on the SES verification link being clicked for `var.alert_email` — not yet confirmed as of this entry.
+
+### OBS-054 — FinOps + standards audit (read-only), then implemented every finding that didn't need EC2 vCPU headroom
+
+**Ask:** a cost/FinOps + industry-standards review, report-only first ("just want to know"), then "go ahead and implement them" with one hard constraint: this account's EC2 vCPU quota is fixed at 8 (see OBS-051) and steady-state usage is already at 8 (3× t3.medium node group + 1× t3.small monitoring EC2) — nothing implemented is allowed to need that raised.
+
+**Findings and fixes:**
+- **RDS defaulted to gp2, not gp3** — `storage_type = "gp3"` added to `modules/rds`. gp3 is both cheaper and faster per GB than gp2 at this size; zero downside.
+- **Zero VPC endpoints anywhere** — added an S3 Gateway Endpoint (`modules/network`, free, no hourly/data charge) so ECR image-layer pulls and S3 API traffic stop transiting the single NAT Gateway's paid data-processing path. ECR interface endpoints were considered and deliberately skipped — real per-AZ hourly ENI cost, unclear net benefit at this project's pull volume.
+- **CloudWatch log retention: only VPC flow logs were bounded (90d)** — EKS control-plane logs (all 5 log types) and RDS's 3 exported log streams (error/general/slowquery) had no Terraform-managed log group, so AWS default was indefinite retention. Added explicit `aws_cloudwatch_log_group` resources (30-day retention) in both `modules/eks` and `modules/rds`, ordered via `depends_on` so retention applies from the first log line instead of needing a later import.
+- **CloudTrail S3 bucket: versioned, no lifecycle policy** — every log rewrite kept every old version forever at Standard storage class. Added `aws_s3_bucket_lifecycle_configuration`: Standard→IA at 30d, →Glacier at 90d, noncurrent versions expire at 365d. Current-version objects are never expired (audit trail stays retrievable), only tiered and the noncurrent pile is capped.
+- **No cost-allocation tag beyond `Project`/`Environment`/`ManagedBy`** — added `CostCenter` (new `var.cost_center`, default `"bookstore-platform"`) to all three `default_tags` blocks in `providers.tf`.
+- **EKS node root volume was unmanaged** — no `block_device_mappings` on the launch template meant the AL2 AMI's implicit (likely gp2) default was silently in use. Added an explicit gp3/20GB/encrypted block. Since the node group already carries the OBS-051 `lifecycle.ignore_changes` pin on `launch_template[0].version`, this has no effect on already-running nodes and won't trigger a rolling replace — it only takes effect on the next full `create`.
+- **ingress-nginx: `replicaCount=1` with a PDB `minAvailable=1`** — the exact same undrainable-single-replica anti-pattern OBS-049 fixed for the 4 single-replica backend services, missed there because it's a Helm `set` value in `modules/eks-addons/ingress.tf`, not a `k8s/` YAML file that sweep covered. Every request in the app — every static asset, every API call — passes through this controller; at 1 replica it was a hard SPOF. Fixed: `replicaCount=2`, PDB switched to `maxUnavailable=1`. Runs as pods on the existing fixed node group — no new EC2 instances, no vCPU impact, safe under the constraint.
+- **Dead in-cluster-MySQL files** (`k8s/base/database/mysql-statefulset.yaml`, `mysql-service.yaml`, `mysql-init-configmap.yaml`) — unreferenced by any `kustomization.yaml`, confirmed via grep. Deleted (see the note now in `ARCHITECTURE.md`/`KUBERNETES.md`).
+
+**Deliberately not implemented, and why:**
+- **Cluster Autoscaler / Karpenter** — the actual fix for HPAs being capped by a fixed 3-node group (all 6 HPAs are correctly configured but can't scale past whatever spare capacity those 3 nodes have), but its entire value proposition is adding node capacity on demand — exactly what the vCPU constraint rules out here.
+- **Spot instances** — same total vCPU count as On-Demand, but Spot is tracked against a *separate*, unconfirmed AWS quota, and adds interruption risk to a node group that's already in a fragile pinned state (OBS-051). Not touching it mid-pin.
+- **Reserved Instances / Savings Plans on RDS + the monitoring EC2** — the single biggest dollar lever identified, but it's a real financial commitment made in the AWS Billing console, not a Terraform resource — intentionally left as a manual decision for whoever holds the account.
+
+**Verified:** `terraform validate` clean (one warning surfaced and fixed along the way — the S3 lifecycle rule needed an explicit `filter {}` block to apply account-wide). Not applied to live infra as of this entry — infra was destroyed earlier in the session (see the "lets destroy the infra for today" note) and hasn't been re-created since these changes landed.
+
+**Status:** implemented, validated, not yet applied.
 
 ## Related
 

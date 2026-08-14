@@ -20,6 +20,14 @@ resource "aws_kms_alias" "eks_secrets" {
 
 # ── EKS Cluster ───────────────────────────────────────────────────────────────
 
+# EKS auto-creates this log group on first write with no expiry if it doesn't
+# already exist. Declaring it here first (all 5 log types are enabled below)
+# makes 30-day retention apply from the start instead of needing an import.
+resource "aws_cloudwatch_log_group" "eks_cluster" {
+  name              = "/aws/eks/${var.cluster_name}/cluster"
+  retention_in_days = 30
+}
+
 resource "aws_eks_cluster" "this" {
   name     = var.cluster_name
   version  = var.cluster_version
@@ -51,6 +59,7 @@ resource "aws_eks_cluster" "this" {
     aws_iam_role_policy_attachment.cluster_policy,
     aws_iam_role_policy_attachment.cluster_vpc_controller,
     aws_iam_role_policy.cluster_kms,
+    aws_cloudwatch_log_group.eks_cluster,
   ]
 }
 
@@ -101,6 +110,19 @@ resource "aws_iam_openid_connect_provider" "eks" {
 
 resource "aws_launch_template" "nodes" {
   name_prefix = "${var.prefix}-node-"
+
+  # Explicit gp3 root volume — the EKS-optimized AL2 AMI's default is
+  # unmanaged/undeclared otherwise (implicitly gp2). Size matches the AMI
+  # default; this is a cost/consistency fix, not a resize.
+  block_device_mappings {
+    device_name = "/dev/xvda"
+    ebs {
+      volume_type           = "gp3"
+      volume_size           = 20
+      encrypted             = true
+      delete_on_termination = true
+    }
+  }
 
   user_data = base64encode(templatefile("${path.module}/node-user-data.sh.tftpl", {
     cluster_name = var.cluster_name

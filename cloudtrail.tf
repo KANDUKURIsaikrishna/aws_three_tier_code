@@ -17,6 +17,36 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "cloudtrail" {
   }
 }
 
+resource "aws_s3_bucket_lifecycle_configuration" "cloudtrail" {
+  bucket = aws_s3_bucket.cloudtrail.id
+
+  rule {
+    id     = "cloudtrail-tiering"
+    status = "Enabled"
+    filter {} # applies to every object in the bucket
+
+    # Versioning is on with no prior lifecycle rule — every log rewrite kept
+    # every old version at Standard storage forever. Tier current objects
+    # down as they age, and cap noncurrent (superseded) versions instead of
+    # retaining them indefinitely.
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+    transition {
+      days          = 90
+      storage_class = "GLACIER"
+    }
+    noncurrent_version_transition {
+      noncurrent_days = 30
+      storage_class   = "GLACIER"
+    }
+    noncurrent_version_expiration {
+      noncurrent_days = 365
+    }
+  }
+}
+
 resource "aws_s3_bucket_public_access_block" "cloudtrail" {
   bucket                  = aws_s3_bucket.cloudtrail.id
   block_public_acls       = true

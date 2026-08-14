@@ -158,6 +158,17 @@ resource "null_resource" "force_delete_flow_log_group" {
 
 data "aws_region" "current" {}
 
+# S3 Gateway VPC Endpoint — free (no hourly/data charge), routes S3 traffic
+# (ECR image layers are stored in S3, plus Terraform state reads) off the
+# single NAT Gateway instead of paying its per-GB data-processing fee for it.
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${data.aws_region.current.name}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.public.id, aws_route_table.private.id]
+  tags              = { Name = "bookstore-s3-endpoint" }
+}
+
 # Route Table Associations
 resource "aws_route_table_association" "public" {
   count          = length(var.public_subnets)

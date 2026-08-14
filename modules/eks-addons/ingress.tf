@@ -8,16 +8,25 @@ resource "helm_release" "ingress_nginx" {
   wait             = true
   timeout          = 600
 
+  # 2 replicas, not 1: every request in the app — static assets and every API
+  # call — passes through this controller. At replicaCount=1 it was a single
+  # point of failure, and its PDB (minAvailable=1, equal to the replica
+  # count) made that one pod undrainable — the same anti-pattern OBS-049
+  # fixed for the 4 single-replica backend services, missed here because
+  # this is a Helm value, not a k8s/ YAML file. maxUnavailable=1 with 2
+  # replicas permits exactly one voluntary eviction at a time (node drain,
+  # MNG upgrade) while always keeping one pod serving traffic. Runs as pods
+  # on the existing fixed node group — no new EC2 instances, no vCPU impact.
   set {
     name  = "controller.replicaCount"
-    value = "1"
+    value = "2"
   }
   set {
     name  = "controller.service.type"
     value = "LoadBalancer"
   }
   set {
-    name  = "controller.podDisruptionBudget.minAvailable"
+    name  = "controller.podDisruptionBudget.maxUnavailable"
     value = "1"
   }
 

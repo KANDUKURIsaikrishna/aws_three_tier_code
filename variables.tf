@@ -20,6 +20,12 @@ variable "environment" {
   }
 }
 
+variable "cost_center" {
+  description = "Cost-allocation tag applied to every resource, for chargeback/FinOps grouping beyond Project/Environment"
+  type        = string
+  default     = "bookstore-platform"
+}
+
 variable "domain" {
   description = "Primary domain for ACM cert and ingress host rules (e.g. example.com)"
   type        = string

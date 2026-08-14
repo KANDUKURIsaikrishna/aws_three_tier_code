@@ -54,7 +54,7 @@ Resources, in the order `kustomization.yaml` lists them:
 | `quota.yaml` | namespace ResourceQuota |
 | `monitoring/servicemonitor.yaml`, `monitoring/prometheus-rules.yaml`, `monitoring/analysis-template.yaml` | CRD manifests — **inert**, see below |
 
-`k8s/base/database/` (`mysql-statefulset.yaml`, `mysql-service.yaml`, `mysql-init-configmap.yaml`) exists on disk but is **not referenced by `kustomization.yaml`**. Dead files from an earlier in-cluster-MySQL design. RDS is the real database. Don't apply these by hand — they'd create a second, empty, unused MySQL instance.
+`k8s/base/database/` (`mysql-statefulset.yaml`, `mysql-service.yaml`, `mysql-init-configmap.yaml`) — dead files from an earlier in-cluster-MySQL design, never referenced by `kustomization.yaml` — were deleted 2026-08-14. RDS is, and has always been in the live deployment, the real database.
 
 ### Why the monitoring CRD manifests do nothing
 

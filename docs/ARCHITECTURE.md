@@ -62,10 +62,10 @@ iam.tf / cloudtrail.tf / guardduty.tf (independent)         any Helm install)
 
 | Module | Creates | Depends on |
 |---|---|---|
-| `network` | VPC `170.20.0.0/16`, 2 public + 6 private subnets, IGW, single NAT gateway, VPC Flow Logs | — |
+| `network` | VPC `170.20.0.0/16`, 2 public + 6 private subnets, IGW, single NAT gateway, S3 Gateway VPC Endpoint (free — keeps ECR/S3 traffic off the NAT), VPC Flow Logs | — |
 | `security` | Security groups: ALB (80/443 from internet), RDS (3306 from VPC CIDR) | `network` |
 | `acm` | Wildcard ACM cert (DNS validation) for the ingress domain | — |
-| `rds` | MySQL 8.0 `db.t3.micro`, Multi-AZ, Secrets Manager admin credentials, enhanced monitoring, optional cross-region backup replication | `network`, `security` |
+| `rds` | MySQL 8.0 `db.t3.micro`, Multi-AZ, gp3 storage, Secrets Manager admin credentials, enhanced monitoring, retention-bounded CloudWatch log exports, optional cross-region backup replication | `network`, `security` |
 | `route53` | Private zone (RDS internal DNS) + public zone with active-passive failover records | `network`, `rds`, `eks` (needs ALB DNS) |
 | `ecr` | ECR repos for `frontend`, plus any `extra_repos` (currently `catalog-service`, `user-service`, `order-service`, `notification-service`, `api-gateway`), 10-image lifecycle policy, optional cross-region replication — `backend` repo deleted along with the old monolith, see OBS-046 | — |
 | `eks` | EKS 1.31 cluster, managed node group (`t3.medium`, min 1 / max 3 / desired 3 — bumped from 2 once all 5 microservices + api-gateway needed to schedule alongside the monolith and cluster-services, see TROUBLESHOOTING OBS-030), OIDC provider (enables IRSA), node launch template running node-exporter + Fluent Bit as systemd services | `network`, `security` |
@@ -84,7 +84,7 @@ The original design put `kube-prometheus-stack` in EKS. On a single `t3.medium` 
 
 Single RDS MySQL 8.0 instance, `db.t3.micro`, Multi-AZ, in two private subnets dedicated to RDS (subnet indices 4-5 of the 6 private subnets — see [Subnet layout](#subnet-layout)). Admin credentials live in Secrets Manager at `/bookstore/db-credentials`, synced into the cluster as a K8s Secret via External Secrets Operator.
 
-`k8s/base/database/mysql-statefulset.yaml`, `mysql-service.yaml`, and `mysql-init-configmap.yaml` still exist on disk but are **not** in `k8s/base/kustomization.yaml`'s resource list — dead files from an earlier design where MySQL ran in-cluster. RDS is the real, only database.
+The dead `k8s/base/database/` files (`mysql-statefulset.yaml`, `mysql-service.yaml`, `mysql-init-configmap.yaml`) from an earlier in-cluster-MySQL design have been deleted (2026-08-14) — they were never referenced by `k8s/base/kustomization.yaml`. RDS is, and has always been in the live deployment, the real, only database.
 
 ## Secrets flow (and the bug that used to break it)
 

@@ -68,13 +68,13 @@ This gets `staging` its own state file (`environments/staging/terraform.tfstate`
 
 ## Module: `network`
 
-VPC `170.20.0.0/16`, 2 public + 6 private subnets (see [`ARCHITECTURE.md`](ARCHITECTURE.md#subnet-layout) for exact layout), one Internet Gateway, **one** NAT Gateway (cost tradeoff — no per-AZ redundancy), VPC Flow Logs to CloudWatch (90-day retention).
+VPC `170.20.0.0/16`, 2 public + 6 private subnets (see [`ARCHITECTURE.md`](ARCHITECTURE.md#subnet-layout) for exact layout), one Internet Gateway, **one** NAT Gateway (cost tradeoff — no per-AZ redundancy), an S3 Gateway VPC Endpoint (free — added 2026-08-14 so ECR image-layer pulls and S3 API traffic stop paying the NAT's data-processing fee), VPC Flow Logs to CloudWatch (90-day retention).
 
 Notable: a `null_resource` with a `destroy`-time `local-exec` provisioner force-deletes the flow-log CloudWatch log group with a 15s sleep first. Why: AWS's VPC Flow Logs service self-heals its log group — if Terraform deletes the group while flow logs are still actively delivering, the service just recreates it, and then the VPC delete fails because a "foreign" log group exists that Terraform doesn't own. The `depends_on = [aws_flow_log.vpc]` ordering plus the sleep exists specifically to let in-flight delivery stop first. This was reverse-engineered from CloudTrail (`lookup-events` by `EventName`, not `ResourceName` — the latter returns nothing for this event type).
 
 ## Module: `security`
 
-Two security groups: `alb_frontend` (80/443 from `0.0.0.0/0`, all egress) and `rds` (3306 from the VPC CIDR only). RDS has **no egress rule** — it never initiates outbound connections, so one isn't needed (a `rds_egress` rule allowing `0.0.0.0/0` egress used to exist here and was removed as unnecessary blast radius).
+Two security groups: `alb_frontend` (80/443 from `0.0.0.0/0`, all egress) and `rds` (3306 from `var.eks_node_cidr_blocks` — the 4 EKS-node private subnet CIDRs specifically, **not** the whole VPC CIDR; a previous version of this rule really did open 3306 to all of `170.20.0.0/16`, including public subnets and RDS's own subnets, despite its `description` claiming EKS-nodes-only — see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) OBS-049). RDS has **no egress rule** — it never initiates outbound connections, so one isn't needed (a `rds_egress` rule allowing `0.0.0.0/0` egress used to exist here and was removed as unnecessary blast radius).
 
 ## Module: `acm`
 
@@ -82,9 +82,11 @@ One ACM certificate, DNS validation, with a wildcard SAN (`*.<domain>`). Has an 
 
 ## Module: `rds`
 
-MySQL 8.0, `db.t3.micro`, Multi-AZ, 25GB storage (autoscaling to 100GB), 7-day backup retention, encrypted at rest (AWS-managed key by default). Admin credentials generated with `random_password` and stored in Secrets Manager at `/bookstore/db-credentials` (`recovery_window_in_days = 0` — force-delete on destroy, no 7/30-day soft-delete window, so repeated destroy/apply cycles during development don't collide on a pending-deletion secret name).
+MySQL 8.0, `db.t3.micro`, Multi-AZ, **gp3** storage (added 2026-08-14 — `aws_db_instance` defaults to gp2, cheaper/slower, if `storage_type` is left unset), 25GB storage (autoscaling to 100GB), 7-day backup retention, encrypted at rest (AWS-managed key by default). Admin credentials generated with `random_password` and stored in Secrets Manager at `/bookstore/db-credentials` (`recovery_window_in_days = 0` — force-delete on destroy, no 7/30-day soft-delete window, so repeated destroy/apply cycles during development don't collide on a pending-deletion secret name).
 
 `performance_insights_enabled = false` — not supported on `db.t3.micro`, would hard-fail `terraform apply` if enabled. Enhanced Monitoring (`monitoring_interval = 60`) is separate and does work on this instance class.
+
+`enabled_cloudwatch_logs_exports = ["error", "general", "slowquery"]` writes to 3 CloudWatch log groups (`/aws/rds/instance/<identifier>/<type>`) that RDS auto-creates with no expiry the first time it isn't Terraform-managed. Declared explicitly (`aws_cloudwatch_log_group.rds`, `retention_in_days = 30`, ordered via `depends_on` ahead of the DB instance) so retention is bounded from the first log line instead of needing a later import.
 
 `deletion_protection = false`, `skip_final_snapshot = true` — deliberately, to make `terraform destroy` actually complete without manual intervention. This is a real tradeoff for a project that gets destroyed/recreated often; a persistent production deployment would flip both.
 
@@ -111,7 +113,7 @@ Called from root `main.tf` with `extra_repos = ["catalog-service"]`. A generic `
 
 ## Module: `eks`
 
-EKS 1.31, managed node group on `t3.medium` (min 1 / max 2 / desired 2 — desired was bumped from 1 to 2 specifically because a single `t3.medium` node hits its ENI pod-IP ceiling (~17 pods) before the full ArgoCD stack even fits, see TROUBLESHOOTING TF-014). `access_config.authentication_mode = "API_AND_CONFIG_MAP"` with explicit `aws_eks_access_entry`/`aws_eks_access_policy_association` resources granting cluster-admin to every ARN in `var.admin_principal_arns` (always includes whoever is running `terraform apply`, via `data.aws_caller_identity.current.arn`). This exists because EKS's `bootstrap_cluster_creator_admin_permissions` only fires once, at the literal `CreateCluster` API call — it doesn't retroactively grant access to a different person running `apply` later, and doesn't survive certain module refactors. The access-entry resources are the persistent, re-appliable equivalent.
+EKS 1.31, managed node group on `t3.medium` (min 1 / max 3 / desired 3 — desired was bumped from 1 to 2 because a single node hits its ENI pod-IP ceiling (~17 pods) before the full ArgoCD stack even fits (TF-014), then to 3 once all 5 microservices + api-gateway needed to schedule alongside the monolith and cluster-services (OBS-030)). The launch template's root volume is explicit `gp3`/20GB/encrypted (added 2026-08-14 — previously unset, silently defaulting to whatever the AL2 AMI ships with). The node group carries a `lifecycle.ignore_changes = [launch_template[0].version]` pin (OBS-051) — this account's EC2 vCPU quota (8) has no headroom for a rolling-replace surge node, so launch-template edits (including the volume change above) land in state but won't roll onto live nodes until the pin is removed post-quota-increase. `access_config.authentication_mode = "API_AND_CONFIG_MAP"` with explicit `aws_eks_access_entry`/`aws_eks_access_policy_association` resources granting cluster-admin to every ARN in `var.admin_principal_arns` (always includes whoever is running `terraform apply`, via `data.aws_caller_identity.current.arn`). This exists because EKS's `bootstrap_cluster_creator_admin_permissions` only fires once, at the literal `CreateCluster` API call — it doesn't retroactively grant access to a different person running `apply` later, and doesn't survive certain module refactors. The access-entry resources are the persistent, re-appliable equivalent.
 
 An `aws_iam_openid_connect_provider` is created from the cluster's OIDC issuer — this is what makes IRSA (IAM Roles for Service Accounts) possible for everything downstream (External Secrets Operator, EBS CSI driver).
 
@@ -125,7 +127,7 @@ Helm-installed cluster add-ons, all via `helm_release`:
 |---|---|---|
 | cert-manager | `cert-manager` | CRDs installed, single replica |
 | external-secrets | `external-secrets` | ServiceAccount explicitly named `external-secrets-sa` with an IRSA role annotation — see below |
-| ingress-nginx | `ingress-nginx` | `LoadBalancer` service type → provisions a real AWS NLB as a side effect, invisible to Terraform (see destroy notes) |
+| ingress-nginx | `ingress-nginx` | `LoadBalancer` service type → provisions a real AWS load balancer as a side effect, invisible to Terraform (see destroy notes). `replicaCount=2` with PDB `maxUnavailable=1` (was `replicaCount=1`/`minAvailable=1` — an undrainable single point of failure for every request in the app, the same anti-pattern OBS-049 fixed elsewhere, missed here since it's a Helm value; fixed 2026-08-14) |
 | argocd | `argocd` | No `depends_on` (see below) |
 | argo-rollouts | `argo-rollouts` | No `depends_on` (see below) |
 | aws-ebs-csi-driver | (EKS addon, not Helm) | IAM policy attached to the node role first |

@@ -6,6 +6,7 @@ provider "aws" {
       Project     = "bookstore"
       Environment = var.environment
       ManagedBy   = "terraform"
+      CostCenter  = var.cost_center
     }
   }
 }
@@ -19,6 +20,7 @@ provider "aws" {
       Project     = "bookstore"
       Environment = var.environment
       ManagedBy   = "terraform"
+      CostCenter  = var.cost_center
     }
   }
 }
@@ -33,6 +35,7 @@ provider "aws" {
       Project     = "bookstore"
       Environment = var.environment
       ManagedBy   = "terraform"
+      CostCenter  = var.cost_center
     }
   }
 }
