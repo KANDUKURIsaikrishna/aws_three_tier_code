@@ -23,6 +23,11 @@ variable "db_instance_class" {
 variable "db_allocated_storage" {
   description = "Allocated storage in GB"
   type        = number
+
+  validation {
+    condition     = var.db_allocated_storage >= 20
+    error_message = "db_allocated_storage must be at least 20 GB (RDS MySQL/Postgres minimum)."
+  }
 }
 
 variable "db_name" {
@@ -55,6 +60,11 @@ variable "backup_retention_period" {
   description = "Days to retain automated backups (0 disables backups)"
   type        = number
   default     = 7
+
+  validation {
+    condition     = var.backup_retention_period >= 0 && var.backup_retention_period <= 35
+    error_message = "backup_retention_period must be between 0 and 35 (RDS's own hard limit)."
+  }
 }
 
 variable "deletion_protection" {
@@ -73,6 +83,11 @@ variable "max_allocated_storage" {
   description = "Upper limit for RDS storage autoscaling in GB. 0 = disabled."
   type        = number
   default     = 100
+
+  validation {
+    condition     = var.max_allocated_storage == 0 || var.max_allocated_storage >= 20
+    error_message = "max_allocated_storage must be 0 (disabled) or at least 20 GB."
+  }
 }
 
 variable "secondary_region" {

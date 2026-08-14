@@ -1,3 +1,23 @@
+# ── KMS key for Kubernetes Secrets envelope encryption ────────────────────────
+# Without this, K8s Secrets are encrypted at rest only via EBS/etcd-volume
+# encryption -- the CIS EKS Benchmark / AWS well-architected baseline expects
+# envelope encryption at the API layer too (a compromised etcd snapshot alone
+# shouldn't be enough to read Secret contents). Default key policy (no
+# explicit `policy` argument) grants the account root user full access, which
+# is what lets Terraform's calling principal (needs kms:CreateGrant) provision
+# this in the same apply as the cluster -- EKS creates its own grant on the
+# key using that principal's permissions during CreateCluster.
+resource "aws_kms_key" "eks_secrets" {
+  description             = "EKS Kubernetes Secrets envelope encryption for ${var.cluster_name}"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+}
+
+resource "aws_kms_alias" "eks_secrets" {
+  name          = "alias/${var.prefix}-eks-secrets"
+  target_key_id = aws_kms_key.eks_secrets.key_id
+}
+
 # ── EKS Cluster ───────────────────────────────────────────────────────────────
 
 resource "aws_eks_cluster" "this" {
@@ -20,9 +40,17 @@ resource "aws_eks_cluster" "this" {
     "api", "audit", "authenticator", "controllerManager", "scheduler"
   ]
 
+  encryption_config {
+    provider {
+      key_arn = aws_kms_key.eks_secrets.arn
+    }
+    resources = ["secrets"]
+  }
+
   depends_on = [
     aws_iam_role_policy_attachment.cluster_policy,
     aws_iam_role_policy_attachment.cluster_vpc_controller,
+    aws_iam_role_policy.cluster_kms,
   ]
 }
 
@@ -127,4 +155,19 @@ resource "aws_eks_node_group" "this" {
     aws_iam_role_policy_attachment.node_cni,
     aws_iam_role_policy_attachment.node_ecr_readonly,
   ]
+
+  # Pinned to whatever launch_template.version is already live -- the
+  # node-user-data.sh.tftpl Fluent Bit/Loki fix (OBS-050) is staying in the
+  # repo, but rolling it onto real nodes needs a surge node during replace,
+  # which this account's EC2 vCPU quota (8, steady-state already at 6-8) has
+  # no headroom for -- confirmed live: NodeCreationFailure/VcpuLimitExceeded,
+  # AWS auto-rolled back to the original 3 nodes. Quota increase requested
+  # (8->16) but paused pending it, by request, rather than shrinking node
+  # count into an already-tight pod-capacity margin (see node_max_size
+  # comment in main.tf, TF-014/OBS-030). Remove this ignore_changes line
+  # (or terraform apply -replace) once the quota clears and there's a
+  # deliberate window to re-attempt the rollout.
+  lifecycle {
+    ignore_changes = [launch_template[0].version]
+  }
 }

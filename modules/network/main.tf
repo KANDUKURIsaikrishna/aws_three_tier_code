@@ -88,19 +88,32 @@ resource "aws_iam_role" "vpc_flow_log" {
 resource "aws_iam_role_policy" "vpc_flow_log" {
   role = aws_iam_role.vpc_flow_log.id
 
+  # Split from a single Resource="*" statement: CreateLogGroup/DescribeLogGroups
+  # are list/discovery-type actions AWS's own IAM reference doesn't support
+  # scoping below "*" for, but the actual stream-level write actions
+  # (CreateLogStream/PutLogEvents/DescribeLogStreams) can and should be scoped
+  # to just this flow log's own log group.
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents",
-        "logs:DescribeLogGroups",
-        "logs:DescribeLogStreams",
-      ]
-      Resource = "*"
-    }]
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:DescribeLogGroups",
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams",
+        ]
+        Resource = "${aws_cloudwatch_log_group.vpc_flow_logs.arn}:*"
+      }
+    ]
   })
 }
 

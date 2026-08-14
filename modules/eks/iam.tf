@@ -23,6 +23,25 @@ resource "aws_iam_role_policy_attachment" "cluster_vpc_controller" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSVPCResourceController"
 }
 
+# EKS itself creates its own KMS grant on cluster creation using the calling
+# principal's permissions, so this isn't strictly required for the cluster to
+# come up -- added anyway as defense-in-depth so the cluster role's own
+# permission set is self-sufficient for envelope encryption, not solely
+# dependent on whoever happens to run `terraform apply` also holding
+# kms:CreateGrant on this key.
+resource "aws_iam_role_policy" "cluster_kms" {
+  name = "${var.prefix}-eks-cluster-kms"
+  role = aws_iam_role.cluster.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["kms:Encrypt", "kms:Decrypt", "kms:DescribeKey"]
+      Resource = aws_kms_key.eks_secrets.arn
+    }]
+  })
+}
+
 # ── Node Group IAM Role ───────────────────────────────────────────────────────
 
 resource "aws_iam_role" "node_group" {

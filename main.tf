@@ -163,6 +163,110 @@ module "eks" {
   )
 }
 
+# ── Alert email (SES SMTP for Alertmanager) ────────────────────────────────────
+# SES account starts in sandbox mode: both sender and recipient must be
+# verified addresses. aws_sesv2_email_identity below triggers AWS's
+# verification email automatically on create -- click the link it sends to
+# var.alert_email before alerts will actually deliver (SES silently bounces
+# to unverified recipients otherwise). SMTP AUTH needs a *derived* SMTP
+# password, not the raw IAM secret access key -- AWS's own documented
+# conversion algorithm (HMAC-SHA256 chain, keyed with a fixed placeholder
+# date "11111111" since IAM keys don't expire the way SigV4 requests do) is
+# reproduced in the null_resource below. No Terraform-native HMAC function
+# exists for this, so it shells out to python3 (already present on any dev
+# machine that can run this repo's other scripts) and writes the result
+# straight to Secrets Manager -- the derived password itself never touches
+# Terraform state.
+
+resource "aws_sesv2_email_identity" "alerts" {
+  email_identity = var.alert_email
+}
+
+resource "aws_iam_user" "ses_smtp" {
+  name = "bookstore-ses-smtp"
+}
+
+resource "aws_iam_user_policy" "ses_smtp_send" {
+  name = "ses-send"
+  user = aws_iam_user.ses_smtp.name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = "ses:SendRawEmail"
+      # Scoped to the one identity this project ever sends from/verifies —
+      # SES supports resource-level ARNs for this action, no reason to grant
+      # send-as-anyone-verified-in-this-account.
+      Resource = aws_sesv2_email_identity.alerts.arn
+    }]
+  })
+}
+
+resource "aws_iam_access_key" "ses_smtp" {
+  user = aws_iam_user.ses_smtp.name
+}
+
+resource "aws_secretsmanager_secret" "alertmanager_smtp" {
+  name                    = "/bookstore/alertmanager-smtp"
+  recovery_window_in_days = 0
+}
+
+# No aws_secretsmanager_secret_version here on purpose -- the SMTP password
+# can only be computed after the access key exists, and that computation
+# happens in the null_resource below, not in an HCL expression.
+resource "null_resource" "ses_smtp_password" {
+  triggers = {
+    access_key_id = aws_iam_access_key.ses_smtp.id
+  }
+
+  provisioner "local-exec" {
+    environment = {
+      SECRET_KEY = aws_iam_access_key.ses_smtp.secret
+      ACCESS_KEY = aws_iam_access_key.ses_smtp.id
+      REGION     = var.aws_region
+      SECRET_ID  = aws_secretsmanager_secret.alertmanager_smtp.id
+      FROM_EMAIL = var.alert_email
+      TO_EMAIL   = var.alert_email
+    }
+    command = <<-EOT
+      python3 <<'PYEOF'
+import hmac, hashlib, base64, json, os, subprocess
+
+def sign(key, msg):
+    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+def derive_smtp_password(secret_key, region):
+    date = "11111111"
+    k = sign(("AWS4" + secret_key).encode("utf-8"), date)
+    k = sign(k, region)
+    k = sign(k, "ses")
+    k = sign(k, "aws4_request")
+    k = sign(k, "SendRawEmail")
+    return base64.b64encode(bytes([0x04]) + k).decode("utf-8")
+
+region = os.environ["REGION"]
+secret = {
+    "SMTP_HOST": f"email-smtp.{region}.amazonaws.com",
+    "SMTP_PORT": "587",
+    "SMTP_USERNAME": os.environ["ACCESS_KEY"],
+    "SMTP_PASSWORD": derive_smtp_password(os.environ["SECRET_KEY"], region),
+    "SMTP_FROM": os.environ["FROM_EMAIL"],
+    "SMTP_TO": os.environ["TO_EMAIL"],
+}
+subprocess.run(
+    ["aws", "secretsmanager", "put-secret-value",
+     "--secret-id", os.environ["SECRET_ID"],
+     "--region", region,
+     "--secret-string", json.dumps(secret)],
+    check=True,
+)
+PYEOF
+    EOT
+  }
+
+  depends_on = [aws_secretsmanager_secret.alertmanager_smtp]
+}
+
 # ── Monitoring EC2 ────────────────────────────────────────────────────────────
 # Prometheus + Grafana + Loki run on a dedicated t3.small EC2 instance rather
 # than inside EKS. This frees ~600 MB RAM on the single t3.medium node and
@@ -188,6 +292,9 @@ module "monitoring_ec2" {
   grafana_admin_secret_name = "/bookstore/grafana-admin"
   admin_cidr_blocks         = var.monitoring_admin_cidr
 
+  alertmanager_smtp_secret_arn  = aws_secretsmanager_secret.alertmanager_smtp.arn
+  alertmanager_smtp_secret_name = aws_secretsmanager_secret.alertmanager_smtp.name
+
   # No blanket depends_on module.eks_addons here on purpose. This module only
   # needs module.eks (cluster_name, eks_cluster_sg_id) and the grafana secret's
   # ARN — the latter is already an implicit dependency via the reference above,
@@ -196,6 +303,13 @@ module "monitoring_ec2" {
   # (cert-manager/external-secrets/ingress-nginx/argocd/argo-rollouts, up to
   # 900s timeout each). A module-level depends_on would force this EC2 to wait
   # for ALL of those regardless, which it doesn't actually need.
+  #
+  # null_resource.ses_smtp_password IS an explicit depends_on -- the ARN
+  # reference above only orders against the empty secret shell
+  # (aws_secretsmanager_secret), not the local-exec that actually populates
+  # it, so without this the instance could boot and fetch the secret before
+  # the SMTP password has been written.
+  depends_on = [null_resource.ses_smtp_password]
 }
 
 # ── EKS Add-ons ────────────────────────────────────────────────────────────────

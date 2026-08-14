@@ -49,10 +49,25 @@ variable "grafana_admin_secret_name" {
   default     = "/bookstore/grafana-admin"
 }
 
+variable "alertmanager_smtp_secret_arn" {
+  description = "Secrets Manager secret ARN for Alertmanager's SES SMTP credentials (JSON: SMTP_HOST/PORT/USERNAME/PASSWORD/FROM/TO) — EC2 IAM policy allows GetSecretValue on this ARN"
+  type        = string
+}
+
+variable "alertmanager_smtp_secret_name" {
+  description = "Secrets Manager secret name (path) for Alertmanager's SES SMTP credentials"
+  type        = string
+}
+
 variable "admin_cidr_blocks" {
   description = "CIDRs allowed to access Grafana (3000) and Prometheus (9090)"
   type        = list(string)
   default     = ["0.0.0.0/0"]
+
+  validation {
+    condition     = alltrue([for c in var.admin_cidr_blocks : can(cidrhost(c, 0))])
+    error_message = "admin_cidr_blocks must be a list of valid CIDR blocks."
+  }
 }
 
 variable "instance_type" {

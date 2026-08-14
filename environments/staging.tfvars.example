@@ -1,0 +1,5 @@
+# Environment-specific overrides for a "staging" Terraform workspace.
+# See dev.tfvars.example for the full usage note and the resource-naming
+# caveat -- same applies here.
+
+environment = "staging"

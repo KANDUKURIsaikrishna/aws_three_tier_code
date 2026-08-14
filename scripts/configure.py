@@ -60,7 +60,7 @@ def main():
 
     cfg = load_config(config_path)
 
-    required = ["AWS_ACCOUNT_ID", "AWS_REGION", "DOMAIN", "GITHUB_REPO"]
+    required = ["AWS_ACCOUNT_ID", "AWS_REGION", "DOMAIN", "GITHUB_REPO", "ALERT_EMAIL"]
     missing = [k for k in required if not cfg.get(k)]
     if missing:
         sys.exit(f"\nERROR: Missing values in config.env: {', '.join(missing)}\n")
@@ -70,12 +70,14 @@ def main():
     domain      = cfg["DOMAIN"]
     github_repo = cfg["GITHUB_REPO"]
     github_user = github_repo.split("/")[0]
+    alert_email = cfg["ALERT_EMAIL"]
 
     print(f"\nConfiguring project with:")
     print(f"  Account : {account_id}")
     print(f"  Region  : {region}")
     print(f"  Domain  : {domain}")
     print(f"  Repo    : {github_repo}")
+    print(f"  Alerts  : {alert_email}")
     print()
 
     # ── 1. terraform.tfvars ──────────────────────────────────────────────────
@@ -83,13 +85,21 @@ def main():
     tfvars.write_text(
         f'aws_region  = "{region}"\n'
         f'domain      = "{domain}"\n'
-        f'github_repo = "{github_repo}"\n',
+        f'github_repo = "{github_repo}"\n'
+        f'alert_email = "{alert_email}"\n',
         encoding="utf-8",
     )
     print(f"  [ok]  terraform.tfvars  (generated)")
 
     # ── 2. k8s/base/ingress/ingress.yaml ─────────────────────────────────────
     substitute("k8s/base/ingress/ingress.yaml", {
+        PLACEHOLDERS["domain"]: domain,
+    })
+
+    # ── 2b. k8s/services/api-gateway/base/configmap.yaml ─────────────────────
+    # FRONTEND_URL is the gateway's CORS allow-origin -- must match the real
+    # frontend host from the ingress above, not a hardcoded placeholder.
+    substitute("k8s/services/api-gateway/base/configmap.yaml", {
         PLACEHOLDERS["domain"]: domain,
     })
 

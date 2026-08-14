@@ -1,6 +1,11 @@
 variable "vpc_cidr" {
   description = "CIDR block for the VPC"
   type        = string
+
+  validation {
+    condition     = can(cidrhost(var.vpc_cidr, 0))
+    error_message = "vpc_cidr must be a valid CIDR block, e.g. 10.0.0.0/16."
+  }
 }
 
 variable "public_subnets" {
@@ -9,6 +14,11 @@ variable "public_subnets" {
     cidr = string
     az   = string
   }))
+
+  validation {
+    condition     = alltrue([for s in var.public_subnets : can(cidrhost(s.cidr, 0))])
+    error_message = "Every public_subnets entry's cidr must be a valid CIDR block."
+  }
 }
 
 variable "private_subnets" {
@@ -17,4 +27,9 @@ variable "private_subnets" {
     cidr = string
     az   = string
   }))
+
+  validation {
+    condition     = alltrue([for s in var.private_subnets : can(cidrhost(s.cidr, 0))])
+    error_message = "Every private_subnets entry's cidr must be a valid CIDR block."
+  }
 }

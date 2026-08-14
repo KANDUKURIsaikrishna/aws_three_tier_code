@@ -25,18 +25,33 @@ variable "node_min_size" {
   description = "Minimum number of worker nodes"
   type        = number
   default     = 1
+
+  validation {
+    condition     = var.node_min_size >= 0
+    error_message = "node_min_size must be 0 or greater."
+  }
 }
 
 variable "node_max_size" {
   description = "Maximum number of worker nodes"
   type        = number
   default     = 2
+
+  validation {
+    condition     = var.node_max_size >= 1
+    error_message = "node_max_size must be 1 or greater."
+  }
 }
 
 variable "node_desired_size" {
   description = "Desired number of worker nodes at rest"
   type        = number
   default     = 1
+
+  validation {
+    condition     = var.node_desired_size >= 0
+    error_message = "node_desired_size must be 0 or greater."
+  }
 }
 
 variable "prefix" {
@@ -49,6 +64,11 @@ variable "public_access_cidrs" {
   description = "CIDR blocks allowed to reach the public EKS API endpoint. Restrict to admin IP ranges in production (e.g. [\"203.0.113.0/24\"]). Default allows all — narrow before go-live."
   type        = list(string)
   default     = ["0.0.0.0/0"]
+
+  validation {
+    condition     = alltrue([for c in var.public_access_cidrs : can(cidrhost(c, 0))])
+    error_message = "public_access_cidrs must be a list of valid CIDR blocks, e.g. [\"203.0.113.0/24\"]."
+  }
 }
 
 variable "region" {

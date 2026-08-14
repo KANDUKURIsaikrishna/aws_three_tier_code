@@ -5,6 +5,7 @@ exec > /var/log/monitoring-init.log 2>&1
 REGION="${region}"
 CLUSTER_NAME="${cluster_name}"
 SECRET_NAME="${grafana_admin_secret_name}"
+SMTP_SECRET_NAME="${alertmanager_smtp_secret_name}"
 NE_PORT="${ne_port}"
 
 # ── Install Docker + tools ────────────────────────────────────────────────────
@@ -63,6 +64,29 @@ fi
 # Write to temp file so background dashboard importer can read it
 echo "$GRAFANA_PASSWORD" > /run/grafana-pass
 chmod 600 /run/grafana-pass
+
+# ── Alertmanager SES SMTP credentials from Secrets Manager ────────────────────
+# Same IAM-propagation race as the Grafana password above -- same retry loop.
+SMTP_SECRET_JSON=""
+for i in $(seq 1 10); do
+  SMTP_SECRET_JSON=$(aws secretsmanager get-secret-value \
+    --secret-id "$SMTP_SECRET_NAME" \
+    --region "$REGION" \
+    --query SecretString \
+    --output text 2>/dev/null) && break
+  echo "Waiting for IAM policy propagation before retrying secretsmanager get-secret-value for $SMTP_SECRET_NAME (attempt $i)..."
+  sleep 6
+done
+if [ -z "$SMTP_SECRET_JSON" ]; then
+  echo "FATAL: could not fetch $SMTP_SECRET_NAME after 10 attempts" >&2
+  exit 1
+fi
+SMTP_HOST=$(echo "$SMTP_SECRET_JSON" | jq -r .SMTP_HOST)
+SMTP_PORT=$(echo "$SMTP_SECRET_JSON" | jq -r .SMTP_PORT)
+SMTP_USERNAME=$(echo "$SMTP_SECRET_JSON" | jq -r .SMTP_USERNAME)
+SMTP_PASSWORD=$(echo "$SMTP_SECRET_JSON" | jq -r .SMTP_PASSWORD)
+SMTP_FROM=$(echo "$SMTP_SECRET_JSON" | jq -r .SMTP_FROM)
+SMTP_TO=$(echo "$SMTP_SECRET_JSON" | jq -r .SMTP_TO)
 
 # ── kubeconfig for kube-state-metrics Docker container ───────────────────────
 # /opt/monitoring/kube, not /root/.kube (0700, blocks the container's
@@ -319,13 +343,18 @@ RULES_EOF
 # ── Alertmanager config ───────────────────────────────────────────────────────
 mkdir -p /opt/monitoring/alertmanager
 
-cat > /opt/monitoring/alertmanager/alertmanager.yml << 'AM_EOF'
+# Unquoted heredoc: SMTP_* are expanded by bash at write time (same trick as
+# the LOKI_HOST/GRAFANA_PASSWORD blocks above). {{ .Status }}-style syntax
+# below is Alertmanager's own Go templating, evaluated later at notification
+# time, not by bash now -- no $ prefix on any of it, so bash leaves it alone.
+cat > /opt/monitoring/alertmanager/alertmanager.yml << AM_EOF
 global:
   resolve_timeout: 5m
-  # smtp_smarthost: 'smtp.gmail.com:587'
-  # smtp_from: 'alertmanager@example.com'
-  # smtp_auth_username: 'alertmanager@example.com'
-  # smtp_auth_password: 'YOUR_APP_PASSWORD'
+  smtp_smarthost: '$SMTP_HOST:$SMTP_PORT'
+  smtp_from: '$SMTP_FROM'
+  smtp_auth_username: '$SMTP_USERNAME'
+  smtp_auth_password: '$SMTP_PASSWORD'
+  smtp_require_tls: true
 
 route:
   receiver: 'default-webhook'
@@ -356,15 +385,21 @@ receivers:
     webhook_configs:
       - url: 'http://localhost:5001/'
         send_resolved: true
+    email_configs:
+      - to: '$SMTP_TO'
+        send_resolved: true
+        headers:
+          Subject: '[{{ .Status | toUpper }}] {{ .GroupLabels.alertname }}'
 
   - name: 'critical-webhook'
-    # email_configs:
-    #   - to: 'oncall@example.com'
-    #     subject: '[CRITICAL] {{ .GroupLabels.alertname }}'
-    #     body: '{{ range .Alerts }}{{ .Annotations.summary }}{{ "\n" }}{{ end }}'
     webhook_configs:
       - url: 'http://localhost:5001/'
         send_resolved: true
+    email_configs:
+      - to: '$SMTP_TO'
+        send_resolved: true
+        headers:
+          Subject: '[CRITICAL] {{ .GroupLabels.alertname }}'
 
 inhibit_rules:
   - source_matchers:
