@@ -13,9 +13,4 @@ resources:
 images:
 - name: bookstore-frontend
   newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
-  newTag: 1024976c
-
-# The cert-manager ClusterIssuer patch that used to live here is gone along
-# with cert-manager itself -- TLS is now an ACM certificate the AWS Load
-# Balancer Controller auto-discovers by matching Ingress hostnames, not a
-# cert-manager-issued Let's Encrypt cert. See ../../../ARCHITECTURE.md.
+  newTag: c85de27a
