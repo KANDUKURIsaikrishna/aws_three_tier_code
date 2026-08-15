@@ -5,7 +5,7 @@ How to actually stand this project up, end to end, from a fresh AWS account. Thi
 ## Before you start
 
 - AWS credentials configured (`aws sts get-caller-identity` should work) with sufficient permissions to create VPCs, EKS clusters, RDS instances, IAM roles, etc.
-- `terraform` >= 1.7.0, `kubectl`, `aws` CLI — all three need to be on `PATH` on whatever machine runs `terraform apply`, not just for your own convenience: `null_resource` provisioners in this Terraform config now shell out to `kubectl`/`aws` directly (NLB hostname discovery, the pre-existing destroy-time NLB/log-group cleanup). `helm` itself isn't needed on your machine — the `helm` Terraform provider talks to the Helm API directly, no CLI required.
+- `terraform` >= 1.7.0, `kubectl`, `aws` CLI — all three need to be on `PATH` on whatever machine runs `terraform apply`, not just for your own convenience: `null_resource` provisioners in this Terraform config now shell out to `kubectl`/`aws` directly (ALB hostname discovery, the destroy-time Ingress/log-group cleanup). `helm` itself isn't needed on your machine — the `helm` Terraform provider talks to the Helm API directly, no CLI required.
 - A domain you control (for `terraform.tfvars`' `domain` value — ACM DNS validation needs it)
 - **Expect this to take roughly 20-30 minutes** and to cost real money the moment RDS/EKS/the monitoring EC2 exist. Don't run `terraform apply` on the full stack "just to see what happens." (This branch removed some unnecessary serialization in the Terraform graph — RDS/EKS already ran concurrently, but `eks-addons`'s 5 Helm charts now all install concurrently instead of partly one-after-another, and `monitoring-ec2` no longer waits on all of `eks-addons` to finish. See [`ARCHITECTURE.md`](ARCHITECTURE.md#terraform-module-graph). This hasn't been verified against a real apply yet — if Helm installs start timing out (TF-001-shaped failures), see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for the rollback.)
 
@@ -31,16 +31,17 @@ Leave `primary_alb_dns` and `secondary_alb_dns` empty. `primary_alb_dns` is auto
 
 ```bash
 terraform plan -out=tfplan
-# review it — expect ~100 resources on a genuinely fresh account:
-#   VPC + subnets + NAT + IGW, security groups, ACM cert, RDS instance,
+# review it — expect ~140 resources on a genuinely fresh account:
+#   VPC + subnets + NAT + IGW + S3 endpoint, security groups, 2 ACM certs
+#   (CloudFront's, off by default, + the real one the ALB uses), RDS instance,
 #   private + public Route53 zones, ECR repos, EKS cluster + node group + OIDC provider,
-#   eks-addons (cert-manager, ESO, ingress-nginx, ArgoCD, Argo Rollouts),
+#   eks-addons (ESO, AWS Load Balancer Controller, ArgoCD, Argo Rollouts),
 #   monitoring EC2 + EIP, CloudTrail, GuardDuty, GitHub OIDC role,
 #   the ArgoCD Application + ApplicationSet (kubectl_manifest, see below)
 terraform apply tfplan
 ```
 
-This used to need a second apply — Terraform couldn't create the public Route53 record until it knew the ingress NLB's hostname, and that didn't exist until after `eks-addons` finished, so you had to `kubectl get svc`, paste the hostname into `terraform.tfvars`, and apply again. `argocd.tf`'s `data "kubernetes_service" "ingress_nginx"` now reads that hostname within the same apply (gated behind a `null_resource` that runs `kubectl wait --for=jsonpath=...` first, since `helm_release`'s own `wait` only waits for pods, not for AWS to finish provisioning the NLB — that can lag another 1-3 minutes behind). One apply, start to finish.
+This used to need a second apply — Terraform couldn't create the public Route53 record until it knew the ingress load balancer's hostname, and that didn't exist until after `eks-addons` finished, so you had to check it by hand, paste it into `terraform.tfvars`, and apply again. `argocd.tf`'s `data "kubernetes_ingress_v1" "bookstore"` now reads that hostname within the same apply, gated behind a `null_resource` that first polls for the `bookstore-ingress` Ingress object to exist at all (it's deployed by ArgoCD, asynchronously — not created directly by this apply the way ingress-nginx's Helm-installed Service used to be), then `kubectl wait --for=jsonpath=...` for the AWS Load Balancer Controller to finish provisioning the real ALB and populate its hostname. One apply, start to finish, just with a wider safety-margin timeout than the old single-stage wait needed.
 
 `argocd.tf` also applies `k8s/argocd/application.yaml` and `k8s/argocd/applicationset-microservices.yaml` directly (via the `kubectl_manifest` resource, `gavinbunney/kubectl` provider) — no more manual `kubectl apply -f k8s/argocd/...` after the fact. Both wait on `module.eks_addons` (they need ArgoCD's CRDs to exist).
 
@@ -167,7 +168,7 @@ terraform destroy
 
 This will refuse to destroy `module.route53.aws_route53_zone.public` (`prevent_destroy` — see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) OBS-018) if the domain's NS records have already been manually delegated to it at your registrar. Everything else still tears down. If you genuinely want to destroy and re-delegate the zone too, remove that `lifecycle` block first — see OBS-018 for the exact steps.
 
-This project's Terraform has real destroy-safety automation baked in (NLB release before VPC teardown, force-delete on the flow-log CloudWatch group, `recovery_window_in_days = 0` on Secrets Manager entries, `force_destroy = true` on the CloudTrail S3 bucket) specifically because this stack gets destroyed and recreated often during development — see TROUBLESHOOTING TF-015/TF-017 for what used to go wrong here. `make destroy` runs it with `-auto-approve`; use the plain command if you want the interactive confirmation.
+This project's Terraform has real destroy-safety automation baked in (Ingress/ALB release before VPC teardown, force-delete on the flow-log CloudWatch group, `recovery_window_in_days = 0` on Secrets Manager entries, `force_destroy = true` on the CloudTrail S3 bucket) specifically because this stack gets destroyed and recreated often during development — see TROUBLESHOOTING TF-015/TF-017 for what used to go wrong here. `make destroy` runs it with `-auto-approve`; use the plain command if you want the interactive confirmation.
 
 Since `argocd.tf`'s `kubectl_manifest` resources are now what created the ArgoCD `Application`/`ApplicationSet` objects, `terraform destroy` also deletes them — and both carry `resources-finalizer.argocd.argoproj.io`, so ArgoCD deletes everything it manages (all of `k8s/overlays/prod` and every `k8s/services/*/overlays/prod`) before the `Application` object itself actually goes away. This happens automatically, in the right order, before `eks-addons`/`eks` get torn down (Terraform destroys in reverse-dependency order).
 

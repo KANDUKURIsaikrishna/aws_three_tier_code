@@ -10,11 +10,20 @@ spec:
     - Ingress
     - Egress
 ---
-# Frontend: accept from ingress-nginx only; send to DNS only.
+# Frontend: accept from the ALB only; send to DNS only.
 # (Used to also allow egress to the old backend monolith on :3000 — deleted
 # along with it. The frontend SPA's API calls happen from the user's browser
 # straight to api-gateway over the internet, not from this pod server-side,
 # so no backend/api-gateway egress rule was ever needed here.)
+#
+# ipBlock, not namespaceSelector: since ingress-nginx was retired and
+# replaced with the AWS Load Balancer Controller (target-type=ip — see
+# k8s/base/ingress/ingress.yaml), traffic no longer arrives from a pod in
+# some "ingress-nginx" namespace at all -- the ALB connects straight to
+# this pod's real ENI IP from its own ENIs in the VPC, which NetworkPolicy
+# can only match by CIDR, the same reasoning already used for the RDS
+# egress rules elsewhere in this project (see the microservice
+# network-policy.yaml files).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -29,9 +38,8 @@ spec:
     - Egress
   ingress:
     - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+        - ipBlock:
+            cidr: 170.20.0.0/16
       ports:
         - port: 8080
   egress:

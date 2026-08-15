@@ -34,6 +34,11 @@ describe("AuthContext", () => {
   beforeEach(() => {
     localStorage.clear();
     jest.clearAllMocks();
+    // Sane default so any incidental api.post call (e.g. logout()'s
+    // best-effort revoke) doesn't blow up on an auto-mocked function
+    // returning undefined instead of a promise -- tests that care about a
+    // specific call override this with mockResolvedValueOnce.
+    api.post.mockResolvedValue({ data: {} });
   });
 
   test("starts logged out when localStorage has no token", () => {
@@ -58,8 +63,8 @@ describe("AuthContext", () => {
     expect(screen.getByTestId("email")).toHaveTextContent("saved@example.com");
   });
 
-  test("login calls POST /auth/login and stores the returned token", async () => {
-    api.post.mockResolvedValueOnce({ data: { token: "new-token" } });
+  test("login calls POST /auth/login and stores the returned access + refresh tokens", async () => {
+    api.post.mockResolvedValueOnce({ data: { token: "new-token", refreshToken: "new-refresh" } });
     render(
       <AuthProvider>
         <TestConsumer />
@@ -74,11 +79,13 @@ describe("AuthContext", () => {
     });
     expect(screen.getByTestId("status")).toHaveTextContent("in");
     expect(localStorage.getItem("bookstore_token")).toBe("new-token");
+    expect(localStorage.getItem("bookstore_refresh_token")).toBe("new-refresh");
     expect(localStorage.getItem("bookstore_email")).toBe("test@example.com");
   });
 
-  test("logout clears state and localStorage", async () => {
+  test("logout clears state and localStorage, and revokes the refresh token server-side", async () => {
     localStorage.setItem("bookstore_token", "stored-token");
+    localStorage.setItem("bookstore_refresh_token", "stored-refresh");
     localStorage.setItem("bookstore_email", "saved@example.com");
     render(
       <AuthProvider>
@@ -90,6 +97,22 @@ describe("AuthContext", () => {
     });
     expect(screen.getByTestId("status")).toHaveTextContent("out");
     expect(localStorage.getItem("bookstore_token")).toBeNull();
+    expect(localStorage.getItem("bookstore_refresh_token")).toBeNull();
+    expect(api.post).toHaveBeenCalledWith("/auth/logout", { refreshToken: "stored-refresh" });
+  });
+
+  test("logout does not call /auth/logout when there was no refresh token to revoke", async () => {
+    localStorage.setItem("bookstore_token", "stored-token");
+    localStorage.setItem("bookstore_email", "saved@example.com");
+    render(
+      <AuthProvider>
+        <TestConsumer />
+      </AuthProvider>
+    );
+    await act(async () => {
+      await userEvent.click(screen.getByText("do-logout"));
+    });
+    expect(api.post).not.toHaveBeenCalledWith("/auth/logout", expect.anything());
   });
 
   test("register calls POST /auth/register and does not log the user in", async () => {

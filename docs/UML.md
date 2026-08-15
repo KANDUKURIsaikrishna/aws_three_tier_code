@@ -56,10 +56,14 @@ classDiagram
   class UserService {
     <<service>>
     +POST /auth/register(email, password) User
-    +POST /auth/login(email, password) JwtToken
+    +POST /auth/login(email, password) JwtToken, RefreshToken
+    +POST /auth/refresh(refreshToken) JwtToken, RefreshToken
+    +POST /auth/logout(refreshToken) success
     +GET /users/me() User
     -verifyJwt(jwtSecret)
     -DUMMY_HASH bcrypt
+    -hashToken(token) sha256
+    -generateRefreshToken() 96-hex
   }
   class CatalogService {
     <<service>>
@@ -91,13 +95,13 @@ classDiagram
   OrderService ..> NotificationService : fetch, fire-and-forget
 ```
 
-**JWT is verified in exactly two places**: `ApiGateway.verifyJwt` (every proxied call) and `UserService.verifyJwt` on `GET /users/me` only (redundant, self-contained re-check). `CatalogService`, `OrderService`, and `NotificationService` never verify a token themselves — `OrderService` trusts the `x-user-id` header the gateway injects; `CatalogService` has zero identity awareness at all, relying entirely on the gateway to gate writes.
+**JWT is verified in exactly two places**: `ApiGateway.verifyJwt` (every proxied call) and `UserService.verifyJwt` on `GET /users/me` only (redundant, self-contained re-check). `CatalogService`, `OrderService`, and `NotificationService` never verify a token themselves — `OrderService` trusts the `x-user-id` header the gateway injects; `CatalogService` has zero identity awareness at all, relying entirely on the gateway to gate writes. The refresh token (`/auth/refresh`, `/auth/logout`) is never a JWT and is never verified by `verifyJwt` — it's an opaque random value, looked up by its SHA-256 hash directly against `user_db.refresh_tokens`, entirely inside `UserService`.
 
 ---
 
 ## 3. Entity-relationship diagram — data model
 
-Four **separate physical databases** (`catalog_db`, `user_db`, `order_db`, `notification_db`), one per service, on the same shared RDS instance. No SQL `FOREIGN KEY` constraints exist anywhere — `user_id`/`book_id`/`order_id` are plain `INT` columns, cross-database references enforced only in application code. Relationships below are logical, not physical.
+Four **separate physical databases** (`catalog_db`, `user_db`, `order_db`, `notification_db`), one per service, on the same shared RDS instance. Cross-database references (`user_id`/`book_id`/`order_id` on tables outside `user_db`) are plain `INT` columns with no SQL `FOREIGN KEY` — enforced only in application code, since a FK can't cross a schema boundary that's meant to be a real isolation boundary. `REFRESH_TOKENS` is the one exception: it lives in the *same* schema as `USERS` (`user_db`), no boundary is being crossed, so it has a real, enforced `FOREIGN KEY ... ON DELETE CASCADE` — don't read that as an inconsistency, it's a deliberate distinction between within-schema and cross-schema references.
 
 ```mermaid
 erDiagram
@@ -112,6 +116,14 @@ erDiagram
     int id PK
     varchar email UK
     varchar password_hash
+    timestamp created_at
+  }
+  REFRESH_TOKENS {
+    int id PK
+    int user_id FK
+    char token_hash UK "sha256, 64 chars"
+    timestamp expires_at
+    timestamp revoked_at "nullable"
     timestamp created_at
   }
   CART_ITEMS {
@@ -139,6 +151,7 @@ erDiagram
 
   USERS ||--o{ CART_ITEMS : "owns (app-level only)"
   USERS ||--o{ ORDERS : "owns (app-level only)"
+  USERS ||--o{ REFRESH_TOKENS : "owns (real FK, ON DELETE CASCADE)"
   BOOKS ||--o{ CART_ITEMS : "referenced by (app-level only)"
   BOOKS ||--o{ ORDERS : "referenced by (app-level only)"
   ORDERS ||--o{ NOTIFICATION_LOG : "triggers (app-level only)"
@@ -171,14 +184,70 @@ sequenceDiagram
     alt mismatch
       US-->>GW: 401 invalid credentials
     else match
-      US->>US: jwt.sign({userId, email}, JWT_SECRET, exp 1h)
-      US-->>GW: 200 {token}
+      US->>US: jwt.sign({userId, email}, JWT_SECRET, exp 15m)
+      US->>US: refreshToken = crypto.randomBytes(48)
+      US->>DB: INSERT refresh_tokens (user_id, sha256(refreshToken), expires_at=+7d)
+      US-->>GW: 200 {token, refreshToken}
     end
   end
-  GW-->>FE: 200 {token} | 401
+  GW-->>FE: 200 {token, refreshToken} | 401
   FE->>FE: localStorage["bookstore_token"] = token
+  FE->>FE: localStorage["bookstore_refresh_token"] = refreshToken
   FE->>FE: navigate("/")
 ```
+
+---
+
+## 4b. Sequence — silent access-token refresh (no user interaction)
+
+Fires from `client/src/api/api.js`'s response interceptor the instant any non-auth API call comes back `401` (access token expired, 15 minutes in) — not a page the user visits.
+
+```mermaid
+sequenceDiagram
+  participant FE as Frontend (api.js interceptor)
+  participant GW as api-gateway
+  participant US as user-service
+  participant DB as user_db
+
+  FE->>GW: (any request) — 401, access token expired
+  Note over FE: handleAuthError: not an /auth/* URL,\nnot already retried once → attempt refresh
+  FE->>US: POST /auth/refresh {refreshToken}  (direct, bypasses gateway's verifyJwt — no access token to verify)
+  US->>DB: SELECT id,user_id FROM refresh_tokens\nWHERE token_hash=sha256(refreshToken) AND revoked_at IS NULL AND expires_at>NOW()
+  alt not found / revoked / expired
+    US-->>FE: 401 invalid or expired refresh token
+    FE->>FE: clearSession(); navigate("/login")
+  else found
+    US->>DB: SELECT id,email FROM users WHERE id=user_id
+    US->>DB: UPDATE refresh_tokens SET revoked_at=NOW() WHERE id=?  (rotate: burn the one just used)
+    US->>US: newRefreshToken = crypto.randomBytes(48)
+    US->>DB: INSERT refresh_tokens (user_id, sha256(newRefreshToken), expires_at=+7d)
+    US->>US: jwt.sign({userId, email}, JWT_SECRET, exp 15m)
+    US-->>FE: 200 {token: newAccessToken, refreshToken: newRefreshToken}
+    FE->>FE: localStorage updated with both new values
+    FE->>GW: retry the ORIGINAL failed request, Authorization: Bearer newAccessToken
+    GW-->>FE: the response the user actually asked for
+  end
+```
+
+Concurrent 401s (a burst of parallel calls right as the token expires) dedupe onto one shared in-flight refresh promise — since refresh rotates the token, a second concurrent call would otherwise revoke the first call's brand-new token before anything ever used it.
+
+## 4c. Sequence — logout (real, server-side revocation)
+
+```mermaid
+sequenceDiagram
+  participant FE as Frontend (AuthContext.logout)
+  participant GW as api-gateway
+  participant US as user-service
+  participant DB as user_db
+
+  FE->>FE: clear localStorage, setToken(null) — UI logs out immediately
+  FE-->>GW: POST /auth/logout {refreshToken}  (best-effort, not awaited)
+  GW->>US: proxy POST /auth/logout
+  US->>DB: UPDATE refresh_tokens SET revoked_at=NOW()\nWHERE token_hash=sha256(refreshToken) AND revoked_at IS NULL
+  US-->>GW: 200 {success: true}  (always — even if no row matched, doesn't leak whether the token was ever valid)
+```
+
+This is the actual revocation the old plain-JWT design couldn't do at all: after this call, that specific refresh token can never mint another access token, even though whatever access token was already issued off it keeps working for up to 15 more minutes (its own natural expiry) — a much smaller window than the old scheme's flat, unrevocable 1 hour.
 
 ---
 
@@ -305,7 +374,8 @@ flowchart TD
 
 - **No ORM anywhere.** Every service uses raw SQL via `mysql2` (callback-style, except `order-service`'s checkout endpoint, which uses `.promise()` for the transaction). No Sequelize/TypeORM/Prisma.
 - **No `axios` in any backend service.** `order-service → notification-service` uses native `fetch` with `AbortSignal.timeout(2000)`. `axios` is frontend-only.
-- **JWT claims are minimal:** `{ userId, email, iat, exp }`, HS256, 1h expiry. `JWT_SECRET` is shared between `user-service` (sign + verify) and `api-gateway` (verify only), via a Kubernetes `ExternalSecret` synced from AWS Secrets Manager.
+- **JWT claims are minimal:** `{ userId, email, iat, exp }`, HS256, **15-minute** expiry (was a flat, unrevocable 1h — see the refresh-token pair, sections 4b/4c). `JWT_SECRET` is shared between `user-service` (sign + verify) and `api-gateway` (verify only), via a Kubernetes `ExternalSecret` synced from AWS Secrets Manager.
+- **The refresh token is never a JWT** — 48 random bytes (`crypto.randomBytes`), hex-encoded, 7-day expiry, rotated on every use. Only its SHA-256 hash is ever stored (`user_db.refresh_tokens.token_hash`) — same principle as password hashing, a stolen DB row isn't a usable credential on its own.
 - **`api-gateway` deliberately has no `express.json()`** — parsing the body would consume the stream `http-proxy-middleware` needs to forward it untouched.
 - **Registration does not log the user in** — `POST /auth/register` returns `{id, email}`, no token; the frontend redirects to `/login` afterward.
 - **The alternate `POST /orders` endpoint (single-item, bypasses cart) exists in `order-service` but no frontend page calls it** — dead code from the UI's perspective, still live and reachable via the gateway.

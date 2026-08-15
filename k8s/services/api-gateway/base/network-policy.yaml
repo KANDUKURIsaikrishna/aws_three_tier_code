@@ -21,11 +21,17 @@ spec:
   policyTypes:
     - Ingress
     - Egress
+  # ipBlock, not namespaceSelector: since ingress-nginx was retired and
+  # replaced with the AWS Load Balancer Controller (target-type=ip — see
+  # k8s/services/api-gateway/base/ingress.yaml), traffic no longer arrives
+  # from a pod in some "ingress-nginx" namespace at all -- the ALB connects
+  # straight to this pod's real ENI IP from its own ENIs in the VPC, which
+  # NetworkPolicy can only match by CIDR, same reasoning as the egress
+  # rules below.
   ingress:
     - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+        - ipBlock:
+            cidr: 170.20.0.0/16
       ports:
         - port: 3000
   # ports below use 3000 (the pods' real containerPort), not 80 (the

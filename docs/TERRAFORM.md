@@ -16,13 +16,13 @@ iam.tf                       — GitHub Actions OIDC role
 cloudtrail.tf                 — multi-region CloudTrail
 guardduty.tf                   — GuardDuty detector
 cloudfront.tf                    — optional CDN in front of the frontend
-dr.tf                              — cross-region RDS backup replication
-argocd.tf                           — Terraform-managed ArgoCD Application/ApplicationSet + ALB hostname auto-discovery
-terraform.tfvars                    — region/domain/github_repo values (not secret)
+ingress-cert.tf                    — regional ACM cert (DNS-validated) for the ALB's TLS
+dr.tf                                — cross-region RDS backup replication
+argocd.tf                              — Terraform-managed ArgoCD Application/ApplicationSet + ALB hostname auto-discovery
+terraform.tfvars                        — region/domain/github_repo values (not secret)
 modules/
   network/       — VPC, subnets, IGW, NAT, flow logs
   security/       — security groups
-  acm/              — ACM certificate
   rds/               — MySQL instance + admin secret
   route53/             — private + public DNS zones
   ecr/                   — ECR repos
@@ -76,9 +76,12 @@ Notable: a `null_resource` with a `destroy`-time `local-exec` provisioner force-
 
 Two security groups: `alb_frontend` (80/443 from `0.0.0.0/0`, all egress) and `rds` (3306 from `var.eks_node_cidr_blocks` — the 4 EKS-node private subnet CIDRs specifically, **not** the whole VPC CIDR; a previous version of this rule really did open 3306 to all of `170.20.0.0/16`, including public subnets and RDS's own subnets, despite its `description` claiming EKS-nodes-only — see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) OBS-049). RDS has **no egress rule** — it never initiates outbound connections, so one isn't needed (a `rds_egress` rule allowing `0.0.0.0/0` egress used to exist here and was removed as unnecessary blast radius).
 
-## Module: `acm`
+## Root: ACM certificates
 
-One ACM certificate, DNS validation, with a wildcard SAN (`*.<domain>`). Has an `ignore_changes = [domain_validation_options]` lifecycle block that produces a harmless but permanent Terraform warning — `domain_validation_options` is provider-computed, so `ignore_changes` on it is a no-op. Low-priority cleanup, not a bug.
+Not a module — despite older versions of this doc (and `ARCHITECTURE.md`) describing a `modules/acm` that doesn't actually exist in this codebase, and never did as far as `git log` on these files shows. **Two** real, separate ACM certificates live as plain resources at the root, in two different files, for two different consumers that can't share one certificate:
+
+- **`cloudfront.tf`**'s `aws_acm_certificate.cloudfront` — wildcard SAN (`*.<domain>`), `count`-gated on `enable_cloudfront`, and hard-pinned to `us-east-1` (`provider = aws.us_east_1`) because that's a real, non-negotiable AWS requirement for any cert CloudFront uses, regardless of what region everything else runs in. Requests DNS validation but never actually completes it in Terraform (no `aws_acm_certificate_validation` resource) — harmless while CloudFront itself is disabled by default, but worth knowing if `enable_cloudfront` is ever flipped on for real.
+- **`ingress-cert.tf`**'s `aws_acm_certificate.ingress` — same wildcard SAN, but regional (default provider, wherever the cluster actually is), and it *does* complete real DNS validation (`aws_route53_record.ingress_cert_validation` + `aws_acm_certificate_validation.ingress`) because the AWS Load Balancer Controller's certificate auto-discovery only matches already-ISSUED certs, not pending ones. This is the TLS cert the ALB actually terminates HTTPS with — see [`ARCHITECTURE.md`](ARCHITECTURE.md)'s ALB section for why no ARN from this ever gets injected into any Kubernetes manifest.
 
 ## Module: `rds`
 
@@ -125,14 +128,15 @@ Helm-installed cluster add-ons, all via `helm_release`:
 
 | Chart | Namespace | Notes |
 |---|---|---|
-| cert-manager | `cert-manager` | CRDs installed, single replica |
 | external-secrets | `external-secrets` | ServiceAccount explicitly named `external-secrets-sa` with an IRSA role annotation — see below |
-| ingress-nginx | `ingress-nginx` | `LoadBalancer` service type → provisions a real AWS load balancer as a side effect, invisible to Terraform (see destroy notes). `replicaCount=2` with PDB `maxUnavailable=1` (was `replicaCount=1`/`minAvailable=1` — an undrainable single point of failure for every request in the app, the same anti-pattern OBS-049 fixed elsewhere, missed here since it's a Helm value; fixed 2026-08-14) |
+| aws-load-balancer-controller | `kube-system` | Replaces ingress-nginx (retired by the Kubernetes project 2026-03-31, see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) OBS-057). IRSA-authenticated, provisions a real AWS ALB as a side effect of reconciling `Ingress` objects — invisible to Terraform (see destroy notes), the ALB is created/owned by the controller, not by any Terraform resource. |
 | argocd | `argocd` | No `depends_on` (see below) |
 | argo-rollouts | `argo-rollouts` | No `depends_on` (see below) |
 | aws-ebs-csi-driver | (EKS addon, not Helm) | IAM policy attached to the node role first |
 
-**All 5 Helm charts + the EBS CSI addon now install concurrently, on this branch.** They used to be partially serialized (`argocd` waited on `ingress-nginx`; `argo-rollouts` waited on `argocd`) as a resource-contention workaround from when the node group was a single `t3.medium` (see TF-001/TF-006). Once `node_desired_size` went to 2 (TF-014), that workaround was never revisited — the two remaining `depends_on` lines were pure leftover, not a real functional requirement (ArgoCD isn't exposed via ingress or TLS in this config, and Argo Rollouts is an unrelated project from ArgoCD). Removed to cut apply time; the critical path through this module is now roughly `max(all 5 timeouts)` (ArgoCD's 900s) instead of the old serialized sum. **If a real apply on this node size starts hitting TF-001-shaped timeout failures again, the fix is re-adding `depends_on = [helm_release.ingress_nginx]` on `argocd` and `depends_on = [helm_release.argocd]` on `argo_rollouts`** in `modules/eks-addons/gitops.tf`, not scaling the node group further — this hasn't been verified against a real apply yet (see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) OBS-006).
+**cert-manager and ingress-nginx are both gone as of OBS-057** — cert-manager had exactly one consumer (the ingress TLS cert via its `ClusterIssuer`), and once ingress moved to the AWS Load Balancer Controller, TLS moved with it, to an ACM certificate the controller auto-discovers by hostname (see `ingress-cert.tf`, root). Neither chart does anything for this project anymore, so both were removed rather than left installed-and-unused.
+
+**Every Helm chart in this module now installs concurrently.** They used to be partially serialized (`argocd` waited on `ingress-nginx`; `argo-rollouts` waited on `argocd`) as a resource-contention workaround from when the node group was a single `t3.medium` (see TF-001/TF-006). Once `node_desired_size` went to 2 (TF-014), that workaround was never revisited — the two remaining `depends_on` lines were pure leftover, not a real functional requirement (ArgoCD isn't exposed via ingress or TLS in this config, and Argo Rollouts is an unrelated project from ArgoCD). Removed to cut apply time; the critical path through this module is now roughly `max(all chart timeouts)` (ArgoCD's 900s) instead of the old serialized sum. **If a real apply on this node size starts hitting TF-001-shaped timeout failures again, the fix is re-adding explicit `depends_on` lines** in `modules/eks-addons/gitops.tf`, not scaling the node group further — this hasn't been verified against a real apply yet (see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) OBS-006).
 
 **The External Secrets IRSA fix** (this branch, commit `b48c3d3`): the Helm release used to install ESO with zero IRSA wiring — no IAM role, no ServiceAccount annotation — even though `k8s/base/secrets/external-secret.yaml`'s `ClusterSecretStore` already expected a ServiceAccount named exactly `external-secrets-sa`. Nothing could ever actually authenticate to Secrets Manager. Fixed with a trust-policy IAM role scoped to `/bookstore/*` in Secrets Manager, plus explicit `serviceAccount.name`/`serviceAccount.annotations` Helm `set` values:
 
@@ -197,9 +201,9 @@ Three things, none of which used to be automated:
 
 1. **`kubectl_manifest` resources** applying `k8s/argocd/application.yaml` and `k8s/argocd/applicationset-microservices.yaml` as-is (`file()`, not re-expressed as HCL) — replaces a manual `kubectl apply -f` step. Uses the `gavinbunney/kubectl` provider specifically because its `kubectl_manifest` resource defers schema validation to apply time; `hashicorp/kubernetes`'s `kubernetes_manifest` needs the target CRD to already exist at `plan` time, which breaks here since the `Application`/`ApplicationSet` CRDs are installed by the `argocd` Helm release within the *same* apply. Both depend on `module.eks_addons`.
 
-2. **`null_resource.wait_for_alb_hostname`** — polls `kubectl wait --for=jsonpath='{.status.loadBalancer.ingress[0].hostname}'` against the ingress-nginx Service. Needed because `helm_release`'s `wait = true` only waits for pods to become `Ready`, not for AWS's cloud-controller to finish provisioning the NLB and populate that field, which can lag 1-3 minutes behind. Re-runs every apply (`triggers = { always_run = timestamp() }`) — cheap once the condition is already true, and re-validates after a cluster recreate.
+2. **`null_resource.wait_for_alb_hostname`** — a two-stage wait, more involved than it used to be (see OBS-057). First, a plain retry loop (`kubectl get ingress bookstore-ingress -n bookstore`, up to 5 minutes) polls for the `bookstore-ingress` Ingress object to exist at all — it's deployed by ArgoCD, asynchronously, not created directly by this apply, and `kubectl wait` needs its target to already exist or it fails immediately rather than waiting gracefully. Then `kubectl wait --for=jsonpath='{.status.loadBalancer.ingress[0].hostname}'` against that Ingress, because the AWS Load Balancer Controller reconciling it and actually provisioning the ALB can lag well behind the Ingress object's own creation. Re-runs every apply (`triggers = { always_run = timestamp() }`) — cheap once the condition is already true, and re-validates after a cluster recreate.
 
-3. **`data "kubernetes_service" "ingress_nginx"`** — reads the now-confirmed-populated hostname, feeding `local.primary_alb_dns` (used by `module.route53` instead of `var.primary_alb_dns` directly). `var.primary_alb_dns` still works as a manual override if you explicitly set it; auto-discovery is only the fallback when it's empty. This replaces what used to be a required second `terraform apply` — see [`DEPLOYMENT.md`](DEPLOYMENT.md).
+3. **`data "kubernetes_ingress_v1" "bookstore"`** — reads the now-confirmed-populated hostname off that same Ingress object's status, feeding `local.primary_alb_dns` (used by `module.route53` instead of `var.primary_alb_dns` directly). `var.primary_alb_dns` still works as a manual override if you explicitly set it; auto-discovery is only the fallback when it's empty. This replaces what used to be a required second `terraform apply` — see [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ## Common commands
 

@@ -53,6 +53,25 @@ spec:
                 created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
               );
 
+              -- Refresh tokens live in the same schema as users, unlike the
+              -- soft (unenforced) cross-service references used elsewhere in
+              -- this project (order_db.orders.user_id, etc.) -- there's no
+              -- schema boundary being crossed here, so a real FOREIGN KEY is
+              -- the correct, standard choice: ON DELETE CASCADE means a
+              -- deleted user's outstanding refresh tokens are cleaned up
+              -- automatically, not left as orphaned rows. Only the SHA-256
+              -- hash of each refresh token is ever stored, never the token
+              -- itself -- see services/user-service/app.js.
+              CREATE TABLE IF NOT EXISTS user_db.refresh_tokens (
+                id         INT AUTO_INCREMENT PRIMARY KEY,
+                user_id    INT NOT NULL,
+                token_hash CHAR(64) NOT NULL UNIQUE,
+                expires_at TIMESTAMP NOT NULL,
+                revoked_at TIMESTAMP NULL DEFAULT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT fk_refresh_tokens_user FOREIGN KEY (user_id) REFERENCES user_db.users(id) ON DELETE CASCADE
+              );
+
               CREATE USER IF NOT EXISTS 'user_service_user'@'%' IDENTIFIED BY '$USER_DB_PASSWORD';
               GRANT SELECT, INSERT, UPDATE, DELETE ON user_db.* TO 'user_service_user'@'%';
               FLUSH PRIVILEGES;

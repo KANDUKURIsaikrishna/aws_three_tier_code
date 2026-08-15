@@ -18,10 +18,10 @@ A bookstore web app built as a learning/reference implementation of a production
                                       |
                     ┌─────────────────────────────────┐
                     │   CloudFront (optional, off by   │
-                    │   default) or direct to Classic ELB │
+                    │      default) or direct to ALB   │
                     └─────────────────────────────────┘
                                       |
-                              Nginx Ingress Controller (Classic ELB)
+                        ALB (AWS Load Balancer Controller)
                           ┌───────────┴───────────┐
                  host: bookstore.<domain>   host: api.bookstore.<domain>
                           |                           |
@@ -47,18 +47,18 @@ Everything above lives in one EKS cluster (`bookstore-eks`, us-west-1), split ac
 
 ## Terraform module graph
 
-`network → security → acm → rds → route53 → ecr → eks → eks-addons → monitoring-ec2` is the module *call* order in `main.tf`, but that's not the real dependency graph — Terraform parallelizes anything not actually connected by a resource/output reference, regardless of where it's written in the file. The real shape:
+`network → security → rds → route53 → ecr → eks → monitoring-ec2 → eks-addons` is the module *call* order in `main.tf`, but that's not the real dependency graph — Terraform parallelizes anything not actually connected by a resource/output reference, regardless of where it's written in the file. (No `acm` module appears here because none exists — see [`TERRAFORM.md`](TERRAFORM.md#root-acm-certificates), older versions of this doc described one that was never actually real.) The real shape:
 
 ```
-network ──┬─→ security ──┬─→ rds ──→ route53
+network ──┬─→ security ──┬─→ rds ──→ route53 ──→ ingress-cert.tf
           │              └─→ eks ──┬─→ eks-addons ─────┐
           │                        └─→ monitoring-ec2 ←┘ (needs eks + the
-acm (independent)                                         eks-addons Grafana
-ecr  (independent)                                         secret only, not
-iam.tf / cloudtrail.tf / guardduty.tf (independent)         any Helm install)
+ecr  (independent)                                        eks-addons Grafana
+iam.tf / cloudtrail.tf / guardduty.tf (independent)        secret only, not
+                                                            any Helm install)
 ```
 
-`acm`, `ecr`, and the root `iam.tf`/`cloudtrail.tf`/`guardduty.tf` resources have no dependency on `network` at all and run fully in parallel with it. `rds` and `eks` both depend only on `network`+`security`, not on each other, so they provision concurrently — this is why a full stand-up takes roughly `max(RDS time, EKS time)` for that stage, not the sum. `monitoring-ec2` used to have a blanket `depends_on = [module.eks_addons]` forcing it to wait for every Helm chart in `eks-addons` (up to 900s for ArgoCD) even though it only needs the fast Grafana secret — that's been removed; see [`TERRAFORM.md`](TERRAFORM.md#module-monitoring-ec2). Full detail on what runs when: [`TERRAFORM.md`](TERRAFORM.md).
+`ecr` and the root `iam.tf`/`cloudtrail.tf`/`guardduty.tf` resources have no dependency on `network` at all and run fully in parallel with it. `rds` and `eks` both depend only on `network`+`security`, not on each other, so they provision concurrently — this is why a full stand-up takes roughly `max(RDS time, EKS time)` for that stage, not the sum. `ingress-cert.tf`'s ACM cert only needs `route53`'s hosted zone to exist (for DNS validation records), not the zone's ALB-pointing alias records specifically, so it doesn't get stuck behind the `eks-addons`/ALB-discovery chain those alias records do wait on. `monitoring-ec2` used to have a blanket `depends_on = [module.eks_addons]` forcing it to wait for every Helm chart in `eks-addons` (up to 900s for ArgoCD) even though it only needs the fast Grafana secret — that's been removed; see [`TERRAFORM.md`](TERRAFORM.md#module-monitoring-ec2). Full detail on what runs when: [`TERRAFORM.md`](TERRAFORM.md).
 
 | Module | Creates | Depends on |
 |---|---|---|
@@ -69,7 +69,7 @@ iam.tf / cloudtrail.tf / guardduty.tf (independent)         any Helm install)
 | `route53` | Private zone (RDS internal DNS) + public zone with active-passive failover records | `network`, `rds`, `eks` (needs ALB DNS) |
 | `ecr` | ECR repos for `frontend`, plus any `extra_repos` (currently `catalog-service`, `user-service`, `order-service`, `notification-service`, `api-gateway`), 10-image lifecycle policy, optional cross-region replication — `backend` repo deleted along with the old monolith, see OBS-046 | — |
 | `eks` | EKS 1.31 cluster, managed node group (`t3.medium`, min 1 / max 3 / desired 3 — bumped from 2 once all 5 microservices + api-gateway needed to schedule alongside the monolith and cluster-services, see TROUBLESHOOTING OBS-030), OIDC provider (enables IRSA), node launch template running node-exporter + Fluent Bit as systemd services | `network`, `security` |
-| `eks-addons` | Helm-installed cluster add-ons: cert-manager, External Secrets Operator, ingress-nginx, ArgoCD, Argo Rollouts, EBS CSI driver | `eks` |
+| `eks-addons` | Helm-installed cluster add-ons: External Secrets Operator, AWS Load Balancer Controller (provisions the ALB), ArgoCD, Argo Rollouts; plus the VPC CNI (NetworkPolicy enforcement), EBS CSI, and metrics-server EKS addons | `eks` |
 | `monitoring-ec2` | Standalone EC2 (`t3.small`) running Prometheus + Grafana + Loki + Alertmanager + kube-state-metrics via Docker Compose | `network`, `eks-addons` |
 
 Root-level `.tf` files add cross-cutting resources not owned by any module: `iam.tf` (GitHub OIDC role for CI), `cloudtrail.tf` (multi-region trail, encrypted S3), `guardduty.tf` (S3/K8s-audit/EBS-malware detection), `cloudfront.tf` (optional CDN, ACM cert in us-east-1), `dr.tf` (cross-region backup replication). Full detail: [`TERRAFORM.md`](TERRAFORM.md).
@@ -157,8 +157,8 @@ Explicitly deferred (see the design spec's Non-goals): service mesh / mTLS, asyn
 ```
 VPC 170.20.0.0/16 (us-west-1)
 
-public[0]   170.20.1.0/24   us-west-1a   — IGW, Classic ELB
-public[1]   170.20.2.0/24   us-west-1c   — IGW, Classic ELB
+public[0]   170.20.1.0/24   us-west-1a   — IGW, ALB
+public[1]   170.20.2.0/24   us-west-1c   — IGW, ALB
 private[0]  170.20.3.0/24   us-west-1a   — EKS nodes
 private[1]  170.20.4.0/24   us-west-1c   — EKS nodes
 private[2]  170.20.5.0/24   us-west-1a   — EKS nodes
@@ -173,11 +173,11 @@ Single NAT gateway in `public[0]` — a deliberate cost tradeoff for a demo/refe
 
 ```
 Static assets (HTML/JS/CSS):
-Internet → Route53 (bookstore.<domain>) → (CloudFront, optional) → Nginx Ingress Classic ELB
+Internet → Route53 (bookstore.<domain>) → (CloudFront, optional) → ALB
     → frontend Service (static React via nginx)
 
 Every API call the loaded frontend makes:
-Internet → Route53 (api.bookstore.<domain>) → (CloudFront, optional) → Nginx Ingress Classic ELB
+Internet → Route53 (api.bookstore.<domain>) → (CloudFront, optional) → ALB
     → api-gateway Service (JWT verification on writes)
     → catalog-service / user-service / order-service / notification-service
     → RDS :3306 (per-service schema, shared instance)

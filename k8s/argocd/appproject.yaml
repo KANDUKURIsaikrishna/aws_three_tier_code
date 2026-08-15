@@ -40,14 +40,23 @@ spec:
     - server: https://kubernetes.default.svc
       namespace: gateway
 
-  # Omitting this entirely denies ALL cluster-scoped resources. The one kind
-  # actually synced by these Applications is Namespace (each service's own
-  # kustomize base includes a namespace.yaml) -- everything else these apps
-  # deploy (Deployment, Service, ExternalSecret, NetworkPolicy, HPA, PDB, Job,
-  # Ingress, ...) is namespace-scoped and unaffected by this list.
+  # Omitting this entirely denies ALL cluster-scoped resources. Three kinds
+  # are actually synced by these Applications: Namespace (each service's own
+  # kustomize base includes a namespace.yaml), StorageClass
+  # (k8s/base/storageclass/gp3.yaml), and ClusterSecretStore (each service's
+  # external-secret.yaml points at one) -- everything else these apps deploy
+  # (Deployment, Service, ExternalSecret, NetworkPolicy, HPA, PDB, Job,
+  # Ingress, ...) is namespace-scoped and unaffected by this list. On a
+  # long-lived cluster this gap stayed invisible because these cluster-scoped
+  # resources already existed and never needed re-creating; it only surfaces
+  # on a from-scratch rebuild, which is how it was caught (OBS-058).
   clusterResourceWhitelist:
     - group: ""
       kind: Namespace
+    - group: storage.k8s.io
+      kind: StorageClass
+    - group: external-secrets.io
+      kind: ClusterSecretStore
 
   namespaceResourceWhitelist:
     - group: "*"

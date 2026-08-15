@@ -41,18 +41,17 @@ Resources, in the order `kustomization.yaml` lists them:
 | File | What |
 |---|---|
 | `storageclass/gp3.yaml` | Default gp3 StorageClass |
-| `namespace.yaml` | `bookstore` namespace |
-| `cert-manager/cluster-issuer.yaml` | Let's Encrypt `ClusterIssuer` |
-| `configmaps/backend-config.yaml` | `DB_PORT`, `DB_NAME`, `APP_PORT` |
-| `secrets/external-secret.yaml` | `ClusterSecretStore` + `db-secret` `ExternalSecret` |
-| `backend/rollout.yaml` | Argo `Rollout` (not a plain Deployment — canary strategy) |
-| `backend/service.yaml` | ClusterIP, port 80 → 3000 |
-| `frontend/deployment.yaml`, `frontend/service.yaml` | plain Deployment + Service |
-| `ingress/ingress.yaml` | TLS ingress for the domain + `api.<domain>` |
-| `network-policy/network-policy.yaml` | default-deny + explicit frontend/backend allow rules |
-| `pdb/pdb.yaml` | PodDisruptionBudgets for both |
+| `namespace.yaml` | `bookstore` namespace, `pod-security.kubernetes.io/enforce: restricted` |
+| `limitrange.yaml` | Per-container default CPU/memory request/limit backstop |
+| `secrets/external-secret.yaml` | The cluster-wide `ClusterSecretStore` (every namespace's own `ExternalSecret` references this by name) |
+| `frontend/deployment.yaml`, `frontend/service.yaml` | plain Deployment (2 replicas) + Service — the only workload left in this namespace, now that the old monolith backend is fully deleted (OBS-046) |
+| `ingress/ingress.yaml` | ALB Ingress for `bookstore.<domain>` — TLS via an ACM cert the AWS Load Balancer Controller auto-discovers, not cert-manager (removed alongside ingress-nginx, OBS-057) |
+| `network-policy/network-policy.yaml` | default-deny + frontend allow rule (ingress from the ALB, by VPC CIDR — see the file's own comment for why `ipBlock`, not `namespaceSelector`) |
+| `pdb/pdb.yaml` | PodDisruptionBudget for `frontend` |
 | `quota.yaml` | namespace ResourceQuota |
-| `monitoring/servicemonitor.yaml`, `monitoring/prometheus-rules.yaml`, `monitoring/analysis-template.yaml` | CRD manifests — **inert**, see below |
+| `monitoring/servicemonitor.yaml`, `monitoring/prometheus-rules.yaml` | CRD manifests — **inert**, see below |
+
+`cert-manager/cluster-issuer.yaml`, `configmaps/backend-config.yaml`, `backend/rollout.yaml`, `backend/service.yaml`, and `monitoring/analysis-template.yaml` all used to exist here and are now gone — the first alongside cert-manager itself (OBS-057), the rest alongside the old monolith backend (OBS-046). If you're reading an older version of this table, or a stale cached doc, those five rows no longer describe anything real.
 
 `k8s/base/database/` (`mysql-statefulset.yaml`, `mysql-service.yaml`, `mysql-init-configmap.yaml`) — dead files from an earlier in-cluster-MySQL design, never referenced by `kustomization.yaml` — were deleted 2026-08-14. RDS is, and has always been in the live deployment, the real database.
 
@@ -190,7 +189,7 @@ spec:
 
 **This used to collide with the old monolith's ingress; it no longer does.** `k8s/base/ingress/ingress.yaml` (still deployed, still ArgoCD-managed via `k8s/argocd/application.yaml`) used to declare `api.bookstore.<domain>` too, routing to `backend-service` in the `bookstore` namespace. That rule was removed as part of the frontend build ([Plan 5](superpowers/plans/2026-08-08-frontend-microservices-integration.md)) — `api-gateway`'s `Ingress` is now the sole owner of that host, verified live: `POST /books` without a JWT returns `401` from the gateway. `k8s/base/ingress/ingress.yaml` now only routes `bookstore.<domain>` (frontend static assets). See [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) gap #12.
 
-`api-gateway`'s own `network-policy.yaml` allows ingress from the ingress-nginx controller (it's the one service meant to receive external traffic) and egress to the other 4 services' namespaces plus RDS-adjacent DNS.
+`api-gateway`'s own `network-policy.yaml` allows ingress from the ALB (by VPC CIDR, not a namespace selector — see OBS-057, the ALB connects straight to pod IPs from its own ENIs, not from a pod in some ingress-controller namespace the way ingress-nginx used to) and egress to the other 4 services' namespaces plus RDS-adjacent DNS.
 
 ### The schema-init Job — an ArgoCD PreSync hook, not a manual one-off
 

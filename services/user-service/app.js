@@ -3,10 +3,37 @@ import helmet from "helmet";
 import morgan from "morgan";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import crypto from "node:crypto";
 import rateLimit from "express-rate-limit";
 import { Registry, collectDefaultMetrics, Counter, Histogram } from "prom-client";
 
 const SERVICE_NAME = "user-service";
+
+// ── Short-lived access token + refresh token ────────────────────────────────
+// A bare 1h JWT with no revocation mechanism used to be the whole scheme --
+// a stolen token stayed valid for the full hour no matter what. Now: the
+// access token (still a JWT, still what api-gateway/user-service verify on
+// every request) is short-lived, and a separate, opaque refresh token
+// (random bytes, never a JWT -- it has no need to be self-describing, it's
+// always looked up against the DB) is what actually lets a session keep
+// working past that. Only the refresh token's SHA-256 hash is ever stored
+// (same principle as password hashing -- a stolen DB row isn't a usable
+// credential on its own). Revoking a refresh token (POST /auth/logout) cuts
+// off new access tokens immediately; the exposure window for an already-
+// stolen access token shrinks from 1h to ACCESS_TOKEN_TTL. Refresh itself
+// rotates the token (old one revoked, new one issued) so a refresh token
+// can only ever be used once before being replaced -- a stolen-but-unused
+// one becomes worthless the moment the real client refreshes first.
+const ACCESS_TOKEN_TTL = "15m";
+const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+function hashToken(token) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function generateRefreshToken() {
+  return crypto.randomBytes(48).toString("hex");
+}
 
 // The timing-safe dummy-hash compare below only protects against
 // enumeration-by-timing, not raw brute force -- nothing else in this
@@ -14,6 +41,19 @@ const SERVICE_NAME = "user-service";
 const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "too many attempts, try again later" },
+});
+
+// /auth/refresh is called automatically by the frontend, often across
+// multiple open tabs -- a materially different usage pattern than a human
+// typing a password, so it gets its own, looser limit rather than sharing
+// authRateLimiter's 20/15min (which real background refresh traffic could
+// hit on its own). Also covers /auth/logout, called far less often.
+const refreshRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 60,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "too many attempts, try again later" },
@@ -158,13 +198,110 @@ export function createApp(db, jwtSecret) {
           return res.status(401).json({ error: "invalid email or password" });
         }
 
-        const token = jwt.sign({ userId: user.id, email: user.email }, jwtSecret, { expiresIn: "1h" });
-        return res.status(200).json({ token });
+        const token = jwt.sign({ userId: user.id, email: user.email }, jwtSecret, {
+          expiresIn: ACCESS_TOKEN_TTL,
+        });
+        const refreshToken = generateRefreshToken();
+        db.query(
+          "INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)",
+          [user.id, hashToken(refreshToken), new Date(Date.now() + REFRESH_TOKEN_TTL_MS)],
+          (rtErr) => {
+            if (rtErr) {
+              console.error("user-service DB error:", rtErr);
+              return res.status(500).json({ error: "internal error" });
+            }
+            return res.status(200).json({ token, refreshToken });
+          }
+        );
       } catch (e) {
         console.error("user-service DB error:", e);
         return res.status(500).json({ error: "internal error" });
       }
     });
+  });
+
+  app.post("/auth/refresh", refreshRateLimiter, (req, res) => {
+    const { refreshToken } = req.body;
+    if (!refreshToken || typeof refreshToken !== "string") {
+      return res.status(400).json({ error: "refreshToken is required" });
+    }
+
+    db.query(
+      "SELECT id, user_id FROM refresh_tokens WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > NOW()",
+      [hashToken(refreshToken)],
+      (err, rows) => {
+        if (err) {
+          console.error("user-service DB error:", err);
+          return res.status(500).json({ error: "internal error" });
+        }
+        if (rows.length === 0) {
+          return res.status(401).json({ error: "invalid or expired refresh token" });
+        }
+        const existing = rows[0];
+
+        db.query("SELECT id, email FROM users WHERE id = ?", [existing.user_id], (userErr, userRows) => {
+          if (userErr) {
+            console.error("user-service DB error:", userErr);
+            return res.status(500).json({ error: "internal error" });
+          }
+          // The user row backing this refresh token is gone (deleted
+          // account) -- treat exactly like an invalid token, don't leak
+          // that the token itself was well-formed.
+          if (userRows.length === 0) {
+            return res.status(401).json({ error: "invalid or expired refresh token" });
+          }
+          const user = userRows[0];
+
+          // Rotate: revoke the token that was just used, issue a fresh one.
+          // A stolen-but-not-yet-used refresh token is now worthless the
+          // instant the real client refreshes first.
+          const newRefreshToken = generateRefreshToken();
+          db.query("UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = ?", [existing.id], (revokeErr) => {
+            if (revokeErr) {
+              console.error("user-service DB error:", revokeErr);
+              return res.status(500).json({ error: "internal error" });
+            }
+            db.query(
+              "INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)",
+              [user.id, hashToken(newRefreshToken), new Date(Date.now() + REFRESH_TOKEN_TTL_MS)],
+              (insertErr) => {
+                if (insertErr) {
+                  console.error("user-service DB error:", insertErr);
+                  return res.status(500).json({ error: "internal error" });
+                }
+                const newAccessToken = jwt.sign({ userId: user.id, email: user.email }, jwtSecret, {
+                  expiresIn: ACCESS_TOKEN_TTL,
+                });
+                return res.status(200).json({ token: newAccessToken, refreshToken: newRefreshToken });
+              }
+            );
+          });
+        });
+      }
+    );
+  });
+
+  app.post("/auth/logout", refreshRateLimiter, (req, res) => {
+    const { refreshToken } = req.body;
+    // Nothing to revoke, but logout is still "successful" from the client's
+    // perspective either way -- don't error on an already-cleared session.
+    if (!refreshToken || typeof refreshToken !== "string") {
+      return res.status(200).json({ success: true });
+    }
+
+    db.query(
+      "UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = ? AND revoked_at IS NULL",
+      [hashToken(refreshToken)],
+      (err) => {
+        if (err) {
+          console.error("user-service DB error:", err);
+          return res.status(500).json({ error: "internal error" });
+        }
+        // Always 200, whether or not a matching row existed -- don't leak
+        // whether a given refresh token was ever valid.
+        return res.status(200).json({ success: true });
+      }
+    );
   });
 
   app.get("/users/me", verifyJwt(jwtSecret), (req, res) => {

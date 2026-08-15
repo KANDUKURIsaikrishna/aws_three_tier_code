@@ -113,8 +113,8 @@ module "route53" {
   vpc_id       = module.network.vpc_id
   rds_endpoint = module.rds.rds_endpoint
   domain       = var.domain
-  # local.primary_alb_dns (argocd.tf) auto-discovers the ingress-nginx NLB
-  # hostname within this same apply, falling back to var.primary_alb_dns only
+  # local.primary_alb_dns (argocd.tf) auto-discovers the ALB's hostname
+  # within this same apply, falling back to var.primary_alb_dns only
   # if that's explicitly set — no more manual second-apply for this value.
   primary_alb_dns   = local.primary_alb_dns
   secondary_alb_dns = var.secondary_alb_dns
@@ -300,7 +300,7 @@ module "monitoring_ec2" {
   # ARN — the latter is already an implicit dependency via the reference above,
   # and that secret (random_password + aws_secretsmanager_secret) is one of the
   # fastest resources in eks_addons, not gated on any of its slow Helm installs
-  # (cert-manager/external-secrets/ingress-nginx/argocd/argo-rollouts, up to
+  # (external-secrets/aws-load-balancer-controller/argocd/argo-rollouts, up to
   # 900s timeout each). A module-level depends_on would force this EC2 to wait
   # for ALL of those regardless, which it doesn't actually need.
   #

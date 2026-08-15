@@ -10,6 +10,7 @@ export function AuthProvider({ children }) {
   const login = async (loginEmail, password) => {
     const res = await api.post("/auth/login", { email: loginEmail, password });
     localStorage.setItem("bookstore_token", res.data.token);
+    localStorage.setItem("bookstore_refresh_token", res.data.refreshToken);
     localStorage.setItem("bookstore_email", loginEmail);
     setToken(res.data.token);
     setEmail(loginEmail);
@@ -22,10 +23,19 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
+    const storedRefreshToken = localStorage.getItem("bookstore_refresh_token");
     localStorage.removeItem("bookstore_token");
+    localStorage.removeItem("bookstore_refresh_token");
     localStorage.removeItem("bookstore_email");
     setToken(null);
     setEmail(null);
+    // Best-effort, not awaited -- the UI logs the user out immediately
+    // either way. This just revokes the refresh token server-side so it
+    // can't be used to mint new access tokens if it were ever stolen; a
+    // failure here (offline, server down) shouldn't block logging out.
+    if (storedRefreshToken) {
+      api.post("/auth/logout", { refreshToken: storedRefreshToken }).catch(() => {});
+    }
   };
 
   const value = {

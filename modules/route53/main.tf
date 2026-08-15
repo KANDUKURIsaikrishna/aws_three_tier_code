@@ -46,22 +46,27 @@ resource "aws_route53_health_check" "primary" {
 # workaround — it behaves like a CNAME but is legal at the apex. Scoped to
 # var.aws_region implicitly via this module's (default) provider.
 #
-# Classic ELB, NOT an NLB — despite this whole project historically calling
-# this an "NLB" (docs included), it isn't one. No aws-load-balancer-controller
-# is installed (modules/eks-addons has no such helm_release), and
-# modules/eks-addons/ingress.tf never sets the
-# service.beta.kubernetes.io/aws-load-balancer-type: nlb annotation on
-# ingress-nginx's Service. On EKS, a plain `type: LoadBalancer` Service with
-# neither of those falls back to the legacy in-tree cloud provider's Classic
-# ELB. Confirmed by two real Route53 errors in sequence: first "the alias
-# target name does not lie within the target zone" when this used
-# aws_lb_hosted_zone_id (load_balancer_type="network") — proving it's not an
-# NLB — then that same data source rejecting "classic" outright
-# (`expected load_balancer_type to be one of ["application" "network"]`) —
-# aws_lb_hosted_zone_id only covers ELBv2 (ALB/NLB), not the classic v1 ELB
-# this cluster actually creates. aws_elb_hosted_zone_id is the correct,
-# separate data source for that. See TROUBLESHOOTING OBS-010.
-data "aws_elb_hosted_zone_id" "ingress_lb" {}
+# An Application Load Balancer now, provisioned by the AWS Load Balancer
+# Controller reconciling an Ingress object (see
+# modules/eks-addons/aws-load-balancer-controller.tf) -- the third distinct
+# load balancer type this one data source has had to track, worth knowing
+# the whole history of if this ever needs touching again:
+#   1. Classic ELB (accidental — ingress-nginx's default, `aws_elb_hosted_zone_id`)
+#   2. NLB (`aws_lb_hosted_zone_id { load_balancer_type = "network" }`,
+#      via a Service annotation on ingress-nginx — coded but never applied
+#      before ingress-nginx itself was replaced, see TROUBLESHOOTING.md OBS-056/057)
+#   3. ALB (this one — ingress-nginx retired outright, replaced with the AWS
+#      Load Balancer Controller per AWS's own official migration guidance)
+# `aws_lb_hosted_zone_id` covers ELBv2 (ALB/NLB) specifically;
+# `load_balancer_type = "application"` selects the ALB variant of its
+# constant (NLB's and Classic's both differ). Using the wrong one of the
+# three for whatever the cluster is actually provisioning is exactly what
+# broke this twice already, before it was ever even NLB — check
+# `aws elbv2 describe-load-balancers` against the real, live load balancer
+# before ever changing this again, don't assume from a doc.
+data "aws_lb_hosted_zone_id" "ingress_lb" {
+  load_balancer_type = "application"
+}
 
 # Direct-to-ingress-LB record — active when CloudFront is disabled.
 # primary_alb_dns is auto-discovered within the same apply (root argocd.tf's
@@ -83,7 +88,7 @@ resource "aws_route53_record" "primary" {
 
   alias {
     name                   = var.primary_alb_dns
-    zone_id                = data.aws_elb_hosted_zone_id.ingress_lb.id
+    zone_id                = data.aws_lb_hosted_zone_id.ingress_lb.id
     evaluate_target_health = true
   }
 
@@ -95,11 +100,12 @@ resource "aws_route53_record" "primary" {
 # The actual app-serving hostnames — genuinely missing until OBS-025.
 # k8s/base/ingress/ingress.yaml's Ingress rules only match
 # bookstore.<domain> (frontend) and api.bookstore.<domain> (backend), never
-# the bare apex — nginx's default backend returns 404 for anything else,
-# apex included. Every record above this one only ever covered the apex, so
-# neither of these two hostnames has ever had a Route53 record in either
-# hosted zone this project has used — the site has never actually been
-# reachable by name. Same ALIAS pattern as `primary` above (Classic ELB,
+# the bare apex — the ALB's default rule returns 404 for anything that
+# doesn't match a configured host/path, apex included. Every record above
+# this one only ever covered the apex, so neither of these two hostnames
+# has ever had a Route53 record in either hosted zone this project has
+# used — the site has never actually been reachable by name. Same ALIAS
+# pattern as `primary` above (ALB,
 # same apex-CNAME-forbidden reasoning doesn't strictly apply here since
 # these aren't the zone apex, but ALIAS is still preferred over CNAME so
 # Route53 can evaluate target health / avoid the extra CNAME lookup hop),
@@ -114,7 +120,7 @@ resource "aws_route53_record" "frontend" {
 
   alias {
     name                   = var.primary_alb_dns
-    zone_id                = data.aws_elb_hosted_zone_id.ingress_lb.id
+    zone_id                = data.aws_lb_hosted_zone_id.ingress_lb.id
     evaluate_target_health = true
   }
 }
@@ -126,7 +132,7 @@ resource "aws_route53_record" "api" {
 
   alias {
     name                   = var.primary_alb_dns
-    zone_id                = data.aws_elb_hosted_zone_id.ingress_lb.id
+    zone_id                = data.aws_lb_hosted_zone_id.ingress_lb.id
     evaluate_target_health = true
   }
 }
@@ -137,10 +143,10 @@ resource "aws_route53_record" "api" {
 # exist, which they don't yet (see ARCHITECTURE.md — DR is backup-level only
 # today). When that day comes, this needs the SAME apex-alias treatment as
 # `primary` above, but pointed at the secondary region's LB hosted zone ID —
-# region-specific and NOT the same value as data.aws_elb_hosted_zone_id.ingress_lb
+# region-specific and NOT the same value as data.aws_lb_hosted_zone_id.ingress_lb
 # above (that one resolves against var.aws_region, the primary region, via
 # this module's default provider — and confirm the secondary cluster's ingress
-# is the same LB type, classic, before reusing this pattern; don't assume it).
+# is the same LB type, ALB, before reusing this pattern; don't assume it).
 # Wiring a second, secondary-region-scoped provider through this module is
 # real work, deliberately deferred until there's an actual secondary LB to
 # point at — don't copy today's CNAME pattern for this once secondary_alb_dns

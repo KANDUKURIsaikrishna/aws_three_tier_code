@@ -67,7 +67,10 @@ resource "helm_release" "external_secrets" {
     value = aws_iam_role.external_secrets.arn
   }
 
-  # No real functional dependency on cert-manager (was serialized here only for
-  # single-node resource contention — cluster now has 2 nodes, see TF main.tf
-  # node_desired_size). Installs concurrently with cert_manager and ingress_nginx.
+  # No real functional dependency on anything else in this module — was
+  # serialized against cert-manager/ingress-nginx here only for single-node
+  # resource contention, back when the cluster ran one node (see TF main.tf
+  # node_desired_size history). Both of those are gone now (cert-manager
+  # removed alongside ingress-nginx — see aws-load-balancer-controller.tf);
+  # this installs concurrently with whatever remains in this module.
 }

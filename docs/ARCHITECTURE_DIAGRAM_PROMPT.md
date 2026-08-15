@@ -1,6 +1,6 @@
 # AWS Architecture
 
-Official-AWS-style diagram, rendered inline with Mermaid (no external tool needed — GitHub/GitLab/VS Code preview all render this natively). Verified against the live Terraform/Kubernetes source as of 2026-08-14. Region `us-west-1` is primary and holds every live workload; `us-west-2` is backup-replication-only, opt-in, zero compute.
+Official-AWS-style diagram, rendered inline with Mermaid (no external tool needed — GitHub/GitLab/VS Code preview all render this natively). Verified against the live Terraform/Kubernetes source as of 2026-08-15. Region `us-west-1` is primary and holds every live workload; `us-west-2` is backup-replication-only, opt-in, zero compute.
 
 ```mermaid
 flowchart TB
@@ -15,11 +15,11 @@ flowchart TB
         IGW["Internet Gateway"]:::net
         NAT["NAT Gateway — single, not per-AZ"]:::net
         S3EP["S3 Gateway Endpoint — free"]:::net
-        ELB["Classic ELB"]:::net
+        ALB["ALB\n(provisioned by the controller below)"]:::net
         MON["Monitoring EC2 — t3.small"]:::compute
 
         subgraph EKS["Amazon EKS — bookstore-eks v1.31\n3x t3.medium nodes · KMS-encrypted secrets"]
-          ING["ingress-nginx ×2"]:::third
+          LBC["AWS Load Balancer Controller\n(kube-system — control plane only,\nnot in the data path)"]:::third
           GW["gateway ns — api-gateway"]:::ctr
           CAT["catalog ns"]:::ctr
           USR["user ns"]:::ctr
@@ -41,6 +41,7 @@ flowchart TB
       IAM["IAM — GitHub OIDC, zero static keys"]:::sec
       SM["Secrets Manager — 8 secrets"]:::sec
       KMS["KMS — EKS secrets encryption"]:::sec
+      ACM["ACM — regional cert, auto-discovered\nby the controller, by hostname"]:::sec
       CT["CloudTrail"]:::sec
       GD["GuardDuty"]:::sec
     end
@@ -56,19 +57,20 @@ flowchart TB
 
   User -->|"① https"| R53
   R53 -->|"②"| CF
-  CF -.-> ELB
-  R53 -.->|"② if CloudFront disabled"| ELB
-  IGW --- ELB
-  ELB -->|"③"| ING
-  ING -->|"④ static assets"| FE
-  ING -->|"④ /api/*"| GW
-  GW -->|"⑤ verifyJwt → x-user-id"| CAT
-  GW -->|"⑤"| USR
-  GW -->|"⑤"| ORD
+  CF -.-> ALB
+  R53 -.->|"② if CloudFront disabled"| ALB
+  IGW --- ALB
+  ACM -.->|"TLS cert, discovered by host"| ALB
+  LBC -.->|"configures target groups\n(control plane, not data path)"| ALB
+  ALB -->|"③ target-type=ip, direct to pod"| FE
+  ALB -->|"③ target-type=ip, direct to pod"| GW
+  GW -->|"④ verifyJwt → x-user-id"| CAT
+  GW -->|"④"| USR
+  GW -->|"④"| ORD
   ORD -.->|"fire-and-forget"| NOT
-  CAT -->|"⑥"| RDS
-  USR -->|"⑥"| RDS
-  ORD -->|"⑥"| RDS
+  CAT -->|"⑤"| RDS
+  USR -->|"⑤"| RDS
+  ORD -->|"⑤"| RDS
   EKS -.->|"image pull, via S3EP"| ECR
   EKS -.-> S3EP
   STACK -.->|"SMTP"| SES
@@ -97,7 +99,7 @@ flowchart TB
 | 🩷 Pink | Management & Governance |
 | ⬜ Grey, dashed | Third-party / self-hosted — **not** an AWS-managed service |
 
-Solid arrows = synchronous request path (numbered ①–⑥, the flow a real API call takes). Dashed arrows = async/background (image pulls, metric scrapes, email delivery, fire-and-forget notification).
+Solid arrows = synchronous request path (numbered ①–⑤, the flow a real API call takes). Dashed arrows = async/background/control-plane-only (image pulls, metric scrapes, email delivery, fire-and-forget notification, the load balancer controller configuring the ALB).
 
 ---
 
@@ -107,7 +109,7 @@ Solid arrows = synchronous request path (numbered ①–⑥, the flow a real API
 AWS Cloud
 └── Region: us-west-1 (primary)
     └── VPC 170.20.0.0/16 — 1× Internet Gateway, attached at VPC level (not per-AZ)
-        ├── AZ us-west-1a — public subnet (ELB, Monitoring EC2) · private EKS subnets ×2 · private RDS subnet (primary)
+        ├── AZ us-west-1a — public subnet (ALB, Monitoring EC2) · private EKS subnets ×2 · private RDS subnet (primary)
         └── AZ us-west-1c — public subnet (NAT Gateway) · private EKS subnets ×2 · private RDS subnet (standby)
 └── Region: us-west-2 (DR — backup-only, opt-in, nothing to fail over to yet)
 ```
@@ -115,15 +117,14 @@ AWS Cloud
 ## Primary request flow (numbered arrows above)
 
 1. Browser → Route 53
-2. Route 53 → (CloudFront, if enabled) → Classic ELB
-3. Classic ELB → NGINX Ingress Controller
-4. Ingress → `api-gateway` (API calls) or `frontend` (static assets)
-5. `api-gateway` verifies the JWT, injects `x-user-id`, proxies to the owning microservice
-6. Microservice → RDS, its own schema, reachable only from the EKS-node subnets
+2. Route 53 → (CloudFront, if enabled) → ALB
+3. ALB → directly to the target pod (`target-type: ip`) — `frontend` for static assets, `api-gateway` for every API call. **No in-cluster ingress-controller hop** — the AWS Load Balancer Controller only configures the ALB's target groups from outside the data path, it doesn't sit in it the way ingress-nginx used to.
+4. `api-gateway` verifies the JWT, injects `x-user-id`, proxies to the owning microservice
+5. Microservice → RDS, its own schema, reachable only from the EKS-node subnets
 
 ## Get these right
 
-- **Classic ELB, not NLB/ALB** — no `aws-load-balancer-controller` installed, no annotation set.
+- **ALB, via the AWS Load Balancer Controller** — not ingress-nginx (officially retired by the Kubernetes project 2026-03-31, replaced 2026-08-15, see `docs/TROUBLESHOOTING.md` OBS-057), not a Classic ELB (what this project actually ran for most of its history despite older docs calling it "NLB"), and not an NLB either (planned as the fix at one point, superseded before ever being applied once ingress-nginx's retirement became the real, dominant issue). TLS terminates at the ALB using an ACM certificate the controller auto-discovers by hostname — no cert-manager anymore, it had no other consumer once ingress TLS moved off it.
 - **CloudFront is off by default** — real Terraform, not deployed unless explicitly enabled.
 - **NAT is single, not per-AZ** — a deliberate cost tradeoff. The S3 Gateway Endpoint (free) takes ECR/S3 traffic off it to cut data-processing cost, but doesn't touch the availability gap.
 - **DR is opt-in plumbing, not a standby environment** — two separate Terraform flags gate it, both default `false`. No mirrored EKS cluster in `us-west-2`.
