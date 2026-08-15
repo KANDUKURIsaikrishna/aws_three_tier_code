@@ -1,7 +1,12 @@
+import axios, { __mockApiInstance as mockApiInstance } from "axios";
+import { attachAuthHeader, handleAuthError, clearSession, resetRefreshState } from "./api";
+
 // The mock instance is created entirely inside the factory (not referenced
 // from outer scope) and exposed as a named export -- referencing an
 // outer-scope const from inside jest.mock's factory hits a hoisting/TDZ
 // error, since the factory can run before that const's own initializer has.
+// Jest's babel-plugin-jest-hoist moves this call above the imports above at
+// transform time regardless of source order, so this placement is safe.
 jest.mock("axios", () => {
   const instance = {
     interceptors: { request: { use: jest.fn() }, response: { use: jest.fn() } },
@@ -13,9 +18,6 @@ jest.mock("axios", () => {
     __mockApiInstance: instance,
   };
 });
-
-import axios, { __mockApiInstance as mockApiInstance } from "axios";
-import { attachAuthHeader, handleAuthError, clearSession, resetRefreshState } from "./api";
 
 describe("attachAuthHeader", () => {
   beforeEach(() => {
