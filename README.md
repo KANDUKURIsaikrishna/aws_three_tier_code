@@ -279,167 +279,24 @@ The helper script wraps the ECR login, Docker build, and push steps into one com
 
 ---
 
-## Infrastructure Provisioning (Terraform)
+## Infrastructure Provisioning, Kubernetes Deploy, and CI/CD Pipeline
 
-### First-time setup
+This project has grown from a single frontend/backend pair into 5 backend
+microservices behind an api-gateway, provisioned by 9 Terraform modules,
+deployed via ArgoCD GitOps. The step-by-step guides live in `docs/` and are
+kept current there instead of duplicated here:
 
-> Run `./scripts/bootstrap-tf-state.sh us-west-1` first to create the S3 bucket and DynamoDB table for remote state, then fill in the `backend "s3"` block in `main.tf`.
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — full stand-up from a fresh AWS
+  account: Terraform state bootstrap, `config.env`/`scripts/configure.py`,
+  the apply itself, and post-apply verification.
+- [`docs/TERRAFORM.md`](docs/TERRAFORM.md) — what each of the 9 modules
+  provisions.
+- [`docs/CICD.md`](docs/CICD.md) — the GitHub Actions pipeline stage by
+  stage, plus [`explaination/CICD_EXPLAINED.md`](explaination/CICD_EXPLAINED.md)
+  (local, gitignored) for a deeper walkthrough.
+- [`docs/KUBERNETES.md`](docs/KUBERNETES.md) — the GitOps layout ArgoCD
+  reconciles.
 
-```bash
-# 1. Configure values (domain, account ID, GitHub repo)
-cp config.env.example config.env
-# Edit config.env, then:
-python scripts/configure.py
-
-# 2. Initialise providers and modules
-terraform init
-
-# 3. Preview changes (safe — read-only)
-terraform plan
-
-# 4. Apply
-terraform apply
-```
-
-### What Terraform provisions
-
-| Module | Resources created |
-|---|---|
-| `network` | VPC `170.20.0.0/16`, 2 public + 6 private subnets (us-west-1a/1c), IGW, NAT Gateway, route tables |
-| `security` | 2 security groups: NLB (80/443 public) and RDS (3306 from VPC CIDR only) |
-| `acm` | ACM TLS certificate for `b17facebook.xyz` and `*.b17facebook.xyz` |
-| `rds` | MySQL 8.0, `db.t3.micro`, Multi-AZ, 7-day backups, password in Secrets Manager |
-| `ecr` | `bookstore-frontend` and `bookstore-backend` repos, IMMUTABLE tags, 10-image retention |
-| `eks` | EKS 1.31 cluster, OIDC provider, managed node group (t3.medium, min 1 / desired 1 / max 2) |
-| `eks-addons` | EBS CSI driver, cert-manager, ESO, ingress-nginx, ArgoCD, Prometheus+Grafana, Argo Rollouts |
-| `route53` | Private hosted zone for internal RDS DNS resolution |
-
-### Key outputs after apply
-
-```bash
-terraform output eks_cluster_name       # bookstore-eks
-terraform output eks_cluster_endpoint   # https://...
-terraform output rds_endpoint           # bookstore-db.xxx.rds.amazonaws.com
-terraform output frontend_repo_url      # <account>.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend
-terraform output backend_repo_url       # <account>.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend
-```
-
----
-
-## Deploying to Kubernetes (EKS)
-
-### 1. Run eks_bootstrap.py (post-terraform, one-time per cluster)
-
-After `terraform apply`, all Helm add-ons are already running. The bootstrap script handles the remaining cluster-specific steps:
-
-```bash
-source config.env
-DOMAIN=$DOMAIN python eks_bootstrap.py
-```
-
-**8 phases:**
-
-| Phase | What it does |
-|---|---|
-| 1 | Sync kubeconfig |
-| 2 | Apply ClusterIssuer (Let's Encrypt) |
-| 3 | Create IRSA role for External Secrets |
-| 4 | Validate / create Secrets Manager secret |
-| 5 | Apply ArgoCD Application manifest |
-| 6 | Clear kubectl cache + force ESO resync |
-| 7 | DB schema init + seed data |
-| 8 | Summary + Route53 NLB hostname |
-
-### 2. Store DB credentials in AWS Secrets Manager
-
-`eks_bootstrap.py` Phase 4 handles this interactively. Or do it manually:
-
-```bash
-aws secretsmanager create-secret \
-  --name /bookstore/db-credentials \
-  --region us-west-1 \
-  --secret-string '{"DB_USERNAME":"admin","DB_PASSWORD":"<strong-password>"}'
-```
-
-### 3. Apply the ArgoCD Application manifest
-
-`eks_bootstrap.py` Phase 5 does this automatically. To apply manually:
-
-```bash
-kubectl apply -f k8s/argocd/application.yaml
-```
-
-ArgoCD watches `k8s/overlays/prod/` and reconciles the cluster automatically within 3 minutes of every git commit.
-
-### 4. Update image references
-
-The CI pipeline updates `k8s/overlays/prod/kustomization.yaml` automatically via `kustomize edit set image` after every successful build. To update manually:
-
-```bash
-cd k8s/overlays/prod
-kustomize edit set image \
-  bookstore-backend=<ACCOUNT>.dkr.ecr.us-west-1.amazonaws.com/bookstore-backend:<sha8>
-kustomize edit set image \
-  bookstore-frontend=<ACCOUNT>.dkr.ecr.us-west-1.amazonaws.com/bookstore-frontend:<sha8>
-git add kustomization.yaml && git commit -m "chore: update image tags" && git push
-```
-
----
-
-## CI/CD Pipeline
-
-The pipeline is defined in [.github/workflows/ci-cd.yml](.github/workflows/ci-cd.yml) and triggers on every push or pull request to `main` or `improvements`.
-
-### Stages
-
-```
-Push/PR to main or improvements
-     │
-     ▼
-┌────────────────────┐
-│ 0. Secret Scan     │ Gitleaks — fails immediately on any detected secret
-└─────────┬──────────┘
-          │
-     ┌────┴────┐
-     ▼         ▼
-┌─────────────────┐  ┌────────────┐
-│ 1. SAST + Tests │  │ 2. Validate│
-│ npm test (vitest)│  │ ESLint     │
-│ npm audit       │  │ kubeconform│
-│ Semgrep         │  │            │
-└────┬────────────┘  └─────┬──────┘
-     └──────┬──────────────┘
-            │  (both must pass)
-            ▼
-┌───────────────────────────┐
-│ 3. Build → Scan → Push    │ main or improvements only
-│ Docker build (backend)    │
-│ Trivy scan → SARIF upload │
-│ Push to ECR  :<sha8>      │
-│ Docker build (frontend)   │
-│ Trivy scan → SARIF upload │
-│ Push to ECR  :<sha8>      │
-└────────────┬──────────────┘
-             │  (manual approval gate)
-             ▼
-┌───────────────────────────────────────┐
-│ 4. GitOps image-tag update            │ production environment
-│ cd k8s/overlays/prod                  │
-│ kustomize edit set image → <sha8>     │
-│ git commit k8s/overlays/prod/         │
-│   kustomization.yaml                  │
-│ git push (GITHUB_TOKEN)               │
-│                                       │
-│ ArgoCD detects commit (~3 min)        │
-│ kustomize build k8s/overlays/prod/    │
-│ Backend: Argo Rollout canary          │
-│ Frontend: rolling update              │
-└───────────────────────────────────────┘
-```
-
-### Authentication model
-
-The pipeline uses **GitHub OIDC** to assume an AWS IAM role. No `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` are stored anywhere.
 
 ---
 

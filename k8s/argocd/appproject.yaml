@@ -8,11 +8,13 @@
 # any resource kind including cluster-scoped ones (ClusterRole, other
 # clusters' Namespaces, etc.). This project scopes both Applications down to
 # exactly what they actually use -- one repo, one cluster, the 6 namespaces
-# this platform actually deploys into, and the single cluster-scoped kind
-# (Namespace) any of them actually create.
+# this platform actually deploys into, and the cluster-scoped kinds
+# (Namespace, StorageClass, ClusterSecretStore) any of them actually create.
 #
-# Apply once, before the Application/ApplicationSet that reference it:
-#   kubectl apply -f k8s/argocd/appproject.yaml
+# Applied by Terraform (kubectl_manifest.argocd_appproject in argocd.tf),
+# before the Application/ApplicationSet that reference it -- not a manual
+# step. It genuinely was manual-only for a while and got missed on a
+# from-scratch rebuild (OBS-058); see argocd.tf's comment for the history.
 # ─────────────────────────────────────────────────────────────────────────────
 
 apiVersion: argoproj.io/v1alpha1

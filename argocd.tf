@@ -2,25 +2,42 @@
 # ArgoCD bootstrap — Terraform-managed, not manual `kubectl apply`
 #
 # Previously: DEPLOYMENT.md told you to run
+#   kubectl apply -f k8s/argocd/appproject.yaml
 #   kubectl apply -f k8s/argocd/application.yaml
 #   kubectl apply -f k8s/argocd/applicationset-microservices.yaml
 # by hand, once, after eks-addons installed ArgoCD. That's now this file's job.
 #
+# appproject.yaml genuinely was missed here for a while (application.yaml and
+# applicationset-microservices.yaml got wired in, appproject.yaml didn't) --
+# invisible on a long-lived cluster where the AppProject, once created, just
+# sits there; it only surfaced as a real outage on the next from-scratch
+# `terraform destroy` + `apply` cycle, when the Application/ApplicationSet
+# came up referencing a project that no longer existed (OBS-058).
+#
 # Applies the existing YAML files as-is (kubectl_manifest takes a raw YAML
 # body — no need to re-express them as HCL objects, so the files in k8s/argocd/
 # stay the single source of truth and these resources can't drift from them).
+# The AppProject must exist before the Application/ApplicationSet that
+# reference it, hence the explicit depends_on below (ArgoCD itself validates
+# this at admission — an Application naming a nonexistent project is rejected).
 # ─────────────────────────────────────────────────────────────────────────────
+
+resource "kubectl_manifest" "argocd_appproject" {
+  yaml_body = file("${path.module}/k8s/argocd/appproject.yaml")
+
+  depends_on = [module.eks_addons]
+}
 
 resource "kubectl_manifest" "argocd_application" {
   yaml_body = file("${path.module}/k8s/argocd/application.yaml")
 
-  depends_on = [module.eks_addons]
+  depends_on = [module.eks_addons, kubectl_manifest.argocd_appproject]
 }
 
 resource "kubectl_manifest" "argocd_applicationset_microservices" {
   yaml_body = file("${path.module}/k8s/argocd/applicationset-microservices.yaml")
 
-  depends_on = [module.eks_addons]
+  depends_on = [module.eks_addons, kubectl_manifest.argocd_appproject]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

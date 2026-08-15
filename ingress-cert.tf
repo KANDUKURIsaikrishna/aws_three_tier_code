@@ -20,8 +20,15 @@
 # validation records + aws_acm_certificate_validation — because the ALB
 # controller's discovery only matches ISSUED certificates, not pending ones.
 resource "aws_acm_certificate" "ingress" {
-  domain_name               = var.domain
-  subject_alternative_names = ["*.${var.domain}"]
+  domain_name = var.domain
+  # "*.${var.domain}" covers exactly one label deep (e.g. bookstore.<domain>,
+  # used by k8s/base/ingress/ingress.yaml) -- it does NOT cover
+  # api.bookstore.<domain> (two labels deep, used by
+  # k8s/services/api-gateway/base/ingress.yaml), a real gap that left the
+  # AWS Load Balancer Controller unable to find a matching cert for that
+  # Ingress ("no certificate found for host") until this second wildcard
+  # was added (OBS-059).
+  subject_alternative_names = ["*.${var.domain}", "*.bookstore.${var.domain}"]
   validation_method         = "DNS"
 
   lifecycle {

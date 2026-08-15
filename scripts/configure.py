@@ -118,20 +118,17 @@ def main():
     })
 
     print(f"""
-Done. Next steps
------------------
-1. First-time Terraform:
-     terraform init
-     terraform apply
+Done. Commit the stamped k8s files so ArgoCD deploys the real values, not
+placeholders (it syncs from git, not this local checkout):
 
-2. Bootstrap the cluster (once per cluster):
-     DOMAIN={domain} python eks_bootstrap.py
-
-3. Commit k8s files so ArgoCD can sync:
-     git add k8s/base/ingress/ingress.yaml k8s/argocd/application.yaml k8s/overlays/prod/kustomization.yaml
+     git add k8s/base/ingress/ingress.yaml k8s/services/api-gateway/base/configmap.yaml \\
+             k8s/argocd/application.yaml k8s/overlays/prod/kustomization.yaml
      git commit -m "chore: configure for {domain}"
      git push
-   (CI will rebuild images and ArgoCD will sync within 3 min.)
+
+Then follow docs/DEPLOYMENT.md starting at Step 1 (this script was Step 2)
+for the actual apply sequence -- Terraform state bootstrap, the apply
+itself, and the post-apply verification steps.
 
 Note: config.env and terraform.tfvars are gitignored -- never commit them.
 """)
