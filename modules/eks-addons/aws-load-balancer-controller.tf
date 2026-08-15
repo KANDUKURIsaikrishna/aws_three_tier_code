@@ -277,9 +277,28 @@ resource "null_resource" "delete_ingress_objects" {
   provisioner "local-exec" {
     when    = destroy
     command = <<-EOT
+      set -e
       aws eks update-kubeconfig --name ${self.triggers.cluster_name} --region ${self.triggers.region} 2>/dev/null || true
-      kubectl delete ingress --all -n bookstore --wait --timeout=180s --ignore-not-found 2>/dev/null || true
-      kubectl delete ingress --all -n gateway --wait --timeout=180s --ignore-not-found 2>/dev/null || true
+
+      # Deliberately NOT `|| true` on these two -- a real ALB deletion (the
+      # controller's own AWS API call, triggered by this finalizer-gated
+      # kubectl delete) can genuinely take several minutes. An earlier
+      # version had a 180s timeout AND `|| true`, so a timeout was silently
+      # swallowed -- Terraform considered this resource "destroyed" either
+      # way and immediately moved on to destroying helm_release.aws_lb_controller
+      # right after, killing the controller mid-deprovision. That orphaned
+      # the real ALB (never actually deleted, `describe-load-balancers`
+      # still showed it `active`) with its ENIs still attached to the VPC's
+      # subnets, which then blocked the subnet/VPC destroy for the rest of
+      # the apply, and left both Ingress objects stuck in Terminating
+      # forever with a finalizer no controller was left alive to clear.
+      # Failing loudly here (real timeout, no swallow) means a genuine
+      # problem surfaces as a clear `terraform destroy` error instead of a
+      # silent orphaned ALB discovered 10+ minutes later as an unrelated-
+      # looking subnet-destroy hang (see TROUBLESHOOTING.md for the incident
+      # this was caught from).
+      kubectl delete ingress --all -n bookstore --wait --timeout=480s --ignore-not-found
+      kubectl delete ingress --all -n gateway --wait --timeout=480s --ignore-not-found
     EOT
   }
 }

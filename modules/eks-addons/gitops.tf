@@ -36,7 +36,13 @@ resource "helm_release" "argocd" {
   namespace        = "argocd"
   create_namespace = true
   wait             = true
-  timeout          = 900
+  # 900s wasn't enough for a real `terraform destroy` -- the actual `helm
+  # uninstall` completed (confirmed via `helm list -A` showing nothing left
+  # afterward), but Terraform's own destroy-side wait hit "context deadline
+  # exceeded" around 971s, leaving this resource stuck in state even though
+  # the real work was done. `timeout` applies to both install and uninstall
+  # on this resource type, so this also covers a slow first install.
+  timeout = 1200
 
   set {
     name  = "server.replicas"

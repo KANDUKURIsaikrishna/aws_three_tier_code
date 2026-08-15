@@ -50,7 +50,10 @@ resource "helm_release" "external_secrets" {
   namespace        = "external-secrets"
   create_namespace = true
   wait             = true
-  timeout          = 600
+  # Same class of gap as helm_release.argocd in gitops.tf: 600s wasn't
+  # enough for a real `terraform destroy` (hit "context deadline exceeded"
+  # even though the actual `helm uninstall` had genuinely finished).
+  timeout = 900
 
   set {
     name  = "installCRDs"
