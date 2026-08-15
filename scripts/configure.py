@@ -3,7 +3,7 @@
 configure.py — Stamp real values into all project files that contain placeholders.
 
 Run once after cloning, or any time you change config.env:
-    python scripts/configure.py
+    python3 scripts/configure.py
 
 In CI the values come from GitHub Secrets automatically — this script is for
 local development / first-time setup only.

@@ -22,7 +22,7 @@ Creates the S3 bucket + DynamoDB lock table, patches `versions.tf` in place with
 ```bash
 cp config.env.example config.env
 # edit config.env: AWS_ACCOUNT_ID, AWS_REGION, DOMAIN, GITHUB_REPO, ALERT_EMAIL
-python scripts/configure.py
+python3 scripts/configure.py
 ```
 
 `terraform.tfvars` is **generated**, not hand-written — `scripts/configure.py` is the only supported way to produce it (this is also stated directly on `alert_email`'s own description in `variables.tf`: "don't hand-edit it here directly"). The script does two things:
@@ -81,13 +81,20 @@ This bit silently broke every secret sync in the cluster until fixed on this bra
 kubectl get serviceaccount external-secrets-sa -n external-secrets -o jsonpath='{.metadata.annotations}'
 # should contain: "eks.amazonaws.com/role-arn":"arn:aws:iam::<account>:role/bookstore-external-secrets"
 
-kubectl get externalsecret db-secret -n bookstore
-# STATUS column should show SecretSynced, not an error
+kubectl get clustersecretstore aws-secretsmanager -o jsonpath='{.status.conditions[0]}'
+# should show "status":"True","type":"Ready" -- if this isn't Ready, every
+# ExternalSecret below will fail regardless of anything else being correct,
+# since they all reference this one ClusterSecretStore by name
+
+kubectl get externalsecret admin-db-secret -n catalog
+# STATUS column should show SecretSynced, not an error -- every microservice
+# (catalog/user/order/notification/gateway) has its own admin-db-secret,
+# this one's just picked as the first to check
 ```
 
 ## Step 6 — Watch all apps come up
 
-Both `k8s/argocd/application.yaml` (the old monolith) and `k8s/argocd/applicationset-microservices.yaml` (all 5 microservices: catalog, user, order, notification, api-gateway) were already applied by Terraform in Step 3 — nothing to `kubectl apply` here. Just watch ArgoCD reconcile, within 3 minutes of the apply finishing:
+Both `k8s/argocd/application.yaml` (the `bookstore` Application — the React frontend and its shared namespace resources: storage class, secrets bootstrap, network policy, PDB, quota) and `k8s/argocd/applicationset-microservices.yaml` (all 5 backend microservices: catalog, user, order, notification, api-gateway, one ArgoCD `Application` each) were already applied by Terraform in Step 3 — nothing to `kubectl apply` here. There is no backend monolith anymore; the original single frontend/backend pair was fully replaced by these 5 microservices, and `application.yaml` deploys frontend only. Just watch ArgoCD reconcile, within 3 minutes of the apply finishing:
 
 ```bash
 kubectl get applications -n argocd
@@ -120,12 +127,26 @@ kubectl port-forward -n gateway svc/gateway-service 8082:80
 curl -s http://localhost:8082/health
 ```
 
-If images haven't been built/pushed by CI yet (first-ever deploy, before any CI run has landed on `main`), pods will sit in `ImagePullBackOff` until real images exist in ECR — either wait for CI, or push once by hand:
+If images haven't been built/pushed by CI yet (first-ever deploy, before any CI run has landed), all 6 pods (`frontend` + the 5 microservices) will sit in `ImagePullBackOff` until real images exist in their ECR repos — **this is expected on a genuinely fresh account**, not a sign anything is broken. Either wait for a CI run to land on `observability` (fastest — just push any commit), or push once by hand per service:
 
 ```bash
-docker build -t <backend_repo_url>:manual backend/
-docker push <backend_repo_url>:manual
-# then kustomize edit set image + commit + push, same pattern CI uses
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-west-1.amazonaws.com"
+aws ecr get-login-password --region us-west-1 | docker login --username AWS --password-stdin "$REGISTRY"
+
+# Frontend
+docker build -t "$REGISTRY/bookstore-frontend:manual" client/
+docker push "$REGISTRY/bookstore-frontend:manual"
+(cd k8s/overlays/prod && kustomize edit set image bookstore-frontend="$REGISTRY/bookstore-frontend:manual")
+
+# Each of the 5 microservices follows the identical pattern -- swap the name:
+docker build -t "$REGISTRY/bookstore-catalog-service:manual" services/catalog-service/
+docker push "$REGISTRY/bookstore-catalog-service:manual"
+(cd k8s/services/catalog-service/overlays/prod && kustomize edit set image bookstore-catalog-service="$REGISTRY/bookstore-catalog-service:manual")
+# ...repeat for user-service, order-service, notification-service, api-gateway
+
+git add k8s/overlays/prod/kustomization.yaml k8s/services/*/overlays/prod/kustomization.yaml
+git commit -m "chore: manual image push for first deploy" && git push
 ```
 
 Verify catalog-service directly (bypassing the gateway, useful for isolating whether a problem is in the service itself or in the gateway/ingress path):

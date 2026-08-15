@@ -83,15 +83,21 @@ fi
 echo ""
 echo "[patch] Writing bucket name into versions.tf..."
 
-# Replace whatever is between the bucket quotes (including empty string)
-# Uses BSD-compatible sed (macOS) — the -i '' form.
-sed -i '' \
+# Replace whatever is between the bucket quotes (including empty string).
+# `sed -i ''` (BSD/macOS) and `sed -i` (GNU/Linux) take incompatible -i
+# syntax -- writing to a temp file and moving it back works identically on
+# both, so this doesn't silently break for anyone not on macOS.
+TMP_VERSIONS_TF="$(mktemp)"
+sed \
   "s|bucket[[:space:]]*=[[:space:]]*\"[^\"]*\"|bucket         = \"${BUCKET}\"|" \
-  "${VERSIONS_TF}"
+  "${VERSIONS_TF}" > "${TMP_VERSIONS_TF}"
+mv "${TMP_VERSIONS_TF}" "${VERSIONS_TF}"
 
-sed -i '' \
+TMP_VERSIONS_TF="$(mktemp)"
+sed \
   "s|dynamodb_table[[:space:]]*=[[:space:]]*\"[^\"]*\"|dynamodb_table = \"${TABLE}\"|" \
-  "${VERSIONS_TF}"
+  "${VERSIONS_TF}" > "${TMP_VERSIONS_TF}"
+mv "${TMP_VERSIONS_TF}" "${VERSIONS_TF}"
 
 echo "[ok] versions.tf updated."
 echo ""
