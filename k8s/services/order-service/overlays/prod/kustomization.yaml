@@ -7,4 +7,4 @@ resources:
 images:
 - name: bookstore-order-service
   newName: 905221885307.dkr.ecr.us-west-1.amazonaws.com/bookstore-order-service
-  newTag: c85de27a
+  newTag: 25f3bbce
