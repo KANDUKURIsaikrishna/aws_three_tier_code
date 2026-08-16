@@ -1200,6 +1200,16 @@ Safe because a fresh EKS cluster role has no state worth importing — same reas
 
 **Lesson:** a migration path that degrades to a silent no-op when its source is missing is exactly the kind of fix that looks safe (no hard failure, no burned `backoffLimit`) but quietly rots the moment the thing it depends on is removed elsewhere in the codebase, with nothing to signal it broke. Worth grepping for what still reads from something before deleting that something's own creator.
 
+### OBS-069 — `helm_release.aws_lb_controller` never actually depended on its own IAM policy, only the role -- controller boots with zero permissions
+
+**Symptom:** `terraform destroy` hung on `null_resource.delete_ingress_objects` past its 600s timeout. Live diagnosis (`kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller`) showed the ingress controller reconcile loop failing on every single attempt: `UnauthorizedOperation: ... is not authorized to perform: ec2:DescribeSecurityGroups because no identity-based policy allows the ec2:DescribeSecurityGroups action`. `aws iam list-role-policies --role-name bookstore-aws-lb-controller` confirmed **zero** policies attached to the role at that point -- reproduced twice, on two independent apply cycles, one of them a clean run with none of the same-session history the first one had.
+
+**Root cause:** `helm_release.aws_lb_controller`'s `serviceAccount.annotations.eks\.amazonaws\.com/role-arn` `set` block references `aws_iam_role.aws_lb_controller.arn` directly, but nothing in the release references `aws_iam_role_policy.aws_lb_controller` (the actual permissions attached to that role) at all. With no attribute reference between the two resources, Terraform has zero ordering constraint and is free to create the Helm release -- and therefore start the controller pods, which begin reconciling immediately -- concurrently with, or even before, the policy attachment finishes. Same shape of gap as the NAT/vpc_cni destroy-ordering bugs fixed earlier this branch (`main.tf`'s `module "eks_addons"` depends_on, and this same file's `vpc_cni` depends_on above), just on the apply side instead of destroy.
+
+**Fix:** added `aws_iam_role_policy.aws_lb_controller` to `helm_release.aws_lb_controller`'s `depends_on` (`modules/eks-addons/aws-load-balancer-controller.tf`), merged with the existing `vpc_cni` entry (Terraform allows only one `depends_on` per resource). The controller's pods now only ever start after the policy is fully attached.
+
+**Live recovery (both times):** `terraform plan -target=module.eks_addons.aws_iam_role_policy.aws_lb_controller` + `apply` to create the missing policy without touching anything else, then `kubectl rollout restart deployment aws-load-balancer-controller -n kube-system` to force an immediate clean reconcile rather than waiting for the next scheduled retry -- both stuck `Ingress` objects (and their finalizers) cleared within 15s of the restart. `terraform destroy` (or `apply`) then proceeds normally on a re-run.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
