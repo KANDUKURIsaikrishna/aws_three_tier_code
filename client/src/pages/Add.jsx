@@ -58,7 +58,7 @@ const Add = () => {
         onChange={handleChange}
       />
       <button onClick={handleClick}>Add</button>
-      {error && "Something went wrong!"}
+      {error && <p className="error">Something went wrong!</p>}
       <Link to="/">See all books</Link>
     </div>
   );

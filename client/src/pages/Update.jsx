@@ -94,7 +94,7 @@ const Update = () => {
         onChange={handleChange}
       />
       <button onClick={handleClick}>Update</button>
-      {error && "Something went wrong!"}
+      {error && <p className="error">Something went wrong!</p>}
       <Link to="/">See all books</Link>
     </div>
   );
