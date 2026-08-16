@@ -563,4 +563,30 @@ jobs:
           # Skips the commit if kustomization.yaml did not actually change
           git diff --staged --quiet && echo "No image tag changes." && exit 0
           git commit -m "chore: bump image tags to ${TAG}"
-          git push
+
+          # Retry with rebase: this job's checkout is a snapshot from when the
+          # job started, several minutes before this step runs (build+scan
+          # took ~15 min). Any other commit landed on this branch in that
+          # window makes a plain `git push` fail non-fast-forward -- hit this
+          # for real when two pushes landed close together and the first
+          # run's deploy job lost the race. Rebasing this commit onto
+          # whatever's actually on the branch now and retrying handles it
+          # without dropping the image-tag bump.
+          pushed=false
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              pushed=true
+              break
+            fi
+            echo "Push rejected (attempt $attempt/5) -- rebasing onto latest ${GITHUB_REF_NAME} and retrying..."
+            git fetch origin "${GITHUB_REF_NAME}"
+            git rebase "origin/${GITHUB_REF_NAME}"
+            sleep 5
+          done
+          # Fail loudly on exhaustion -- silently finishing this step without
+          # the tag bump actually landing would mean ArgoCD keeps deploying
+          # stale images with zero indication anything went wrong.
+          if [ "$pushed" != "true" ]; then
+            echo "::error::Failed to push image tag bump after 5 rebase-and-retry attempts."
+            exit 1
+          fi
