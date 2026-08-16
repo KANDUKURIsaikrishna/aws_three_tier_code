@@ -138,7 +138,7 @@ All 5 services are implemented, registered with ArgoCD, and live. **The frontend
 frontend (React static assets, served by frontend-service via bookstore-ingress)
     |  every API call, unconditionally
 api-gateway (Node/Express + http-proxy-middleware, JWT verification) — sole entry point
-    ├── /books         → catalog-service         (GET public; writes need a JWT)
+    ├── /books         → catalog-service         (GET public; POST needs a JWT; PUT/DELETE need admin role)
     ├── /auth, /users   → user-service            (login/register/profile)
     ├── /orders, /cart   → order-service           (cart, checkout, order history)
     └── (internal)        → notification-service    (called by order-service, not by the frontend directly)
