@@ -353,13 +353,24 @@ resource "null_resource" "delete_ingress_objects" {
       # the controller's own IRSA session, never a DeleteSecurityGroup --
       # Terraform proceeded to destroy helm_release.aws_lb_controller (below)
       # right after this resource returned, cutting the controller off
-      # before it got to this SG specifically. Best-effort wait, not a hard
-      # failure: `|| true` on purpose -- if the SG doesn't clear in time,
-      # `terraform destroy` should still proceed and finish everything else;
-      # a lingering SG only blocks the VPC/subnet delete much later, and is
-      # fully AWS-side self-healing given more time or a manual
-      # `aws ec2 delete-security-group` (see TROUBLESHOOTING.md OBS-069).
-      for i in $(seq 1 24); do
+      # before it got to this SG specifically.
+      #
+      # This is the ONLY real lever available: aws_vpc has no `timeouts`
+      # block at all (confirmed -- "Unsupported block type" from `terraform
+      # validate` on an attempt to add one), so DeleteVpc is a single,
+      # immediate API call with no Terraform-side retry/backoff to extend.
+      # If this SG still exists by the time module.network.aws_vpc.main's
+      # destroy runs, the whole apply hard-errors on DependencyViolation --
+      # there's no second safety net downstream. So this waits up to 20
+      # minutes (120 x 10s), matching the longest this has actually taken
+      # on a real cluster, specifically so destroy doesn't reach that
+      # unrecoverable step until the SG has had a real chance to clear.
+      # Still `|| true` at the very end -- if even 20 minutes isn't enough,
+      # letting destroy proceed and hard-error on the VPC (with a clear
+      # DependencyViolation message pointing at exactly what to clean up
+      # manually) beats hanging here forever with no error at all.
+      # See TROUBLESHOOTING.md OBS-067.
+      for i in $(seq 1 120); do
         SG_ID=$(aws ec2 describe-security-groups \
           --filters "Name=tag:elbv2.k8s.aws/cluster,Values=${self.triggers.cluster_name}" \
           --region ${self.triggers.region} \
@@ -368,8 +379,8 @@ resource "null_resource" "delete_ingress_objects" {
           echo "Controller-managed backend security group already gone."
           break
         fi
-        echo "Waiting for controller to clean up its shared backend security group ($SG_ID, attempt $i/24)..."
-        sleep 5
+        echo "Waiting for controller to clean up its shared backend security group ($SG_ID, attempt $i/120)..."
+        sleep 10
       done || true
     EOT
   }
