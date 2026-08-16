@@ -254,6 +254,21 @@ resource "helm_release" "aws_lb_controller" {
     value = aws_iam_role.aws_lb_controller.arn
   }
 
+  # This `set` block above only references aws_iam_role.aws_lb_controller's
+  # ARN, not aws_iam_role_policy.aws_lb_controller (the actual permissions
+  # attached to that role) -- so without an explicit depends_on, Terraform
+  # has ZERO ordering constraint between them and is free to create this
+  # Helm release concurrently with, or even before, the policy attachment
+  # finishes. Reproduced live, twice, on two independent apply cycles: the
+  # controller pods came up, started reconciling immediately, and hit
+  # `UnauthorizedOperation: ec2:DescribeSecurityGroups` on every attempt --
+  # `aws iam list-role-policies --role-name bookstore-aws-lb-controller`
+  # confirmed zero policies attached at that point. The role existed
+  # (nothing failed loudly), it just had no permissions yet when the
+  # controller's first reconcile ran, and every subsequent attempt kept
+  # failing the same way since the policy still hadn't landed. See
+  # TROUBLESHOOTING.md.
+  #
   # vpc_cni provides pod networking (the aws-node DaemonSet) -- nothing else
   # in this file references it, so without this Terraform is free to destroy
   # it whenever, including before this release's own uninstall or before
@@ -266,7 +281,10 @@ resource "helm_release" "aws_lb_controller" {
   # a real risk if the controller pod restarts for any reason mid-cleanup.
   # Forcing this to destroy last (after the controller and its cleanup are
   # both fully done) closes that gap. See TROUBLESHOOTING.md for the incident.
-  depends_on = [aws_eks_addon.vpc_cni]
+  #
+  # (Terraform allows only one depends_on per resource -- both reasons above
+  # are combined into this single list.)
+  depends_on = [aws_iam_role_policy.aws_lb_controller, aws_eks_addon.vpc_cni]
 }
 
 # ── Release the ALB before destroy touches the VPC ─────────────────────────
