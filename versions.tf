@@ -1,5 +1,6 @@
 terraform {
-  required_version = ">= 1.7.0"
+  # >= 1.10.0 for native S3 state locking (use_lockfile) -- no DynamoDB table needed.
+  required_version = ">= 1.10.0"
 
   required_providers {
     aws = {
@@ -39,8 +40,13 @@ terraform {
     }
   }
 
-  # Run scripts/bootstrap-tf-state.sh once to create the S3 bucket and
-  # DynamoDB table. Fill in the values below, then: terraform init -migrate-state
+  # Run scripts/init-backend.sh once to create the S3 bucket. Fill in the
+  # values below, then: terraform init -migrate-state
+  #
+  # use_lockfile enables S3's native state locking (conditional writes --
+  # no DynamoDB table required). Requires Terraform >= 1.10.0. Replaces the
+  # old S3+DynamoDB pattern: one less resource to provision, pay for, and
+  # orphan on teardown.
   #
   # workspace_key_prefix makes state workspace-aware: the "default" workspace
   # (what a plain `terraform apply` uses if you never run `terraform
@@ -53,11 +59,11 @@ terraform {
   # isolation (e.g. two workspaces both trying to create an EKS cluster named
   # "bookstore-eks" in the same account) is not solved by this alone.
   backend "s3" {
-    bucket               = ""
+    bucket         = "bookstore-terraform-state-905221885307"
     key                  = "terraform.tfstate"
     workspace_key_prefix = "environments"
-    region               = ""
-    dynamodb_table       = ""
+    region               = "us-west-1"
+    use_lockfile         = true
     encrypt              = true
   }
 }

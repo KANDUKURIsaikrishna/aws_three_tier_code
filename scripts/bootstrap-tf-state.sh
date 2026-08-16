@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Terraform remote state bootstrap
+# DEPRECATED — do not use. Kept for reference only.
 #
-# Run ONCE before the first `terraform init`.
-# Idempotent — safe to re-run; existing resources are skipped.
+# This script creates an S3 bucket + DynamoDB lock table and prints a backend
+# block for manual paste-in. scripts/init-backend.sh replaces it: it creates
+# only the S3 bucket (state locking is now native S3 conditional-write
+# locking via versions.tf's `use_lockfile = true`, Terraform >= 1.10 -- no
+# DynamoDB table involved) and patches versions.tf in place instead of
+# requiring a manual paste. Running this script instead would create a
+# DynamoDB table nothing in this repo references anymore.
 #
-# Usage:
-#   ./scripts/bootstrap-tf-state.sh [region]
-#
-# After this script completes it prints the exact backend "s3" block to paste
-# into main.tf (replacing the ACCOUNT_ID placeholder). Then run:
-#   terraform init -migrate-state
+# Use scripts/init-backend.sh instead:
+#   ./scripts/init-backend.sh [region]
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 

@@ -3,11 +3,12 @@
 # init-backend.sh
 #
 # Run ONCE before the first `terraform apply` in a fresh checkout, or
-# whenever versions.tf has empty bucket/dynamodb_table strings.
+# whenever versions.tf has an empty bucket string.
 #
 # What it does:
 #   1. Reads your AWS Account ID (no hardcoding needed)
-#   2. Creates the S3 bucket + DynamoDB lock table if they don't exist yet
+#   2. Creates the S3 bucket if it doesn't exist yet (state locking is native
+#      S3 conditional-write locking via use_lockfile -- no DynamoDB table)
 #   3. Writes the correct bucket name AND region into versions.tf automatically
 #   4. Runs `terraform init` (or `terraform init -reconfigure` if already init'd)
 #
@@ -33,14 +34,12 @@ fi
 REGION="${1:-${CONFIG_ENV_REGION:-us-west-1}}"
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 BUCKET="bookstore-terraform-state-${ACCOUNT_ID}"
-TABLE="terraform-state-lock"
 VERSIONS_TF="${REPO_ROOT}/versions.tf"
 
 echo ""
 echo "Account : ${ACCOUNT_ID}"
 echo "Region  : ${REGION}"
 echo "Bucket  : ${BUCKET}"
-echo "Table   : ${TABLE}"
 echo ""
 
 # ── 1. S3 bucket ──────────────────────────────────────────────────────────────
@@ -74,25 +73,7 @@ else
   echo "[ok] S3 bucket created."
 fi
 
-# ── 2. DynamoDB lock table ─────────────────────────────────────────────────────
-if aws dynamodb describe-table \
-     --table-name "${TABLE}" \
-     --region "${REGION}" \
-     --query "Table.TableName" \
-     --output text 2>/dev/null | grep -q "${TABLE}"; then
-  echo "[skip] DynamoDB lock table already exists."
-else
-  echo "[create] DynamoDB lock table..."
-  aws dynamodb create-table \
-    --table-name "${TABLE}" \
-    --attribute-definitions AttributeName=LockID,AttributeType=S \
-    --key-schema AttributeName=LockID,KeyType=HASH \
-    --billing-mode PAY_PER_REQUEST \
-    --region "${REGION}"
-  echo "[ok] DynamoDB lock table created."
-fi
-
-# ── 3. Patch versions.tf with correct bucket name and region ──────────────────
+# ── 2. Patch versions.tf with correct bucket name and region ──────────────────
 echo ""
 echo "[patch] Writing bucket name and region into versions.tf..."
 
@@ -106,19 +87,13 @@ sed \
   "${VERSIONS_TF}" > "${TMP_VERSIONS_TF}"
 mv "${TMP_VERSIONS_TF}" "${VERSIONS_TF}"
 
-TMP_VERSIONS_TF="$(mktemp)"
-sed \
-  "s|dynamodb_table[[:space:]]*=[[:space:]]*\"[^\"]*\"|dynamodb_table = \"${TABLE}\"|" \
-  "${VERSIONS_TF}" > "${TMP_VERSIONS_TF}"
-mv "${TMP_VERSIONS_TF}" "${VERSIONS_TF}"
-
 # The backend block's own `region` field -- previously left hardcoded to
 # whatever the checked-in template said, completely disconnected from
 # config.env's AWS_REGION or this script's own resolved $REGION. Terraform
 # backend blocks can't reference variables at all (a real HCL limitation,
 # not an oversight), so this field can only ever be kept correct by exactly
-# this kind of external patch -- same reason bucket/dynamodb_table are
-# patched above, not left as `var.foo` references.
+# this kind of external patch -- same reason bucket is patched above, not
+# left as a `var.foo` reference.
 TMP_VERSIONS_TF="$(mktemp)"
 sed \
   "s|region[[:space:]]*=[[:space:]]*\"[^\"]*\"|region               = \"${REGION}\"|" \
@@ -129,7 +104,7 @@ echo "[ok] versions.tf updated."
 echo ""
 grep -A 8 'backend "s3"' "${VERSIONS_TF}"
 
-# ── 4. terraform init ──────────────────────────────────────────────────────────
+# ── 3. terraform init ──────────────────────────────────────────────────────────
 echo ""
 echo "[init] Running terraform init..."
 cd "${REPO_ROOT}"
