@@ -20,6 +20,13 @@ textarea:focus-visible {
   justify-content: flex-start;
   text-align: center;
 
+  // Zero @media queries existed anywhere in this file. 0 100px side padding
+  // alone eats 200px on any viewport -- on a 375px phone that's over half
+  // the screen gone before content even starts.
+  @media (max-width: 600px) {
+    padding: 0 16px;
+  }
+
   .nav {
     width: 100%;
     display: flex;
@@ -83,9 +90,17 @@ textarea:focus-visible {
 
   .books {
     display: flex;
+    // No wrap meant every book squeezed into an equal-width column on any
+    // screen (flex: 1 on .book, no basis) -- a catalog of 5+ titles was
+    // unreadable on mobile, not just tight. flex-basis gives each card a
+    // real minimum width to wrap around instead of shrinking indefinitely.
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 24px;
 
     .book {
-      flex: 1;
+      flex: 1 1 220px;
+      max-width: 240px;
       display: flex;
       flex-direction: column;
       align-items: center;
