@@ -68,7 +68,7 @@ const Books = () => {
             <h2>{book.title}</h2>
             <p>{book.desc}</p>
             <span>${book.price}</span>
-            <button className="addToCart" onClick={() => handleAddToCart(book.id)}>
+            <button className="addToCart" aria-live="polite" onClick={() => handleAddToCart(book.id)}>
               {addedId === book.id ? "Added!" : "Add to Cart"}
             </button>
             {isAdmin && (
