@@ -61,6 +61,7 @@ const Books = () => {
     <div>
       <h1>Mindcircuit book Store</h1>
       {error && <p className="error">{error}</p>}
+      {books.length === 0 && !error && <p>No books in the catalog yet.</p>}
       <div className="books">
         {books.map((book) => (
           <div key={book.id} className="book">
