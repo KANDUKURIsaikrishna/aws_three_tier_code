@@ -339,6 +339,38 @@ resource "null_resource" "delete_ingress_objects" {
       # 480s wasn't always enough headroom, not a sign of anything stuck.
       kubectl delete ingress --all -n bookstore --wait --timeout=600s --ignore-not-found
       kubectl delete ingress --all -n gateway --wait --timeout=600s --ignore-not-found
+
+      # The two kubectl waits above only confirm the Ingress OBJECTS (and
+      # their own per-target-group SGs) are gone -- they say nothing about
+      # the controller's separate SHARED "backend" security group
+      # (k8s-traffic-<cluster>-<hash>, tagged elbv2.k8s.aws/cluster, one per
+      # cluster, reused across every Ingress group), which the controller
+      # only deletes once it notices zero Ingress groups reference it left --
+      # a distinct, slightly-later reconcile than clearing the Ingress
+      # finalizer itself. Confirmed via CloudTrail on a real destroy: this
+      # SG's last event before it was found still sitting there (blocking
+      # DeleteVpc ~20 minutes later) was a RevokeSecurityGroupIngress from
+      # the controller's own IRSA session, never a DeleteSecurityGroup --
+      # Terraform proceeded to destroy helm_release.aws_lb_controller (below)
+      # right after this resource returned, cutting the controller off
+      # before it got to this SG specifically. Best-effort wait, not a hard
+      # failure: `|| true` on purpose -- if the SG doesn't clear in time,
+      # `terraform destroy` should still proceed and finish everything else;
+      # a lingering SG only blocks the VPC/subnet delete much later, and is
+      # fully AWS-side self-healing given more time or a manual
+      # `aws ec2 delete-security-group` (see TROUBLESHOOTING.md OBS-069).
+      for i in $(seq 1 24); do
+        SG_ID=$(aws ec2 describe-security-groups \
+          --filters "Name=tag:elbv2.k8s.aws/cluster,Values=${self.triggers.cluster_name}" \
+          --region ${self.triggers.region} \
+          --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "")
+        if [ -z "$SG_ID" ] || [ "$SG_ID" == "None" ]; then
+          echo "Controller-managed backend security group already gone."
+          break
+        fi
+        echo "Waiting for controller to clean up its shared backend security group ($SG_ID, attempt $i/24)..."
+        sleep 5
+      done || true
     EOT
   }
 }
