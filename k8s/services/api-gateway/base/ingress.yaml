@@ -8,6 +8,12 @@ metadata:
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
     alb.ingress.kubernetes.io/ssl-redirect: "443"
+    # Without this the ALB's target-group health check defaults to path "/",
+    # which api-gateway's app.js never implements (only /health, see
+    # KNOWN_PREFIXES in app.js) -- every target sits permanently unhealthy
+    # (404 on every check) and the ALB never routes real traffic to it,
+    # even though the pods themselves are Running/Ready per Kubernetes.
+    alb.ingress.kubernetes.io/healthcheck-path: /health
     # Shared with k8s/base/ingress/ingress.yaml -- same group.name means the
     # AWS Load Balancer Controller provisions ONE ALB for both Ingress
     # objects, not two. No certificate-arn annotation on purpose -- the
