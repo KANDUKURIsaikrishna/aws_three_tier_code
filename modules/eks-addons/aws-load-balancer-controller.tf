@@ -311,8 +311,16 @@ resource "null_resource" "delete_ingress_objects" {
       # silent orphaned ALB discovered 10+ minutes later as an unrelated-
       # looking subnet-destroy hang (see TROUBLESHOOTING.md for the incident
       # this was caught from).
-      kubectl delete ingress --all -n bookstore --wait --timeout=480s --ignore-not-found
-      kubectl delete ingress --all -n gateway --wait --timeout=480s --ignore-not-found
+      #
+      # 480s bumped to 600s after a real, untouched `terraform destroy` (no
+      # network/IAM errors this time -- confirmed via controller logs and
+      # NAT/vpc_cni both still present, so the depends_on fixes above were
+      # working) still hit the timeout on the very first ALB tear-down.
+      # AWS's own ALB deletion genuinely isn't instant -- listener rules,
+      # target groups, then the load balancer itself, sequentially -- and
+      # 480s wasn't always enough headroom, not a sign of anything stuck.
+      kubectl delete ingress --all -n bookstore --wait --timeout=600s --ignore-not-found
+      kubectl delete ingress --all -n gateway --wait --timeout=600s --ignore-not-found
     EOT
   }
 }

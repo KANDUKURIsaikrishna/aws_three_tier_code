@@ -1157,6 +1157,37 @@ Sources (fetched live, not recalled, given the stakes): [Ingress NGINX: Statemen
 
 **Not fixed, deliberately:** the underlying `SELECT COUNT(*)` → `INSERT` in `/auth/register` has a real, narrow race window — two concurrent first-ever registrations could theoretically both see `count = 0` and both become admin. Not worth solving with a transaction for what remains a single-operator demo deployment; flagged here rather than silently ignored.
 
+### OBS-065 — orphaned `aws_iam_role.cluster` blocks a re-apply, and `terraform import` can't fix it on a from-scratch attempt
+
+**Symptom:** a `terraform apply` that died partway through a genuinely fresh account (before `module.eks.aws_eks_cluster.this` ever got created) left `bookstore-eks-cluster-role` behind in IAM. The next `apply` failed with `EntityAlreadyExists: Role with name bookstore-eks-cluster-role already exists`.
+
+**Why `make import` doesn't cover this one:** `db-credentials`/`grafana-admin`/`jwt-secret` (Makefile's `import` target) are plain AWS resources, importable regardless of cluster state. The cluster's own IAM role isn't, in this specific scenario: `terraform import` always resolves every configured provider up front, including `kubectl`/`helm`/`kubernetes`, and those are configured from `module.eks.cluster_endpoint`/`cluster_ca_certificate` (see `providers.tf`) — genuinely unresolvable ("Invalid provider configuration ... depends on values that cannot be determined until apply") when the cluster doesn't exist yet, which is exactly when this role is most likely to be orphaned.
+
+**Fix (manual, not automatable the same way as the secrets import):**
+```bash
+aws iam list-attached-role-policies --role-name bookstore-eks-cluster-role   # confirm empty first
+aws iam list-role-policies --role-name bookstore-eks-cluster-role           # confirm empty first
+aws iam delete-role --role-name bookstore-eks-cluster-role
+terraform apply   # recreates an identical role -- nothing about its identity was worth preserving
+```
+Safe because a fresh EKS cluster role has no state worth importing — same reasoning `scripts/init-domain.sh` explicitly does NOT apply to the Route53 zone (OBS-058 below), where the identity (nameservers) genuinely matters and recreating would break the registrar delegation again.
+
+### OBS-066 — a slow `helm_release.argocd` install can expire the cluster auth token mid-apply, cascading into unrelated "Unauthorized" errors
+
+**Symptom:** on one `terraform apply` run, `helm_release.argocd` took 34+ minutes to install (vs. its normal ~2 minutes) with no visible cause -- just slower-than-usual EKS/AWS API responses that day. Once it crossed roughly the 15-minute mark, `helm_release.external_secrets` and `helm_release.argo_rollouts` (running concurrently) both started failing with `Unauthorized`, and `helm_release.argocd` itself finished with `Warning: Helm release "" was created but has a failed status`.
+
+**Root cause:** the `helm`/`kubernetes` providers authenticate via `exec { command = "aws", args = ["eks", "get-token", ...] }` (see `providers.tf`) -- a short-lived token fetched once when the provider initializes for that `terraform apply` run, not refreshed mid-run. Any single resource that runs long enough for that token to expire takes every *other* concurrent operation on the same provider down with it, even though they're otherwise unrelated. Checked live via `kubectl get pods -n argocd` and `helm list -A` after the fact: ArgoCD's actual pods had come up healthy well before the token expired -- Helm's own polling connection died from the stale token, not the chart itself failing to install.
+
+**Fix:** none needed in code -- this is AWS API response-time variance, not a bug. Just re-run `terraform apply`; it's idempotent and only recreates what's actually missing/failed (confirmed: a second attempt fixed the `Unauthorized` releases without re-touching anything already healthy). Worth knowing before panicking at an `Unauthorized` error mid-apply: check `kubectl get pods -n argocd` (or whichever release failed) before assuming something is actually broken.
+
+### OBS-067 — the EKS-auto-created cluster security group can take several minutes to clean up, blocking VPC deletion
+
+**Symptom:** `terraform destroy` hung on `module.network.aws_vpc.main: Still destroying...` for 15+ minutes with no error and no visibly blocking resource (`describe-network-interfaces`, `describe-route-tables`, `describe-vpc-endpoints` all came back empty for the VPC).
+
+**Root cause:** `aws ec2 describe-security-groups` showed one leftover non-default security group, `k8s-traffic-bookstoreeks-<hash>` -- EKS's own auto-created cluster security group, not something this project's Terraform ever creates or destroys directly (AWS/EKS manages its lifecycle, tied to the cluster). `DeleteVpc` fails as long as ANY non-default security group exists in the VPC, even one with zero attached ENIs. AWS is supposed to clean this up shortly after the EKS cluster itself is deleted, but the cleanup lagged well behind the cluster's own `Destruction complete` in this run.
+
+**Fix:** none needed in code -- `aws ec2 delete-security-group --group-id <id>` unblocks it immediately if you don't want to wait, but it's very likely AWS would have finished the cleanup on its own given more time. Not a bug in this project's Terraform; a documented expectation so a long VPC-destroy wait isn't mistaken for something actually stuck.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
