@@ -204,7 +204,7 @@ jobs:
       security-events: write # required for SARIF upload to Security tab
     env:
       # Scoped to this job only — secret not exposed to secret-scan/sast/validate
-      ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-west-1.amazonaws.com
+      ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
     outputs:
       image-tag: ${{ steps.tag.outputs.tag }}
 
@@ -502,7 +502,7 @@ jobs:
       id-token: write
       contents: write           # needed to push the kustomization.yaml commit
     env:
-      ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-west-1.amazonaws.com
+      ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4

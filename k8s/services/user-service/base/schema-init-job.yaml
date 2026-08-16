@@ -50,6 +50,14 @@ spec:
                 id            INT AUTO_INCREMENT PRIMARY KEY,
                 email         VARCHAR(255) NOT NULL UNIQUE,
                 password_hash VARCHAR(255) NOT NULL,
+                -- 'customer' by default; the very first account ever
+                -- registered becomes 'admin' automatically (see
+                -- services/user-service/app.js's /auth/register handler) --
+                -- catalog-mutating routes (POST/PUT/DELETE /books) require
+                -- this role, closing the "any registered user can wipe the
+                -- catalog" gap without needing a separate invite/promotion
+                -- flow for what's still a single-operator deployment.
+                role          VARCHAR(20)  NOT NULL DEFAULT 'customer',
                 created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
               );
 

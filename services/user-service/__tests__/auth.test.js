@@ -29,17 +29,31 @@ describe("GET /metrics", () => {
 
 describe("POST /auth/register", () => {
   it("creates a user and returns 201 with no password fields", async () => {
-    mockQuery.mockImplementationOnce((_q, _p, cb) => cb(null, []));
-    mockQuery.mockImplementationOnce((_q, _p, cb) => cb(null, { insertId: 1, affectedRows: 1 }));
+    mockQuery.mockImplementationOnce((_q, _p, cb) => cb(null, [])); // SELECT id FROM users WHERE email
+    mockQuery.mockImplementationOnce((_q, cb) => cb(null, [{ count: 3 }])); // SELECT COUNT(*) FROM users
+    mockQuery.mockImplementationOnce((_q, _p, cb) => cb(null, { insertId: 1, affectedRows: 1 })); // INSERT
 
     const res = await request(app)
       .post("/auth/register")
       .send({ email: "new@example.com", password: "hunter22" });
 
     expect(res.status).toBe(201);
-    expect(res.body).toEqual({ id: 1, email: "new@example.com" });
+    expect(res.body).toEqual({ id: 1, email: "new@example.com", role: "customer" });
     expect(res.body.password).toBeUndefined();
     expect(res.body.password_hash).toBeUndefined();
+  });
+
+  it("makes the very first registered user an admin", async () => {
+    mockQuery.mockImplementationOnce((_q, _p, cb) => cb(null, [])); // SELECT id FROM users WHERE email
+    mockQuery.mockImplementationOnce((_q, cb) => cb(null, [{ count: 0 }])); // SELECT COUNT(*) FROM users
+    mockQuery.mockImplementationOnce((_q, _p, cb) => cb(null, { insertId: 1, affectedRows: 1 })); // INSERT
+
+    const res = await request(app)
+      .post("/auth/register")
+      .send({ email: "first@example.com", password: "hunter22" });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ id: 1, email: "first@example.com", role: "admin" });
   });
 
   it("rejects registration when the email is already taken", async () => {

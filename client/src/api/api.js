@@ -22,6 +22,7 @@ export function clearSession() {
   localStorage.removeItem("bookstore_token");
   localStorage.removeItem("bookstore_refresh_token");
   localStorage.removeItem("bookstore_email");
+  localStorage.removeItem("bookstore_role");
 }
 
 // Dedupe concurrent refresh attempts. Several requests can 401 around the
@@ -47,6 +48,7 @@ function refreshAccessToken() {
       .then((res) => {
         localStorage.setItem("bookstore_token", res.data.token);
         localStorage.setItem("bookstore_refresh_token", res.data.refreshToken);
+        localStorage.setItem("bookstore_role", res.data.role);
         return res.data.token;
       })
       .finally(() => {

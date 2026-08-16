@@ -49,6 +49,17 @@ variable "grafana_admin_secret_name" {
   default     = "/bookstore/grafana-admin"
 }
 
+variable "monitoring_basic_auth_secret_arn" {
+  description = "Secrets Manager secret ARN for the shared Prometheus/Alertmanager basic-auth password — EC2 IAM policy allows GetSecretValue on this ARN"
+  type        = string
+}
+
+variable "monitoring_basic_auth_secret_name" {
+  description = "Secrets Manager secret name (path) for the shared Prometheus/Alertmanager basic-auth password"
+  type        = string
+  default     = "/bookstore/monitoring-basic-auth"
+}
+
 variable "alertmanager_smtp_secret_arn" {
   description = "Secrets Manager secret ARN for Alertmanager's SES SMTP credentials (JSON: SMTP_HOST/PORT/USERNAME/PASSWORD/FROM/TO) — EC2 IAM policy allows GetSecretValue on this ARN"
   type        = string

@@ -9,7 +9,7 @@ const Books = () => {
   const [books, setBooks] = useState([]);
   const [addedId, setAddedId] = useState(null);
   const [error, setError] = useState("");
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isAdmin } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -26,11 +26,10 @@ const Books = () => {
   }, []);
 
   const handleDelete = async (id) => {
-    // The gateway now requires a JWT for /books writes; a logged-out user
-    // clicking this would just get a 401 (and the interceptor bounces them
-    // to /login mid-action), so gate proactively instead -- same pattern as
-    // handleAddToCart below.
-    if (!isAuthenticated) {
+    // The gateway now requires the admin role for /books writes; a
+    // non-admin clicking this would just get a 403, so gate proactively
+    // instead -- same pattern as handleAddToCart below.
+    if (!isAdmin) {
       navigate("/login");
       return;
     }
@@ -72,7 +71,7 @@ const Books = () => {
             <button className="addToCart" onClick={() => handleAddToCart(book.id)}>
               {addedId === book.id ? "Added!" : "Add to Cart"}
             </button>
-            {isAuthenticated && (
+            {isAdmin && (
               <>
                 <button className="delete" onClick={() => handleDelete(book.id)}>
                   Delete
@@ -88,7 +87,7 @@ const Books = () => {
         ))}
       </div>
 
-      {isAuthenticated && (
+      {isAdmin && (
         <button className="addHome">
           <Link to="/add" style={{ color: "inherit", textDecoration: "none" }}>
             Add new book

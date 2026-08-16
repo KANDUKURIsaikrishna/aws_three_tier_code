@@ -18,6 +18,7 @@ PLACEHOLDERS = {
     "domain":  "YOUR_DOMAIN_HERE.com",
     "repo":    "YOUR_GITHUB_USERNAME/aws_three_tier_code",
     "user":    "YOUR_GITHUB_USERNAME",
+    "region":  "AWS_REGION_HERE",
 }
 
 
@@ -117,12 +118,21 @@ def main():
         f"{PLACEHOLDERS['account']}.dkr.ecr": f"{account_id}.dkr.ecr",
     })
 
+    # ── 5. k8s/base/secrets/external-secret.yaml ──────────────────────────────
+    # The ClusterSecretStore's own `region` field -- every ExternalSecret in
+    # every namespace references this one ClusterSecretStore by name, so a
+    # wrong region here breaks secret sync cluster-wide, not just one service.
+    substitute("k8s/base/secrets/external-secret.yaml", {
+        PLACEHOLDERS["region"]: region,
+    })
+
     print(f"""
 Done. Commit the stamped k8s files so ArgoCD deploys the real values, not
 placeholders (it syncs from git, not this local checkout):
 
      git add k8s/base/ingress/ingress.yaml k8s/services/api-gateway/base/configmap.yaml \\
-             k8s/argocd/application.yaml k8s/overlays/prod/kustomization.yaml
+             k8s/argocd/application.yaml k8s/overlays/prod/kustomization.yaml \\
+             k8s/base/secrets/external-secret.yaml
      git commit -m "chore: configure for {domain}"
      git push
 

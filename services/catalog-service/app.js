@@ -57,6 +57,19 @@ export function createApp(db) {
     res.status(200).json({ status: "ok" });
   });
 
+  // Defense in depth: api-gateway already blocks non-admin catalog writes
+  // (requireAdminForMutation) and sets x-user-role after verifying the JWT
+  // itself -- this is the same "trust an internal header set by the
+  // gateway" pattern order-service already uses for x-user-id, applied here
+  // so catalog-service isn't relying solely on the gateway/NetworkPolicy
+  // boundary to enforce it.
+  function requireAdmin(req, res, next) {
+    if (req.headers["x-user-role"] !== "admin") {
+      return res.status(403).json({ error: "admin role required" });
+    }
+    next();
+  }
+
   app.get("/books", (_req, res) => {
     db.query("SELECT * FROM books", (err, data) => {
       if (err) { console.log(err); return res.status(500).json({ error: "Failed to fetch books" }); }
@@ -72,7 +85,7 @@ export function createApp(db) {
     });
   });
 
-  app.post("/books", (req, res) => {
+  app.post("/books", requireAdmin, (req, res) => {
     const q = "INSERT INTO books(`title`, `desc`, `price`, `cover`) VALUES (?)";
     const values = [req.body.title, req.body.desc, req.body.price, req.body.cover];
     db.query(q, [values], (err, data) => {
@@ -81,14 +94,14 @@ export function createApp(db) {
     });
   });
 
-  app.delete("/books/:id", (req, res) => {
+  app.delete("/books/:id", requireAdmin, (req, res) => {
     db.query(" DELETE FROM books WHERE id = ? ", [req.params.id], (err, data) => {
       if (err) { console.log(err); return res.status(500).json({ error: "Failed to delete book" }); }
       return res.json(data);
     });
   });
 
-  app.put("/books/:id", (req, res) => {
+  app.put("/books/:id", requireAdmin, (req, res) => {
     const q = "UPDATE books SET `title`= ?, `desc`= ?, `price`= ?, `cover`= ? WHERE id = ?";
     const values = [req.body.title, req.body.desc, req.body.price, req.body.cover];
     db.query(q, [...values, req.params.id], (err, data) => {

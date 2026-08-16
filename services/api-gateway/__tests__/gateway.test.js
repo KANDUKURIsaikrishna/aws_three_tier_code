@@ -64,8 +64,8 @@ afterAll(() => {
   orderStub.server.close();
 });
 
-function tokenFor(userId) {
-  return jwt.sign({ userId, email: `user${userId}@example.com` }, JWT_SECRET, { expiresIn: "1h" });
+function tokenFor(userId, role = "customer") {
+  return jwt.sign({ userId, email: `user${userId}@example.com`, role }, JWT_SECRET, { expiresIn: "1h" });
 }
 
 describe("GET /health", () => {
@@ -99,10 +99,19 @@ describe("POST /books (protected)", () => {
     expect(res.status).toBe(401);
   });
 
-  it("proxies with a valid token and injects X-User-Id", async () => {
+  it("rejects a valid token that isn't the admin role", async () => {
     const res = await request(app)
       .post("/books")
-      .set("Authorization", `Bearer ${tokenFor(9)}`)
+      .set("Authorization", `Bearer ${tokenFor(9, "customer")}`)
+      .send({ title: "New" });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "admin role required" });
+  });
+
+  it("proxies with a valid admin token and injects X-User-Id", async () => {
+    const res = await request(app)
+      .post("/books")
+      .set("Authorization", `Bearer ${tokenFor(9, "admin")}`)
       .send({ title: "New" });
     expect(res.status).toBe(200);
     expect(res.body.from).toBe("catalog-service");

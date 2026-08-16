@@ -40,6 +40,8 @@ No requirements.
 | <a name="input_grafana_admin_secret_arn"></a> [grafana\_admin\_secret\_arn](#input\_grafana\_admin\_secret\_arn) | Secrets Manager secret ARN for Grafana admin password — EC2 IAM policy allows GetSecretValue on this ARN | `string` | n/a | yes |
 | <a name="input_grafana_admin_secret_name"></a> [grafana\_admin\_secret\_name](#input\_grafana\_admin\_secret\_name) | Secrets Manager secret name (path) for Grafana admin password | `string` | `"/bookstore/grafana-admin"` | no |
 | <a name="input_instance_type"></a> [instance\_type](#input\_instance\_type) | EC2 instance type for the monitoring server | `string` | `"t3.small"` | no |
+| <a name="input_monitoring_basic_auth_secret_arn"></a> [monitoring\_basic\_auth\_secret\_arn](#input\_monitoring\_basic\_auth\_secret\_arn) | Secrets Manager secret ARN for the shared Prometheus/Alertmanager basic-auth password — EC2 IAM policy allows GetSecretValue on this ARN | `string` | n/a | yes |
+| <a name="input_monitoring_basic_auth_secret_name"></a> [monitoring\_basic\_auth\_secret\_name](#input\_monitoring\_basic\_auth\_secret\_name) | Secrets Manager secret name (path) for the shared Prometheus/Alertmanager basic-auth password | `string` | `"/bookstore/monitoring-basic-auth"` | no |
 | <a name="input_public_subnet_id"></a> [public\_subnet\_id](#input\_public\_subnet\_id) | Public subnet for the monitoring EC2 instance | `string` | n/a | yes |
 | <a name="input_region"></a> [region](#input\_region) | AWS region | `string` | n/a | yes |
 | <a name="input_vpc_cidr"></a> [vpc\_cidr](#input\_vpc\_cidr) | VPC CIDR block — allows Fluent Bit on EKS nodes to push logs to Loki | `string` | n/a | yes |

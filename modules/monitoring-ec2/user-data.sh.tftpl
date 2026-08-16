@@ -5,14 +5,17 @@ exec > /var/log/monitoring-init.log 2>&1
 REGION="${region}"
 CLUSTER_NAME="${cluster_name}"
 SECRET_NAME="${grafana_admin_secret_name}"
+MONITORING_BASIC_AUTH_SECRET_NAME="${monitoring_basic_auth_secret_name}"
 SMTP_SECRET_NAME="${alertmanager_smtp_secret_name}"
 NE_PORT="${ne_port}"
 
 # ── Install Docker + tools ────────────────────────────────────────────────────
 # docker-compose-plugin isn't in Ubuntu's default repos, only Docker's own.
-# See TROUBLESHOOTING.md OBS-033.
+# See TROUBLESHOOTING.md OBS-033. apache2-utils is for htpasswd, used below
+# to bcrypt-hash the Prometheus/Alertmanager basic-auth password -- both
+# tools' --web.config.file format requires a bcrypt hash, not plaintext.
 apt-get update -y
-apt-get install -y ca-certificates curl gnupg jq awscli
+apt-get install -y ca-certificates curl gnupg jq awscli apache2-utils
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
@@ -64,6 +67,29 @@ fi
 # Write to temp file so background dashboard importer can read it
 echo "$GRAFANA_PASSWORD" > /run/grafana-pass
 chmod 600 /run/grafana-pass
+
+# ── Prometheus/Alertmanager basic-auth password from Secrets Manager ──────────
+# Same IAM-propagation race as the Grafana password above -- same retry loop.
+# Neither tool ships with its own auth; without this they're wide open to
+# anyone in admin_cidr_blocks with zero login required (see TROUBLESHOOTING.md
+# OBS-063). htpasswd bcrypt-hashes it below for each tool's --web.config.file;
+# Grafana's own datasource config gets the plaintext so its dashboard queries
+# (which go over this same auth now, not the public internet) keep working.
+MONITORING_BASIC_AUTH_PASSWORD=""
+for i in $(seq 1 10); do
+  MONITORING_BASIC_AUTH_PASSWORD=$(aws secretsmanager get-secret-value \
+    --secret-id "$MONITORING_BASIC_AUTH_SECRET_NAME" \
+    --region "$REGION" \
+    --query SecretString \
+    --output text 2>/dev/null) && break
+  echo "Waiting for IAM policy propagation before retrying secretsmanager get-secret-value (attempt $i)..."
+  sleep 6
+done
+if [ -z "$MONITORING_BASIC_AUTH_PASSWORD" ]; then
+  echo "FATAL: could not fetch $MONITORING_BASIC_AUTH_SECRET_NAME after 10 attempts" >&2
+  exit 1
+fi
+MONITORING_BASIC_AUTH_HASH=$(htpasswd -nbBC 10 admin "$MONITORING_BASIC_AUTH_PASSWORD" | cut -d: -f2)
 
 # ── Alertmanager SES SMTP credentials from Secrets Manager ────────────────────
 # Same IAM-propagation race as the Grafana password above -- same retry loop.
@@ -175,6 +201,15 @@ chmod +x /usr/local/bin/update-prom-targets.sh
 # Refresh every 5 minutes (handles node replacements / scale events)
 echo "*/5 * * * * root /usr/local/bin/update-prom-targets.sh" > /etc/cron.d/prom-targets
 
+# Prometheus's own basic-auth password, as a file Prometheus's config can
+# point `password_file` at (OBS-063) -- kept out of prometheus.yml itself
+# (below, deliberately a QUOTED heredoc: its relabel_configs use $1/$2/$3
+# regex backreferences that a bash-expanding heredoc would silently mangle,
+# so the password can't be interpolated inline there the way alertmanager.yml
+# does with $SMTP_* above -- a separate file sidesteps that entirely).
+echo "$MONITORING_BASIC_AUTH_PASSWORD" > /opt/monitoring/prometheus/basic-auth-password
+chmod 600 /opt/monitoring/prometheus/basic-auth-password
+
 # ── Prometheus config ─────────────────────────────────────────────────────────
 cat > /opt/monitoring/prometheus/prometheus.yml << 'PROM_EOF'
 global:
@@ -183,7 +218,10 @@ global:
 
 alerting:
   alertmanagers:
-    - static_configs:
+    - basic_auth:
+        username: admin
+        password_file: /etc/prometheus/basic-auth-password
+      static_configs:
         - targets: ['alertmanager:9093']
 
 rule_files:
@@ -191,6 +229,9 @@ rule_files:
 
 scrape_configs:
   - job_name: 'prometheus'
+    basic_auth:
+      username: admin
+      password_file: /etc/prometheus/basic-auth-password
     static_configs:
       - targets: ['localhost:9090']
 
@@ -250,6 +291,14 @@ scrape_configs:
       - source_labels: [__meta_kubernetes_pod_label_app]
         target_label: app
 PROM_EOF
+
+# ── Prometheus web auth (OBS-063) ─────────────────────────────────────────────
+# Unquoted heredoc: $MONITORING_BASIC_AUTH_HASH is expanded by bash at write
+# time. Referenced by --web.config.file in the prometheus service below.
+cat > /opt/monitoring/prometheus/web.yml << WEB_EOF
+basic_auth_users:
+  admin: $MONITORING_BASIC_AUTH_HASH
+WEB_EOF
 
 # ── Prometheus alerting rules ─────────────────────────────────────────────────
 cat > /opt/monitoring/prometheus/rules/bookstore.yml << 'RULES_EOF'
@@ -409,6 +458,14 @@ inhibit_rules:
     equal: ['alertname', 'instance']
 AM_EOF
 
+# ── Alertmanager web auth (OBS-063) ───────────────────────────────────────────
+# Same shared basic-auth credential as Prometheus's web.yml above --
+# referenced by --web.config.file in the alertmanager service below.
+cat > /opt/monitoring/alertmanager/web.yml << WEB_EOF
+basic_auth_users:
+  admin: $MONITORING_BASIC_AUTH_HASH
+WEB_EOF
+
 # ── Loki config ───────────────────────────────────────────────────────────────
 cat > /opt/monitoring/loki/config.yaml << 'LOKI_EOF'
 auth_enabled: false
@@ -439,7 +496,13 @@ limits_config:
 LOKI_EOF
 
 # ── Grafana datasources ───────────────────────────────────────────────────────
-cat > /opt/monitoring/grafana/provisioning/datasources/datasources.yaml << 'GRAFANA_DS_EOF'
+# Unquoted heredoc (was quoted 'GRAFANA_DS_EOF' -- switched so
+# $MONITORING_BASIC_AUTH_PASSWORD expands): Prometheus and Alertmanager both
+# now require basic auth (OBS-063), so Grafana's own queries to them need
+# the same credential or every dashboard panel breaks with a 401. This goes
+# in secureJsonData (Grafana encrypts it at rest, same mechanism as any
+# other datasource password), not jsonData.
+cat > /opt/monitoring/grafana/provisioning/datasources/datasources.yaml << GRAFANA_DS_EOF
 apiVersion: 1
 datasources:
   - name: Prometheus
@@ -448,6 +511,10 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: false
+    basicAuth: true
+    basicAuthUser: admin
+    secureJsonData:
+      basicAuthPassword: $MONITORING_BASIC_AUTH_PASSWORD
     jsonData:
       alertmanagerUid: alertmanager
   - name: Loki
@@ -460,6 +527,10 @@ datasources:
     uid: alertmanager
     url: http://alertmanager:9093
     editable: false
+    basicAuth: true
+    basicAuthUser: admin
+    secureJsonData:
+      basicAuthPassword: $MONITORING_BASIC_AUTH_PASSWORD
     jsonData:
       implementation: prometheus
 GRAFANA_DS_EOF
@@ -495,6 +566,7 @@ services:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.retention.time=15d'
       - '--web.enable-lifecycle'
+      - '--web.config.file=/etc/prometheus/web.yml'
     restart: unless-stopped
 
   kube-state-metrics:
@@ -534,6 +606,7 @@ services:
       - '--config.file=/etc/alertmanager/alertmanager.yml'
       - '--storage.path=/alertmanager'
       - '--web.external-url=http://localhost:9093'
+      - '--web.config.file=/etc/alertmanager/web.yml'
     restart: unless-stopped
 
   grafana:
@@ -572,6 +645,10 @@ exec > /var/log/grafana-dashboard-import.log 2>&1
 
 GRAFANA="http://localhost:3000"
 PASS=$(cat /run/grafana-pass)
+# This script runs as its own process (not the same shell as the main
+# boot script above), so it re-reads the Prometheus basic-auth password
+# from the file that script wrote (OBS-063), same pattern as PASS above.
+PROM_PASS=$(cat /opt/monitoring/prometheus/basic-auth-password)
 
 for i in $(seq 1 36); do
   curl -sf "$GRAFANA/api/health" 2>/dev/null | grep -q '"database": "ok"' && break
@@ -614,12 +691,12 @@ import_dash 1860 37 "DS_PROMETHEUS"  # Node Exporter Full
 # sets a value. UID is stable across imports (baked into the dashboard JSON
 # itself by grafana.com), so it's safe to hardcode here.
 for i in $(seq 1 12); do
-  curl -sf -G "http://localhost:9090/api/v1/query" --data-urlencode 'query=node_uname_info' \
+  curl -sf -G -u "admin:$PROM_PASS" "http://localhost:9090/api/v1/query" --data-urlencode 'query=node_uname_info' \
     2>/dev/null | grep -q '"instance"' && break
   sleep 10
 done
 DASH_JSON=$(curl -sf -u "admin:$PASS" "$GRAFANA/api/dashboards/uid/rYdddlPWk")
-NODE_INSTANCE=$(curl -sf -G "http://localhost:9090/api/v1/query" --data-urlencode 'query=node_uname_info' \
+NODE_INSTANCE=$(curl -sf -G -u "admin:$PROM_PASS" "http://localhost:9090/api/v1/query" --data-urlencode 'query=node_uname_info' \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['result'][0]['metric']['instance'])" 2>/dev/null || echo "")
 if [ -n "$NODE_INSTANCE" ]; then
   echo "$DASH_JSON" | python3 -c "

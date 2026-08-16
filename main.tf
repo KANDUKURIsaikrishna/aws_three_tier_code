@@ -292,6 +292,9 @@ module "monitoring_ec2" {
   grafana_admin_secret_name = "/bookstore/grafana-admin"
   admin_cidr_blocks         = var.monitoring_admin_cidr
 
+  monitoring_basic_auth_secret_arn  = module.eks_addons.monitoring_basic_auth_secret_arn
+  monitoring_basic_auth_secret_name = "/bookstore/monitoring-basic-auth"
+
   alertmanager_smtp_secret_arn  = aws_secretsmanager_secret.alertmanager_smtp.arn
   alertmanager_smtp_secret_name = aws_secretsmanager_secret.alertmanager_smtp.name
 

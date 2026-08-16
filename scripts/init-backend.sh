@@ -8,8 +8,15 @@
 # What it does:
 #   1. Reads your AWS Account ID (no hardcoding needed)
 #   2. Creates the S3 bucket + DynamoDB lock table if they don't exist yet
-#   3. Writes the correct bucket name into versions.tf automatically
+#   3. Writes the correct bucket name AND region into versions.tf automatically
 #   4. Runs `terraform init` (or `terraform init -reconfigure` if already init'd)
+#
+# Region resolution, in priority order:
+#   1. An explicit CLI arg: ./scripts/init-backend.sh us-west-2
+#   2. AWS_REGION from config.env, if config.env exists (same file
+#      scripts/configure.py reads -- run this AFTER filling in config.env so
+#      the backend's region and terraform.tfvars' region can't drift apart)
+#   3. us-west-1, if neither of the above is set
 #
 # Usage:
 #   chmod +x scripts/init-backend.sh
@@ -17,11 +24,17 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-REGION="${1:-us-west-1}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_ENV_REGION=""
+if [[ -f "${REPO_ROOT}/config.env" ]]; then
+  CONFIG_ENV_REGION="$(grep -E '^AWS_REGION=' "${REPO_ROOT}/config.env" | tail -1 | cut -d= -f2- | tr -d '"'"'"' \r')"
+fi
+
+REGION="${1:-${CONFIG_ENV_REGION:-us-west-1}}"
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 BUCKET="bookstore-terraform-state-${ACCOUNT_ID}"
 TABLE="terraform-state-lock"
-VERSIONS_TF="$(dirname "$0")/../versions.tf"
+VERSIONS_TF="${REPO_ROOT}/versions.tf"
 
 echo ""
 echo "Account : ${ACCOUNT_ID}"
@@ -79,9 +92,9 @@ else
   echo "[ok] DynamoDB lock table created."
 fi
 
-# ── 3. Patch versions.tf with correct bucket name ─────────────────────────────
+# ── 3. Patch versions.tf with correct bucket name and region ──────────────────
 echo ""
-echo "[patch] Writing bucket name into versions.tf..."
+echo "[patch] Writing bucket name and region into versions.tf..."
 
 # Replace whatever is between the bucket quotes (including empty string).
 # `sed -i ''` (BSD/macOS) and `sed -i` (GNU/Linux) take incompatible -i
@@ -99,6 +112,19 @@ sed \
   "${VERSIONS_TF}" > "${TMP_VERSIONS_TF}"
 mv "${TMP_VERSIONS_TF}" "${VERSIONS_TF}"
 
+# The backend block's own `region` field -- previously left hardcoded to
+# whatever the checked-in template said, completely disconnected from
+# config.env's AWS_REGION or this script's own resolved $REGION. Terraform
+# backend blocks can't reference variables at all (a real HCL limitation,
+# not an oversight), so this field can only ever be kept correct by exactly
+# this kind of external patch -- same reason bucket/dynamodb_table are
+# patched above, not left as `var.foo` references.
+TMP_VERSIONS_TF="$(mktemp)"
+sed \
+  "s|region[[:space:]]*=[[:space:]]*\"[^\"]*\"|region               = \"${REGION}\"|" \
+  "${VERSIONS_TF}" > "${TMP_VERSIONS_TF}"
+mv "${TMP_VERSIONS_TF}" "${VERSIONS_TF}"
+
 echo "[ok] versions.tf updated."
 echo ""
 grep -A 8 'backend "s3"' "${VERSIONS_TF}"
@@ -106,7 +132,7 @@ grep -A 8 'backend "s3"' "${VERSIONS_TF}"
 # ── 4. terraform init ──────────────────────────────────────────────────────────
 echo ""
 echo "[init] Running terraform init..."
-cd "$(dirname "$0")/.."
+cd "${REPO_ROOT}"
 
 if [[ -d ".terraform" ]]; then
   terraform init -reconfigure

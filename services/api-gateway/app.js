@@ -48,6 +48,7 @@ function verifyJwt(jwtSecret) {
     try {
       const decoded = jwt.verify(token, jwtSecret, { algorithms: ["HS256"] });
       req.headers["x-user-id"] = String(decoded.userId);
+      req.headers["x-user-role"] = decoded.role || "customer";
       next();
     } catch {
       return res.status(401).json({ error: "invalid or expired token" });
@@ -61,6 +62,19 @@ function protectMutations(jwtSecret) {
     if (req.method === "GET") return next();
     return verifyJwt(jwtSecret)(req, res, next);
   };
+}
+
+// Catalog writes need more than "logged in" -- otherwise any self-registered
+// account could wipe or deface the whole book catalog (register -> login ->
+// DELETE/PUT any /books/:id). Runs after protectMutations, which already
+// rejected GETs-need-no-auth and verified the JWT for everything else, so by
+// the time this runs req.headers["x-user-role"] is set for any non-GET.
+function requireAdminForMutation(req, res, next) {
+  if (req.method === "GET") return next();
+  if (req.headers["x-user-role"] !== "admin") {
+    return res.status(403).json({ error: "admin role required" });
+  }
+  return next();
 }
 
 // General limiter for the gateway -- the single public entry point for
@@ -120,6 +134,7 @@ export function createApp(jwtSecret, targets) {
   app.use(
     "/books",
     protectMutations(jwtSecret),
+    requireAdminForMutation,
     createProxyMiddleware({ target: targets.catalog, changeOrigin: true })
   );
 

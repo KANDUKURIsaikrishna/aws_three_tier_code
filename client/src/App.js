@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import Nav from "./components/Nav";
 import ProtectedRoute from "./components/ProtectedRoute";
+import AdminRoute from "./components/AdminRoute";
 import Add from "./pages/Add";
 import Books from "./pages/Books";
 import Update from "./pages/Update";
@@ -22,17 +23,17 @@ function App() {
             <Route
               path="/add"
               element={
-                <ProtectedRoute>
+                <AdminRoute>
                   <Add />
-                </ProtectedRoute>
+                </AdminRoute>
               }
             />
             <Route
               path="/update/:id"
               element={
-                <ProtectedRoute>
+                <AdminRoute>
                   <Update />
-                </ProtectedRoute>
+                </AdminRoute>
               }
             />
             <Route path="/login" element={<Login />} />

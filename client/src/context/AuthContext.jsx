@@ -6,14 +6,17 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [token, setToken] = useState(() => localStorage.getItem("bookstore_token"));
   const [email, setEmail] = useState(() => localStorage.getItem("bookstore_email"));
+  const [role, setRole] = useState(() => localStorage.getItem("bookstore_role"));
 
   const login = async (loginEmail, password) => {
     const res = await api.post("/auth/login", { email: loginEmail, password });
     localStorage.setItem("bookstore_token", res.data.token);
     localStorage.setItem("bookstore_refresh_token", res.data.refreshToken);
     localStorage.setItem("bookstore_email", loginEmail);
+    localStorage.setItem("bookstore_role", res.data.role);
     setToken(res.data.token);
     setEmail(loginEmail);
+    setRole(res.data.role);
   };
 
   // /auth/register returns {id, email}, not a token -- the caller (Register
@@ -27,8 +30,10 @@ export function AuthProvider({ children }) {
     localStorage.removeItem("bookstore_token");
     localStorage.removeItem("bookstore_refresh_token");
     localStorage.removeItem("bookstore_email");
+    localStorage.removeItem("bookstore_role");
     setToken(null);
     setEmail(null);
+    setRole(null);
     // Best-effort, not awaited -- the UI logs the user out immediately
     // either way. This just revokes the refresh token server-side so it
     // can't be used to mint new access tokens if it were ever stolen; a
@@ -41,7 +46,9 @@ export function AuthProvider({ children }) {
   const value = {
     token,
     email,
+    role,
     isAuthenticated: Boolean(token),
+    isAdmin: role === "admin",
     login,
     register,
     logout,

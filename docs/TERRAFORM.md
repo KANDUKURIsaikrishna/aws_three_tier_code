@@ -39,13 +39,13 @@ backend "s3" {
   bucket                = ""   # deliberately empty in git
   key                   = "terraform.tfstate"
   workspace_key_prefix  = "environments"
-  region                = "us-west-1"
+  region                = ""   # deliberately empty in git
   dynamodb_table        = ""   # deliberately empty in git
   encrypt               = true
 }
 ```
 
-The bucket/table names are account-specific, so they're never committed. Run `scripts/init-backend.sh us-west-1` once per AWS account — it creates the S3 bucket + DynamoDB lock table, patches `versions.tf` in place with the real names, and runs `terraform init`. (`scripts/bootstrap-tf-state.sh` is an older version of the same idea that prints the block for you to paste manually instead of patching the file — redundant now that `init-backend.sh` exists, kept for reference.)
+The bucket/table names are account-specific, so they're never committed — and `region` isn't either, as of this branch (it used to be hardcoded `"us-west-1"` directly in the committed file, completely disconnected from `config.env`'s `AWS_REGION` or anything else region-related in this project). Run `scripts/init-backend.sh` once per AWS account — it creates the S3 bucket + DynamoDB lock table, patches `versions.tf` in place with the real bucket/table names *and* region, and runs `terraform init`. Region resolution is layered: an explicit CLI arg (`./scripts/init-backend.sh us-west-2`) takes priority, then `AWS_REGION` from `config.env` (the normal path — run this *after* `config.env` exists, see [`DEPLOYMENT.md`](DEPLOYMENT.md) Step 1 vs Step 2), then `us-west-1` as a last-resort default. This field genuinely can't be a `var.aws_region` reference — Terraform resolves backend configuration before any variables are evaluated at all, a real HCL limitation — so external patching is the only way it's ever kept correct. (`scripts/bootstrap-tf-state.sh` is an older version of the same idea that prints the block for you to paste manually instead of patching the file — redundant now that `init-backend.sh` exists, kept for reference. It still hardcodes region and was not updated as part of this fix, since nothing in the current deploy flow calls it.)
 
 **If you skip this step**, Terraform silently falls back to local state (`.terraform/terraform.tfstate`), which is what makes `terraform plan` show "100 to add" even when a cluster is already running — the plan has no idea anything exists. Always check `terraform state list` before trusting a plan's resource count.
 

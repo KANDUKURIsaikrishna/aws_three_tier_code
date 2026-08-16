@@ -25,13 +25,16 @@ Helm-installed cluster add-ons: external-secrets (with IRSA), the AWS Load Balan
 | [aws_iam_role_policy.external_secrets](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_iam_role_policy_attachment.ebs_csi_policy](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy_attachment) | resource |
 | [aws_secretsmanager_secret.grafana_admin](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret) | resource |
+| [aws_secretsmanager_secret.monitoring_basic_auth](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret) | resource |
 | [aws_secretsmanager_secret_version.grafana_admin](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret_version) | resource |
+| [aws_secretsmanager_secret_version.monitoring_basic_auth](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret_version) | resource |
 | [helm_release.argo_rollouts](https://registry.terraform.io/providers/hashicorp/helm/latest/docs/resources/release) | resource |
 | [helm_release.argocd](https://registry.terraform.io/providers/hashicorp/helm/latest/docs/resources/release) | resource |
 | [helm_release.aws_lb_controller](https://registry.terraform.io/providers/hashicorp/helm/latest/docs/resources/release) | resource |
 | [helm_release.external_secrets](https://registry.terraform.io/providers/hashicorp/helm/latest/docs/resources/release) | resource |
 | [null_resource.delete_ingress_objects](https://registry.terraform.io/providers/hashicorp/null/latest/docs/resources/resource) | resource |
 | [random_password.grafana_admin](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/password) | resource |
+| [random_password.monitoring_basic_auth](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/password) | resource |
 
 ## Inputs
 
@@ -48,4 +51,5 @@ Helm-installed cluster add-ons: external-secrets (with IRSA), the AWS Load Balan
 | Name | Description |
 | ---- | ----------- |
 | <a name="output_grafana_admin_secret_arn"></a> [grafana\_admin\_secret\_arn](#output\_grafana\_admin\_secret\_arn) | ARN of Secrets Manager secret holding Grafana admin password (/bookstore/grafana-admin) |
+| <a name="output_monitoring_basic_auth_secret_arn"></a> [monitoring\_basic\_auth\_secret\_arn](#output\_monitoring\_basic\_auth\_secret\_arn) | ARN of Secrets Manager secret holding the shared Prometheus/Alertmanager basic-auth password (/bookstore/monitoring-basic-auth) |
 <!-- END_TF_DOCS -->

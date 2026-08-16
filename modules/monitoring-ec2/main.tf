@@ -185,7 +185,7 @@ resource "aws_iam_role_policy" "monitoring" {
       {
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [var.grafana_admin_secret_arn, var.alertmanager_smtp_secret_arn]
+        Resource = [var.grafana_admin_secret_arn, var.alertmanager_smtp_secret_arn, var.monitoring_basic_auth_secret_arn]
       }
     ]
   })
@@ -246,16 +246,17 @@ resource "aws_instance" "monitoring" { # nosemgrep: aws-ec2-has-public-ip
   # has been bumping against the plain-text limit as features get added, so
   # compressing buys real headroom instead of trimming comments every time.
   user_data_base64 = base64gzip(templatefile("${path.module}/user-data.sh.tftpl", {
-    cluster_name                  = var.cluster_name
-    region                        = var.region
-    grafana_admin_secret_name     = var.grafana_admin_secret_name
-    alertmanager_smtp_secret_name = var.alertmanager_smtp_secret_name
-    ne_port                       = 9100
-    kubelet_port                  = 10250
-    eks_api_server                = var.eks_api_server
-    eks_api_host                  = local.eks_api_host
-    custom_dashboard_json         = file("${path.module}/dashboards/pod-node-resources.json")
-    cluster_dashboard_json        = file("${path.module}/dashboards/k8s-cluster-overview.json")
+    cluster_name                      = var.cluster_name
+    region                            = var.region
+    grafana_admin_secret_name         = var.grafana_admin_secret_name
+    monitoring_basic_auth_secret_name = var.monitoring_basic_auth_secret_name
+    alertmanager_smtp_secret_name     = var.alertmanager_smtp_secret_name
+    ne_port                           = 9100
+    kubelet_port                      = 10250
+    eks_api_server                    = var.eks_api_server
+    eks_api_host                      = local.eks_api_host
+    custom_dashboard_json             = file("${path.module}/dashboards/pod-node-resources.json")
+    cluster_dashboard_json            = file("${path.module}/dashboards/k8s-cluster-overview.json")
   }))
 
   root_block_device {

@@ -153,18 +153,29 @@ export function createApp(db, jwtSecret) {
           return res.status(409).json({ error: "email already registered" });
         }
 
-        const passwordHash = await bcrypt.hash(password, 10);
-        db.query(
-          "INSERT INTO users (email, password_hash) VALUES (?, ?)",
-          [email, passwordHash],
-          (insertErr, result) => {
-            if (insertErr) {
-              console.error("user-service DB error:", insertErr);
-              return res.status(500).json({ error: "internal error" });
-            }
-            return res.status(201).json({ id: result.insertId, email });
+        // The very first account ever created becomes admin automatically --
+        // this is what actually gates catalog mutations (see api-gateway's
+        // requireAdminForMutation), so it has to happen here, atomically with
+        // the row that will hold it, not as a separate promotion step.
+        db.query("SELECT COUNT(*) AS count FROM users", async (countErr, countRows) => {
+          if (countErr) {
+            console.error("user-service DB error:", countErr);
+            return res.status(500).json({ error: "internal error" });
           }
-        );
+          const role = countRows[0].count === 0 ? "admin" : "customer";
+          const passwordHash = await bcrypt.hash(password, 10);
+          db.query(
+            "INSERT INTO users (email, password_hash, role) VALUES (?, ?, ?)",
+            [email, passwordHash, role],
+            (insertErr, result) => {
+              if (insertErr) {
+                console.error("user-service DB error:", insertErr);
+                return res.status(500).json({ error: "internal error" });
+              }
+              return res.status(201).json({ id: result.insertId, email, role });
+            }
+          );
+        });
       } catch (e) {
         console.error("user-service DB error:", e);
         return res.status(500).json({ error: "internal error" });
@@ -178,7 +189,7 @@ export function createApp(db, jwtSecret) {
       return res.status(400).json({ error: "email and password are required" });
     }
 
-    db.query("SELECT id, email, password_hash FROM users WHERE email = ?", [email], async (err, rows) => {
+    db.query("SELECT id, email, password_hash, role FROM users WHERE email = ?", [email], async (err, rows) => {
       try {
         if (err) {
           console.error("user-service DB error:", err);
@@ -198,7 +209,7 @@ export function createApp(db, jwtSecret) {
           return res.status(401).json({ error: "invalid email or password" });
         }
 
-        const token = jwt.sign({ userId: user.id, email: user.email }, jwtSecret, {
+        const token = jwt.sign({ userId: user.id, email: user.email, role: user.role }, jwtSecret, {
           expiresIn: ACCESS_TOKEN_TTL,
         });
         const refreshToken = generateRefreshToken();
@@ -210,7 +221,7 @@ export function createApp(db, jwtSecret) {
               console.error("user-service DB error:", rtErr);
               return res.status(500).json({ error: "internal error" });
             }
-            return res.status(200).json({ token, refreshToken });
+            return res.status(200).json({ token, refreshToken, role: user.role });
           }
         );
       } catch (e) {
@@ -239,7 +250,7 @@ export function createApp(db, jwtSecret) {
         }
         const existing = rows[0];
 
-        db.query("SELECT id, email FROM users WHERE id = ?", [existing.user_id], (userErr, userRows) => {
+        db.query("SELECT id, email, role FROM users WHERE id = ?", [existing.user_id], (userErr, userRows) => {
           if (userErr) {
             console.error("user-service DB error:", userErr);
             return res.status(500).json({ error: "internal error" });
@@ -269,10 +280,10 @@ export function createApp(db, jwtSecret) {
                   console.error("user-service DB error:", insertErr);
                   return res.status(500).json({ error: "internal error" });
                 }
-                const newAccessToken = jwt.sign({ userId: user.id, email: user.email }, jwtSecret, {
+                const newAccessToken = jwt.sign({ userId: user.id, email: user.email, role: user.role }, jwtSecret, {
                   expiresIn: ACCESS_TOKEN_TTL,
                 });
-                return res.status(200).json({ token: newAccessToken, refreshToken: newRefreshToken });
+                return res.status(200).json({ token: newAccessToken, refreshToken: newRefreshToken, role: user.role });
               }
             );
           });
@@ -306,7 +317,7 @@ export function createApp(db, jwtSecret) {
 
   app.get("/users/me", verifyJwt(jwtSecret), (req, res) => {
     db.query(
-      "SELECT id, email, created_at FROM users WHERE id = ?",
+      "SELECT id, email, role, created_at FROM users WHERE id = ?",
       [req.user.userId],
       (err, rows) => {
         if (err) {

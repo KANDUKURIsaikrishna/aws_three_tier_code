@@ -9,15 +9,7 @@ How to actually stand this project up, end to end, from a fresh AWS account. Thi
 - A domain you control (for `terraform.tfvars`' `domain` value — ACM DNS validation needs it)
 - **Expect this to take roughly 20-30 minutes** and to cost real money the moment RDS/EKS/the monitoring EC2 exist. Don't run `terraform apply` on the full stack "just to see what happens." (This branch removed some unnecessary serialization in the Terraform graph — RDS/EKS already ran concurrently, but `eks-addons`'s 5 Helm charts now all install concurrently instead of partly one-after-another, and `monitoring-ec2` no longer waits on all of `eks-addons` to finish. See [`ARCHITECTURE.md`](ARCHITECTURE.md#terraform-module-graph). This hasn't been verified against a real apply yet — if Helm installs start timing out (TF-001-shaped failures), see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for the rollback.)
 
-## Step 1 — Bootstrap Terraform state (once per AWS account)
-
-```bash
-./scripts/init-backend.sh us-west-1
-```
-
-Creates the S3 bucket + DynamoDB lock table, patches `versions.tf` in place with the real bucket/table names, runs `terraform init`. Skipping this step means Terraform silently uses local state — `terraform plan` will look like it wants to create everything from scratch even if a cluster is already running elsewhere, because local state has no idea what exists. **If a `terraform plan` ever shows a suspiciously large "to add" count, check `terraform state list` and confirm the backend is actually configured before doing anything else.**
-
-## Step 2 — Fill in your config, generate `terraform.tfvars`
+## Step 1 — Fill in your config, generate `terraform.tfvars`
 
 ```bash
 cp config.env.example config.env
@@ -25,16 +17,19 @@ cp config.env.example config.env
 python3 scripts/configure.py
 ```
 
+Do this **before** Step 2 — Step 2's backend bootstrap reads `AWS_REGION` from this same `config.env` file, so it needs to exist first (see Step 2's own notes on region resolution).
+
 `terraform.tfvars` is **generated**, not hand-written — `scripts/configure.py` is the only supported way to produce it (this is also stated directly on `alert_email`'s own description in `variables.tf`: "don't hand-edit it here directly"). The script does two things:
 
 1. Writes `terraform.tfvars` with the 4 variables that have no safe default (`aws_region`, `domain`, `github_repo`, `alert_email`) — everything else in `variables.tf` ships with a working default (see [`TERRAFORM.md`](TERRAFORM.md)); leave `primary_alb_dns` and `secondary_alb_dns` out of `config.env` entirely. `primary_alb_dns` is auto-discovered within the same apply now (see Step 3) — only set it in `terraform.tfvars` by hand afterward if you want to override discovery and point DNS at a different/manually-managed load balancer. `secondary_alb_dns` stays empty until a secondary-region EKS cluster actually exists (it doesn't yet — see [`ARCHITECTURE.md`](ARCHITECTURE.md#region-layout)).
-2. Stamps your real domain/repo/account ID over placeholder values (`YOUR_DOMAIN_HERE.com`, `YOUR_GITHUB_USERNAME/aws_three_tier_code`, `ACCOUNT_ID`) in four files that are otherwise still git's checked-in template content: `k8s/base/ingress/ingress.yaml`, `k8s/services/api-gateway/base/configmap.yaml` (`FRONTEND_URL`, used for CORS), `k8s/argocd/application.yaml`, `k8s/overlays/prod/kustomization.yaml`.
+2. Stamps your real domain/repo/account ID/region over placeholder values (`YOUR_DOMAIN_HERE.com`, `YOUR_GITHUB_USERNAME/aws_three_tier_code`, `ACCOUNT_ID`, `AWS_REGION_HERE`) in five files that are otherwise still git's checked-in template content: `k8s/base/ingress/ingress.yaml`, `k8s/services/api-gateway/base/configmap.yaml` (`FRONTEND_URL`, used for CORS), `k8s/argocd/application.yaml`, `k8s/overlays/prod/kustomization.yaml`, `k8s/base/secrets/external-secret.yaml` (the shared `ClusterSecretStore`'s `region` field — every service's `ExternalSecret` references this one by name, so a wrong region here breaks secret sync cluster-wide).
 
-**Commit and push those 4 stamped files before your first ArgoCD sync matters** — ArgoCD deploys `k8s/base` and `k8s/services` content straight from git, not from whatever's sitting on your local disk. Skip this and the very first sync deploys the literal placeholder strings, not your real domain:
+**Commit and push those 5 stamped files before your first ArgoCD sync matters** — ArgoCD deploys `k8s/base` and `k8s/services` content straight from git, not from whatever's sitting on your local disk. Skip this and the very first sync deploys the literal placeholder strings, not your real domain:
 
 ```bash
 git add k8s/base/ingress/ingress.yaml k8s/services/api-gateway/base/configmap.yaml \
-        k8s/argocd/application.yaml k8s/overlays/prod/kustomization.yaml
+        k8s/argocd/application.yaml k8s/overlays/prod/kustomization.yaml \
+        k8s/base/secrets/external-secret.yaml
 git commit -m "chore: configure for <your-domain>"
 git push
 ```
@@ -42,6 +37,16 @@ git push
 (`k8s/argocd/application.yaml` itself is read directly off local disk by `argocd.tf`'s `kubectl_manifest` resource at `terraform apply` time — pushing it isn't strictly required for that one apply to pick up the right value, but commit it anyway so the checked-in file matches what's actually running.)
 
 `config.env` and `terraform.tfvars` are both gitignored — never commit either one.
+
+## Step 2 — Bootstrap Terraform state (once per AWS account)
+
+```bash
+./scripts/init-backend.sh
+```
+
+Creates the S3 bucket + DynamoDB lock table, patches `versions.tf` in place with the real bucket/table names *and region*, runs `terraform init`. Skipping this step means Terraform silently uses local state — `terraform plan` will look like it wants to create everything from scratch even if a cluster is already running elsewhere, because local state has no idea what exists. **If a `terraform plan` ever shows a suspiciously large "to add" count, check `terraform state list` and confirm the backend is actually configured before doing anything else.**
+
+Region resolution here is layered, in priority order: an explicit CLI arg (`./scripts/init-backend.sh us-west-2`, if you want to override), then `AWS_REGION` from `config.env` (the normal path, since Step 1 already created it), then `us-west-1` as a last-resort default if neither is set. The Terraform backend block in `versions.tf` genuinely cannot reference `var.aws_region` at all — Terraform resolves backend configuration before any variables are evaluated, a real HCL limitation, not an oversight — so this script patching the literal value in is the only way that field ever stays correct.
 
 ## Step 3 — One apply, everything
 
@@ -190,9 +195,10 @@ You almost never run `kubectl apply` for app changes after this point — push t
 
 ```bash
 terraform output grafana_url        # Grafana, default user "admin"
-terraform output prometheus_url
-terraform output alertmanager_url
+terraform output prometheus_url     # Prometheus, also user "admin" -- see OBS-063
+terraform output alertmanager_url   # Alertmanager, also user "admin" -- see OBS-063
 aws secretsmanager get-secret-value --secret-id /bookstore/grafana-admin --query SecretString --output text
+aws secretsmanager get-secret-value --secret-id /bookstore/monitoring-basic-auth --query SecretString --output text
 ```
 
 `Makefile` has `make monitoring-status` (Docker Compose status on the box) and `make monitoring-logs` (tails the init/dashboard-import logs) — both auto-fetch an auto-generated SSH key from Terraform state via a `monitoring-key` prerequisite target (saved locally as `.monitoring-ssh-key.pem`, gitignored), no manual key management needed.

@@ -67,12 +67,22 @@ describe("GET /books/:id", () => {
 });
 
 describe("POST /books", () => {
+  it("rejects a non-admin caller", async () => {
+    const res = await request(app)
+      .post("/books")
+      .set("x-user-role", "customer")
+      .send({ title: "New", desc: "A book", price: 12.99, cover: "http://img" });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "admin role required" });
+  });
+
   it("inserts a book and returns insert result", async () => {
     const result = { insertId: 5, affectedRows: 1 };
     mockQuery.mockImplementation((_q, _v, cb) => cb(null, result));
 
     const res = await request(app)
       .post("/books")
+      .set("x-user-role", "admin")
       .send({ title: "New", desc: "A book", price: 12.99, cover: "http://img" });
     expect(res.status).toBe(200);
     expect(res.body).toEqual(result);
@@ -85,23 +95,39 @@ describe("POST /books", () => {
 });
 
 describe("DELETE /books/:id", () => {
+  it("rejects a non-admin caller", async () => {
+    const res = await request(app).delete("/books/1").set("x-user-role", "customer");
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "admin role required" });
+  });
+
   it("deletes a book by id", async () => {
     const result = { affectedRows: 1 };
     mockQuery.mockImplementation((_q, _p, cb) => cb(null, result));
 
-    const res = await request(app).delete("/books/1");
+    const res = await request(app).delete("/books/1").set("x-user-role", "admin");
     expect(res.status).toBe(200);
     expect(res.body).toEqual(result);
   });
 });
 
 describe("PUT /books/:id", () => {
+  it("rejects a non-admin caller", async () => {
+    const res = await request(app)
+      .put("/books/1")
+      .set("x-user-role", "customer")
+      .send({ title: "Updated", desc: "Updated desc", price: 15.99, cover: "http://newimg" });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "admin role required" });
+  });
+
   it("updates a book by id", async () => {
     const result = { affectedRows: 1 };
     mockQuery.mockImplementation((_q, _p, cb) => cb(null, result));
 
     const res = await request(app)
       .put("/books/1")
+      .set("x-user-role", "admin")
       .send({ title: "Updated", desc: "Updated desc", price: 15.99, cover: "http://newimg" });
     expect(res.status).toBe(200);
     expect(res.body).toEqual(result);

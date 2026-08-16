@@ -56,7 +56,7 @@ terraform {
     bucket               = ""
     key                  = "terraform.tfstate"
     workspace_key_prefix = "environments"
-    region               = "us-west-1"
+    region               = ""
     dynamodb_table       = ""
     encrypt              = true
   }
