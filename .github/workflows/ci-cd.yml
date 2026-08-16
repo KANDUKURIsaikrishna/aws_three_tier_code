@@ -202,14 +202,23 @@ jobs:
       id-token: write        # required for OIDC token exchange
       contents: read
       security-events: write # required for SARIF upload to Security tab
-    env:
-      # Scoped to this job only — secret not exposed to secret-scan/sast/validate
-      ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
     outputs:
       image-tag: ${{ steps.tag.outputs.tag }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      # The `env` context isn't available inside an `env:` block's own value
+      # expressions at any level (workflow or job) -- GitHub Actions rejects
+      # the whole workflow file at parse time if you try, which silently
+      # broke every run on this branch until caught (0s "workflow file
+      # issue" failures, no job ever queued). Computing it in a step instead
+      # keeps AWS_REGION as the single source of truth (workflow-level env,
+      # set from config.env by scripts/configure.py) without that
+      # restriction -- env vars ARE exposed as real shell variables inside
+      # `run:` steps.
+      - name: Compute ECR registry URL
+        run: echo "ECR_REGISTRY=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${AWS_REGION}.amazonaws.com" >> "$GITHUB_ENV"
 
       - name: Derive image tag (first 8 chars of git SHA)
         id: tag
@@ -501,9 +510,6 @@ jobs:
     permissions:
       id-token: write
       contents: write           # needed to push the kustomization.yaml commit
-    env:
-      ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
-
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
@@ -511,6 +517,12 @@ jobs:
           # trigger another workflow run, preventing an infinite loop.
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+
+      # Same "env context isn't available inside env:" restriction as the
+      # build-and-push job above -- see that job's comment for the full
+      # explanation.
+      - name: Compute ECR registry URL
+        run: echo "ECR_REGISTRY=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${AWS_REGION}.amazonaws.com" >> "$GITHUB_ENV"
 
       - name: Install kustomize
         run: |
