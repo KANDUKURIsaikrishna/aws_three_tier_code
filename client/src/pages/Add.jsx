@@ -11,6 +11,7 @@ const Add = () => {
     cover: "",
   });
   const [error,setError] = useState(false)
+  const [submitting, setSubmitting] = useState(false);
 
   const navigate = useNavigate();
 
@@ -20,12 +21,14 @@ const Add = () => {
 
   const handleClick = async (e) => {
     e.preventDefault();
+    setSubmitting(true);
     try {
       await api.post("/books", book);
       navigate("/");
     } catch (err) {
       console.log(err.message);
       setError(true)
+      setSubmitting(false);
     }
   };
 
@@ -57,7 +60,9 @@ const Add = () => {
         name="cover"
         onChange={handleChange}
       />
-      <button onClick={handleClick}>Add</button>
+      <button onClick={handleClick} disabled={submitting}>
+        {submitting ? "Adding..." : "Add"}
+      </button>
       {error && <p className="error">Something went wrong!</p>}
       <Link to="/">See all books</Link>
     </div>

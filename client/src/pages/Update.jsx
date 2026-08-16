@@ -11,6 +11,7 @@ const Update = () => {
   });
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -42,13 +43,14 @@ const Update = () => {
 
   const handleClick = async (e) => {
     e.preventDefault();
-
+    setSubmitting(true);
     try {
       await api.put(`/books/${bookId}`, book);
       navigate("/");
     } catch (err) {
       console.log(err.message);
       setError(true);
+      setSubmitting(false);
     }
   };
 
@@ -93,7 +95,9 @@ const Update = () => {
         value={book.cover ?? ""}
         onChange={handleChange}
       />
-      <button onClick={handleClick}>Update</button>
+      <button onClick={handleClick} disabled={submitting}>
+        {submitting ? "Updating..." : "Update"}
+      </button>
       {error && <p className="error">Something went wrong!</p>}
       <Link to="/">See all books</Link>
     </div>

@@ -6,12 +6,14 @@ const Register = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const { register } = useAuth();
   const navigate = useNavigate();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
+    setSubmitting(true);
     try {
       await register(email, password);
       navigate("/login", { state: { registered: true } });
@@ -23,6 +25,7 @@ const Register = () => {
       } else {
         setError("something went wrong, try again");
       }
+      setSubmitting(false);
     }
   };
 
@@ -41,7 +44,9 @@ const Register = () => {
         value={password}
         onChange={(e) => setPassword(e.target.value)}
       />
-      <button onClick={handleSubmit}>Register</button>
+      <button onClick={handleSubmit} disabled={submitting}>
+        {submitting ? "Registering..." : "Register"}
+      </button>
       {error && <p className="error">{error}</p>}
       <Link to="/login">Already have an account? Login</Link>
     </div>

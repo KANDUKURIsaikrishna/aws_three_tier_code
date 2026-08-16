@@ -6,6 +6,7 @@ const Login = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -14,6 +15,7 @@ const Login = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
+    setSubmitting(true);
     try {
       await login(email, password);
       navigate("/");
@@ -23,6 +25,7 @@ const Login = () => {
       } else {
         setError("something went wrong, try again");
       }
+      setSubmitting(false);
     }
   };
 
@@ -42,7 +45,9 @@ const Login = () => {
         value={password}
         onChange={(e) => setPassword(e.target.value)}
       />
-      <button onClick={handleSubmit}>Login</button>
+      <button onClick={handleSubmit} disabled={submitting}>
+        {submitting ? "Logging in..." : "Login"}
+      </button>
       {error && <p className="error">{error}</p>}
       <Link to="/register">Need an account? Register</Link>
     </div>
