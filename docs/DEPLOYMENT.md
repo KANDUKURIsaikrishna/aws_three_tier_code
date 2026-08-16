@@ -21,7 +21,7 @@ Do this **before** Step 2 — Step 2's backend bootstrap reads `AWS_REGION` from
 
 `terraform.tfvars` is **generated**, not hand-written — `scripts/configure.py` is the only supported way to produce it (this is also stated directly on `alert_email`'s own description in `variables.tf`: "don't hand-edit it here directly"). The script does two things:
 
-1. Writes `terraform.tfvars` with the 4 variables that have no safe default (`aws_region`, `domain`, `github_repo`, `alert_email`) — everything else in `variables.tf` ships with a working default (see [`TERRAFORM.md`](TERRAFORM.md)); leave `primary_alb_dns` and `secondary_alb_dns` out of `config.env` entirely. `primary_alb_dns` is auto-discovered within the same apply now (see Step 3) — only set it in `terraform.tfvars` by hand afterward if you want to override discovery and point DNS at a different/manually-managed load balancer. `secondary_alb_dns` stays empty until a secondary-region EKS cluster actually exists (it doesn't yet — see [`ARCHITECTURE.md`](ARCHITECTURE.md#region-layout)).
+1. Writes `terraform.tfvars` with the 4 variables that have no safe default (`aws_region`, `domain`, `github_repo`, `alert_email`) — everything else in `variables.tf` ships with a working default (see [`TERRAFORM.md`](TERRAFORM.md)); leave `primary_alb_dns` and `secondary_alb_dns` out of `config.env` entirely. `primary_alb_dns` is auto-discovered within the same apply now (see Step 4) — only set it in `terraform.tfvars` by hand afterward if you want to override discovery and point DNS at a different/manually-managed load balancer. `secondary_alb_dns` stays empty until a secondary-region EKS cluster actually exists (it doesn't yet — see [`ARCHITECTURE.md`](ARCHITECTURE.md#region-layout)).
 2. Stamps your real domain/repo/account ID/region over placeholder values (`YOUR_DOMAIN_HERE.com`, `YOUR_GITHUB_USERNAME/aws_three_tier_code`, `ACCOUNT_ID`, `AWS_REGION_HERE`) in five files that are otherwise still git's checked-in template content: `k8s/base/ingress/ingress.yaml`, `k8s/services/api-gateway/base/configmap.yaml` (`FRONTEND_URL`, used for CORS), `k8s/argocd/application.yaml`, `k8s/overlays/prod/kustomization.yaml`, `k8s/base/secrets/external-secret.yaml` (the shared `ClusterSecretStore`'s `region` field — every service's `ExternalSecret` references this one by name, so a wrong region here breaks secret sync cluster-wide).
 
 **Commit and push those 5 stamped files before your first ArgoCD sync matters** — ArgoCD deploys `k8s/base` and `k8s/services` content straight from git, not from whatever's sitting on your local disk. Skip this and the very first sync deploys the literal placeholder strings, not your real domain:
@@ -48,14 +48,23 @@ Creates the S3 bucket, patches `versions.tf` in place with the real bucket name 
 
 Region resolution here is layered, in priority order: an explicit CLI arg (`./scripts/init-backend.sh us-west-2`, if you want to override), then `AWS_REGION` from `config.env` (the normal path, since Step 1 already created it), then `us-west-1` as a last-resort default if neither is set. The Terraform backend block in `versions.tf` genuinely cannot reference `var.aws_region` at all — Terraform resolves backend configuration before any variables are evaluated, a real HCL limitation, not an oversight — so this script patching the literal value in is the only way that field ever stays correct.
 
-## Step 3 — One apply, everything
+## Step 3 — Bootstrap the domain (once per domain, ever)
+
+```bash
+./scripts/init-domain.sh
+```
+
+Creates the public Route53 hosted zone for `DOMAIN` (from `config.env`) if it doesn't already exist, and prints the 4 NS values to set at your registrar (GoDaddy, Namecheap, etc.). **Do this now, before Step 4** — Terraform reads this zone via a `data` lookup, it never creates or destroys it (see [`TERRAFORM.md`](TERRAFORM.md#backend-state) and [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) OBS-058), so the registrar update only ever needs to happen once for this domain's whole lifetime — not once per apply/destroy cycle. Set the NS values now and give them a few minutes to propagate while Step 4 works through the rest of the stack; if `aws_acm_certificate_validation.ingress` still hangs in Step 4, the NS records haven't propagated yet.
+
+## Step 4 — One apply, everything
 
 ```bash
 terraform plan -out=tfplan
 # review it — expect ~140 resources on a genuinely fresh account:
 #   VPC + subnets + NAT + IGW + S3 endpoint, security groups, 2 ACM certs
 #   (CloudFront's, off by default, + the real one the ALB uses), RDS instance,
-#   private + public Route53 zones, ECR repos, EKS cluster + node group + OIDC provider,
+#   private Route53 zone (the public zone is looked up, not created — see Step 3),
+#   ECR repos, EKS cluster + node group + OIDC provider,
 #   eks-addons (ESO, AWS Load Balancer Controller, ArgoCD, Argo Rollouts),
 #   monitoring EC2 + EIP, CloudTrail, GuardDuty, GitHub OIDC role,
 #   the ArgoCD AppProject + Application + ApplicationSet (kubectl_manifest, see below)
@@ -66,9 +75,9 @@ This used to need a second apply — Terraform couldn't create the public Route5
 
 `argocd.tf` also applies `k8s/argocd/appproject.yaml`, `k8s/argocd/application.yaml`, and `k8s/argocd/applicationset-microservices.yaml` directly (via the `kubectl_manifest` resource, `gavinbunney/kubectl` provider) — no more manual `kubectl apply -f k8s/argocd/...` after the fact. All three wait on `module.eks_addons` (they need ArgoCD's CRDs to exist); the Application and ApplicationSet additionally wait on the AppProject, since ArgoCD rejects either one naming a project that doesn't exist. (`appproject.yaml` was missing from this list for a while — see OBS-058.)
 
-RDS (~10-15 min) and EKS (~15-20 min) are the slow parts and provision concurrently since neither depends on the other directly (both depend on `network`/`security`, not on each other). The `eks-addons` Helm releases run after the cluster is up, now fully concurrently with each other too (see [`ARCHITECTURE.md`](ARCHITECTURE.md#terraform-module-graph)) — if any single Helm release times out, see TROUBLESHOOTING TF-001/TF-006/OBS-006 before assuming something is broken. Point your domain registrar's nameservers at the values in `terraform output route53_public_name_servers` after this apply — **not just once, ever**: `terraform destroy` deletes the public Route53 zone along with everything else, and the next `apply` creates a brand-new zone with brand-new NS values, so this step must be redone after *every* full destroy+recreate cycle or ACM certificate validation (and anything depending on it, like the ALB's TLS listener) will hang until it's done (see OBS-058).
+RDS (~10-15 min) and EKS (~15-20 min) are the slow parts and provision concurrently since neither depends on the other directly (both depend on `network`/`security`, not on each other). The `eks-addons` Helm releases run after the cluster is up, now fully concurrently with each other too (see [`ARCHITECTURE.md`](ARCHITECTURE.md#terraform-module-graph)) — if any single Helm release times out, see TROUBLESHOOTING TF-001/TF-006/OBS-006 before assuming something is broken. As long as Step 3's NS records were set and have propagated, `aws_acm_certificate_validation.ingress` resolves on its own within a few minutes — no manual registrar step here anymore (that used to be required after *every* destroy+recreate cycle, since the public zone was Terraform-managed and got brand-new NS values each time it was recreated; it's now a `data` lookup instead, see Step 3 and OBS-058).
 
-## Step 4 — Import known-conflicting Secrets Manager entries (if re-deploying)
+## Step 5 — Import known-conflicting Secrets Manager entries (if re-deploying)
 
 Only needed if this isn't a truly fresh account — repeated destroy/apply cycles can leave Secrets Manager entries Terraform's state doesn't know about:
 
@@ -78,7 +87,7 @@ make import
 
 Safe no-op on a genuinely fresh account (`|| echo already imported` on both).
 
-## Step 5 — Confirm the ExternalSecrets IRSA fix actually took
+## Step 6 — Confirm the ExternalSecrets IRSA fix actually took
 
 This bit silently broke every secret sync in the cluster until fixed on this branch (see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md)) — don't skip verifying it:
 
@@ -97,9 +106,9 @@ kubectl get externalsecret admin-db-secret -n catalog
 # this one's just picked as the first to check
 ```
 
-## Step 6 — Watch all apps come up
+## Step 7 — Watch all apps come up
 
-Both `k8s/argocd/application.yaml` (the `bookstore` Application — the React frontend and its shared namespace resources: storage class, secrets bootstrap, network policy, PDB, quota) and `k8s/argocd/applicationset-microservices.yaml` (all 5 backend microservices: catalog, user, order, notification, api-gateway, one ArgoCD `Application` each) were already applied by Terraform in Step 3 — nothing to `kubectl apply` here. There is no backend monolith anymore; the original single frontend/backend pair was fully replaced by these 5 microservices, and `application.yaml` deploys frontend only. Just watch ArgoCD reconcile, within 3 minutes of the apply finishing:
+Both `k8s/argocd/application.yaml` (the `bookstore` Application — the React frontend and its shared namespace resources: storage class, secrets bootstrap, network policy, PDB, quota) and `k8s/argocd/applicationset-microservices.yaml` (all 5 backend microservices: catalog, user, order, notification, api-gateway, one ArgoCD `Application` each) were already applied by Terraform in Step 4 — nothing to `kubectl apply` here. There is no backend monolith anymore; the original single frontend/backend pair was fully replaced by these 5 microservices, and `application.yaml` deploys frontend only. Just watch ArgoCD reconcile, within 3 minutes of the apply finishing:
 
 ```bash
 kubectl get applications -n argocd

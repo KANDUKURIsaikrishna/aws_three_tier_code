@@ -325,5 +325,16 @@ module "eks_addons" {
   aws_region        = var.aws_region
   node_role_name    = module.eks.node_role_name
 
-  depends_on = [module.eks]
+  # module.network explicitly, not just module.eks: nothing in eks_addons
+  # references the NAT gateway's ID directly (EKS/node group reference
+  # subnet IDs, not the NAT resource itself), so module.eks alone doesn't
+  # force NAT to outlive this module's destroy. null_resource.delete_ingress_objects
+  # (aws-load-balancer-controller.tf) and the AWS Load Balancer Controller pod
+  # it triggers both need real internet egress via NAT to reach the EC2/ELBv2
+  # APIs and actually tear down the ALB -- lost that once NAT gateway was
+  # destroyed concurrently in a real `terraform destroy`, leaving the
+  # controller retrying into a dead network forever (i/o timeout on every
+  # AWS API call) while the ALB sat orphaned, blocking subnet/IGW/ACM
+  # cleanup behind it. See TROUBLESHOOTING.md for the full incident.
+  depends_on = [module.eks, module.network]
 }

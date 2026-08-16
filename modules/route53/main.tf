@@ -17,14 +17,19 @@ resource "aws_route53_record" "rds_endpoint" {
 
 # ── Public Hosted Zone + Active-Passive Failover ───────────────────────────────
 
-resource "aws_route53_zone" "public" {
-  name = var.domain
-
-  # prevent_destroy intentionally removed (was protecting the GoDaddy NS
-  # delegation from this zone's own recreate-with-different-nameservers
-  # behavior — see TROUBLESHOOTING.md OBS-018 for the full history). User
-  # has chosen to redo the GoDaddy delegation after this destroy/recreate
-  # cycle instead of keeping the zone pinned.
+# Looked up, not created: the zone's 4 NS values are fixed the moment it's
+# created and never change again, but the domain registrar (GoDaddy) only
+# points at those values after a manual, outside-Terraform step. A
+# `resource "aws_route53_zone"` here would get destroyed and recreated with
+# BRAND NEW nameservers on every `terraform destroy` + fresh `apply`,
+# breaking the registrar delegation every single cycle and forcing that
+# manual step to be redone each time (see TROUBLESHOOTING.md OBS-058).
+# Run `scripts/init-domain.sh` once per domain, ever, to create this zone
+# and do the registrar handoff — after that, every apply/destroy cycle just
+# reads it here and never touches it.
+data "aws_route53_zone" "public" {
+  name         = var.domain
+  private_zone = false
 }
 
 resource "aws_route53_health_check" "primary" {
@@ -82,7 +87,7 @@ data "aws_lb_hosted_zone_id" "ingress_lb" {
 # resource applies, alias.name = var.primary_alb_dns is guaranteed non-empty.
 resource "aws_route53_record" "primary" {
   count   = var.enable_cloudfront ? 0 : 1
-  zone_id = aws_route53_zone.public.zone_id
+  zone_id = data.aws_route53_zone.public.zone_id
   name    = var.domain
   type    = "A"
 
@@ -114,7 +119,7 @@ resource "aws_route53_record" "primary" {
 # these. Not gated on `var.primary_alb_dns != ""` for the same reason
 # `primary` above isn't (OBS-008): that value is unknown at plan time.
 resource "aws_route53_record" "frontend" {
-  zone_id = aws_route53_zone.public.zone_id
+  zone_id = data.aws_route53_zone.public.zone_id
   name    = "bookstore.${var.domain}"
   type    = "A"
 
@@ -126,7 +131,7 @@ resource "aws_route53_record" "frontend" {
 }
 
 resource "aws_route53_record" "api" {
-  zone_id = aws_route53_zone.public.zone_id
+  zone_id = data.aws_route53_zone.public.zone_id
   name    = "api.bookstore.${var.domain}"
   type    = "A"
 
@@ -153,7 +158,7 @@ resource "aws_route53_record" "api" {
 # is real; fix it properly then.
 resource "aws_route53_record" "secondary" {
   count   = var.secondary_alb_dns != "" ? 1 : 0
-  zone_id = aws_route53_zone.public.zone_id
+  zone_id = data.aws_route53_zone.public.zone_id
   name    = var.domain
   type    = "CNAME"
   ttl     = 60
@@ -172,7 +177,7 @@ resource "aws_route53_record" "secondary" {
 # ingress LB's, which is region-specific and comes from a data source.
 resource "aws_route53_record" "primary_cf" {
   count   = var.enable_cloudfront && var.cloudfront_domain != "" ? 1 : 0
-  zone_id = aws_route53_zone.public.zone_id
+  zone_id = data.aws_route53_zone.public.zone_id
   name    = var.domain
   type    = "A"
 

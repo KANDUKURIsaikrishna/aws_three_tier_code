@@ -253,6 +253,20 @@ resource "helm_release" "aws_lb_controller" {
     name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
     value = aws_iam_role.aws_lb_controller.arn
   }
+
+  # vpc_cni provides pod networking (the aws-node DaemonSet) -- nothing else
+  # in this file references it, so without this Terraform is free to destroy
+  # it whenever, including before this release's own uninstall or before
+  # null_resource.delete_ingress_objects (below) finishes its cleanup work.
+  # Hit exactly that in a real `terraform destroy`: vpc_cni got torn down
+  # while the controller was still mid-ALB-deprovision, and although its two
+  # already-running pods kept their existing network namespaces (so it
+  # didn't crash outright), any NEW pod on any node became unschedulable
+  # (aws-cni: "connect: connection refused" to the now-gone CNI socket) --
+  # a real risk if the controller pod restarts for any reason mid-cleanup.
+  # Forcing this to destroy last (after the controller and its cleanup are
+  # both fully done) closes that gap. See TROUBLESHOOTING.md for the incident.
+  depends_on = [aws_eks_addon.vpc_cni]
 }
 
 # ── Release the ALB before destroy touches the VPC ─────────────────────────

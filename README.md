@@ -185,6 +185,7 @@ AWS Network Load Balancer  (port 80/443)
 ├── scripts/
 │   ├── build-and-push.sh     # Manual Docker build + ECR push helper
 │   ├── init-backend.sh       # Creates S3 bucket for Terraform remote state (native lockfile locking)
+│   ├── init-domain.sh        # Creates Route53 public zone once per domain, ever (never destroyed)
 │   ├── bootstrap-tf-state.sh # DEPRECATED — old S3+DynamoDB bootstrap, kept for reference only
 │   └── configure.py          # Stamps config.env values into k8s files and terraform.tfvars
 │
