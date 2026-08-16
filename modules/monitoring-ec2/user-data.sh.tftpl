@@ -50,7 +50,7 @@ mkdir -p /opt/monitoring/{prometheus/{targets,rules},grafana/provisioning/{datas
 # the entire monitoring stack -- nothing after this line ever ran) with no
 # automatic retry, since user-data only runs once. See OBS-050.
 GRAFANA_PASSWORD=""
-for i in $(seq 1 10); do
+for i in $(seq 1 20); do
   GRAFANA_PASSWORD=$(aws secretsmanager get-secret-value \
     --secret-id "$SECRET_NAME" \
     --region "$REGION" \
@@ -60,7 +60,7 @@ for i in $(seq 1 10); do
   sleep 6
 done
 if [ -z "$GRAFANA_PASSWORD" ]; then
-  echo "FATAL: could not fetch $SECRET_NAME after 10 attempts" >&2
+  echo "FATAL: could not fetch $SECRET_NAME after 20 attempts" >&2
   exit 1
 fi
 
@@ -76,7 +76,7 @@ chmod 600 /run/grafana-pass
 # Grafana's own datasource config gets the plaintext so its dashboard queries
 # (which go over this same auth now, not the public internet) keep working.
 MONITORING_BASIC_AUTH_PASSWORD=""
-for i in $(seq 1 10); do
+for i in $(seq 1 20); do
   MONITORING_BASIC_AUTH_PASSWORD=$(aws secretsmanager get-secret-value \
     --secret-id "$MONITORING_BASIC_AUTH_SECRET_NAME" \
     --region "$REGION" \
@@ -86,7 +86,7 @@ for i in $(seq 1 10); do
   sleep 6
 done
 if [ -z "$MONITORING_BASIC_AUTH_PASSWORD" ]; then
-  echo "FATAL: could not fetch $MONITORING_BASIC_AUTH_SECRET_NAME after 10 attempts" >&2
+  echo "FATAL: could not fetch $MONITORING_BASIC_AUTH_SECRET_NAME after 20 attempts" >&2
   exit 1
 fi
 MONITORING_BASIC_AUTH_HASH=$(htpasswd -nbBC 10 admin "$MONITORING_BASIC_AUTH_PASSWORD" | cut -d: -f2)
@@ -94,7 +94,7 @@ MONITORING_BASIC_AUTH_HASH=$(htpasswd -nbBC 10 admin "$MONITORING_BASIC_AUTH_PAS
 # ── Alertmanager SES SMTP credentials from Secrets Manager ────────────────────
 # Same IAM-propagation race as the Grafana password above -- same retry loop.
 SMTP_SECRET_JSON=""
-for i in $(seq 1 10); do
+for i in $(seq 1 20); do
   SMTP_SECRET_JSON=$(aws secretsmanager get-secret-value \
     --secret-id "$SMTP_SECRET_NAME" \
     --region "$REGION" \
@@ -104,7 +104,7 @@ for i in $(seq 1 10); do
   sleep 6
 done
 if [ -z "$SMTP_SECRET_JSON" ]; then
-  echo "FATAL: could not fetch $SMTP_SECRET_NAME after 10 attempts" >&2
+  echo "FATAL: could not fetch $SMTP_SECRET_NAME after 20 attempts" >&2
   exit 1
 fi
 SMTP_HOST=$(echo "$SMTP_SECRET_JSON" | jq -r .SMTP_HOST)
