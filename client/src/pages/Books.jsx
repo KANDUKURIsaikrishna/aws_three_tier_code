@@ -76,11 +76,9 @@ const Books = () => {
                 <button className="delete" onClick={() => handleDelete(book.id)}>
                   Delete
                 </button>
-                <button className="update">
-                  <Link to={`/update/${book.id}`} style={{ color: "inherit", textDecoration: "none" }}>
-                    Update
-                  </Link>
-                </button>
+                <Link className="update" to={`/update/${book.id}`} style={{ textDecoration: "none" }}>
+                  Update
+                </Link>
               </>
             )}
           </div>
@@ -88,11 +86,9 @@ const Books = () => {
       </div>
 
       {isAdmin && (
-        <button className="addHome">
-          <Link to="/add" style={{ color: "inherit", textDecoration: "none" }}>
-            Add new book
-          </Link>
-        </button>
+        <Link className="addHome" to="/add" style={{ textDecoration: "none" }}>
+          Add new book
+        </Link>
       )}
     </div>
   );
