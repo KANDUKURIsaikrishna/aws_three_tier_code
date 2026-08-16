@@ -86,24 +86,27 @@ spec:
                 cover VARCHAR(1024)
               );
 
-              -- test.books (the legacy monolith DB) is created by a PreSync
-              -- hook in a SEPARATE ArgoCD Application (bookstore's
-              -- database/schema-init-job.yaml). sync-wave only orders hooks
-              -- WITHIN one Application's sync — there is no ordering
-              -- guarantee across two different Applications, so this hook
-              -- can legitimately run before that one on any given sync.
-              -- Guarded with a dynamic-SQL existence check instead of a bare
-              -- INSERT...SELECT so a missing source table skips the
-              -- migration instead of hard-failing (ERROR 1146) and burning
-              -- backoffLimit — self-heals on the next sync once bookstore's
-              -- hook has actually run. See TROUBLESHOOTING.md OBS-020/021.
-              SET @src_exists := (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'test' AND table_name = 'books');
-              SET @migrate_sql := IF(@src_exists > 0,
-                'INSERT INTO catalog_db.books (id, title, \`desc\`, price, cover) SELECT id, title, \`desc\`, price, cover FROM test.books ON DUPLICATE KEY UPDATE title = VALUES(title)',
+              -- Default catalog seed -- restored after the old monolith
+              -- (which used to own this data, in its own test.books table)
+              -- was fully deleted (commit 6e57f01) with nothing carrying its
+              -- seed rows forward. This job previously only tried to
+              -- MIGRATE from that monolith's table on a one-time cutover
+              -- assumption; now that the monolith is permanently gone,
+              -- test.books never exists again, so that migration was
+              -- silently a no-op forever -- a fresh catalog_db.books came up
+              -- empty on every apply, with no default books ever appearing.
+              -- Guarded on the table being genuinely EMPTY, not just
+              -- "missing these two titles": this runs on every sync (see
+              -- this file's own top comment), and an admin deliberately
+              -- deleting a default book should stay deleted, not get
+              -- silently re-inserted on the next sync.
+              SET @book_count := (SELECT COUNT(*) FROM catalog_db.books);
+              SET @seed_sql := IF(@book_count = 0,
+                'INSERT INTO catalog_db.books (title, \`desc\`, price, cover) VALUES (''The Great Gatsby'', ''A novel by F. Scott Fitzgerald'', 12.99, ''https://covers.openlibrary.org/b/id/8432472-L.jpg''), (''To Kill a Mockingbird'', ''A novel by Harper Lee'', 10.99, ''https://covers.openlibrary.org/b/id/8810494-L.jpg'')',
                 'SELECT 1');
-              PREPARE migrate_stmt FROM @migrate_sql;
-              EXECUTE migrate_stmt;
-              DEALLOCATE PREPARE migrate_stmt;
+              PREPARE seed_stmt FROM @seed_sql;
+              EXECUTE seed_stmt;
+              DEALLOCATE PREPARE seed_stmt;
 
               CREATE USER IF NOT EXISTS 'catalog_user'@'%' IDENTIFIED BY '$CATALOG_DB_PASSWORD';
               GRANT SELECT, INSERT, UPDATE, DELETE ON catalog_db.* TO 'catalog_user'@'%';

@@ -1188,6 +1188,16 @@ Safe because a fresh EKS cluster role has no state worth importing — same reas
 
 **Fix:** none needed in code -- `aws ec2 delete-security-group --group-id <id>` unblocks it immediately if you don't want to wait, but it's very likely AWS would have finished the cleanup on its own given more time. Not a bug in this project's Terraform; a documented expectation so a long VPC-destroy wait isn't mistaken for something actually stuck.
 
+### OBS-068 — default catalog books silently stopped appearing on every fresh apply, since the old monolith was deleted
+
+**Symptom:** a brand-new deploy came up with an empty book catalog -- no error anywhere, ArgoCD `catalog-service` Application `Synced`/`Healthy`, `catalog-schema-init` hook `Succeeded`. Previously, a couple of default books (The Great Gatsby, To Kill a Mockingbird) always appeared on a fresh install.
+
+**Root cause:** `catalog-schema-init`'s SQL was never a direct seed -- it was a one-time MIGRATION, `INSERT INTO catalog_db.books ... SELECT ... FROM test.books`, reading from the old monolith's own database (created and seeded by `k8s/base/database/schema-init-job.yaml`, see OBS-020). That migration was correctly guarded to no-op if `test.books` didn't exist yet (OBS-020/021's own ordering-race concern), so it never hard-failed -- it just silently did nothing. When the old monolith was fully deleted (`chore: delete the old backend monolith`, commit `6e57f01`), `k8s/base/database/schema-init-job.yaml` went with it and `k8s/base/kustomization.yaml` never referenced a `database/` path at all anymore -- confirmed live, the directory doesn't exist on disk. Nothing ever creates `test.books` again, so the migration has been a **permanent, silent no-op** on every apply since that deletion. Every fresh RDS instance since has come up with a real, empty `catalog_db.books` table and zero errors.
+
+**Fix:** `k8s/services/catalog-service/base/schema-init-job.yaml`'s migration block replaced with a direct seed of the original two books (title/desc/price/cover recovered from git history, `git log --all -p -- k8s/database/mysql-init-configmap.yaml`). Guarded on `(SELECT COUNT(*) FROM catalog_db.books) = 0`, not "these two titles are missing" -- this hook runs on every sync (idempotent-by-design, see this file's own top comment), so an admin who deliberately deletes a default book must have it stay deleted, not get silently re-inserted on the next ArgoCD sync. Only fires on a genuinely empty table, i.e. a truly fresh install.
+
+**Lesson:** a migration path that degrades to a silent no-op when its source is missing is exactly the kind of fix that looks safe (no hard failure, no burned `backoffLimit`) but quietly rots the moment the thing it depends on is removed elsewhere in the codebase, with nothing to signal it broke. Worth grepping for what still reads from something before deleting that something's own creator.
+
 ## Related
 
 - [`TERRAFORM.md`](TERRAFORM.md), [`KUBERNETES.md`](KUBERNETES.md), [`CICD.md`](CICD.md), [`DEPLOYMENT.md`](DEPLOYMENT.md)
