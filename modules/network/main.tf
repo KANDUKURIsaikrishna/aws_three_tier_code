@@ -122,6 +122,12 @@ resource "aws_flow_log" "vpc" {
   log_destination = aws_cloudwatch_log_group.vpc_flow_logs.arn
   traffic_type    = "ALL"
   vpc_id          = aws_vpc.main.id
+
+  # Must be destroyed BEFORE force_delete_flow_log_group's destroy-time
+  # cleanup runs below — see that resource's comment for why the ordering
+  # matters (deleting the log group while this is still live makes AWS
+  # recreate it).
+  depends_on = [null_resource.force_delete_flow_log_group]
 }
 
 # ── Destroy safety net ──────────────────────────────────────────────────────
@@ -131,12 +137,18 @@ resource "aws_flow_log" "vpc" {
 # IAM role below grants it logs:CreateLogGroup; if the log group vanishes while
 # aws_flow_log.vpc is still actively delivering records, the service recreates
 # it using that permission (CloudTrail shows the creator as
-# "vpc-flow-logging+<account>", not Terraform). This resource previously had no
-# depends_on beyond the implicit one from referencing the log group's name in
-# triggers — nothing ordered it after aws_flow_log.vpc's destruction, so it
-# could (and did) delete the log group while flow logs were still live,
-# triggering the auto-recreate. Fixed: explicit depends_on on aws_flow_log.vpc,
-# plus a short sleep for any in-flight delivery to fully stop before deleting.
+# "vpc-flow-logging+<account>", not Terraform).
+#
+# Ordering bug found 2026-08-16 (orphan log group survived a real destroy
+# cycle): this resource previously had depends_on = [aws_flow_log.vpc], which
+# on destroy runs the OPPOSITE direction from what's needed — Terraform
+# destroys a dependent before the thing it depends on, so that made this
+# delete the log group first, while aws_flow_log.vpc was still live and still
+# delivering. AWS's self-heal then recreated it right back. Fixed by flipping
+# the dependency: aws_flow_log.vpc now depends_on this resource, so on
+# destroy aws_flow_log.vpc is torn down FIRST (delivery stops), then this
+# runs. The sleep below is a grace period for any in-flight delivery API
+# calls to finish, not the fix itself.
 # Best-effort only (|| true) — requires aws CLI on whatever machine runs
 # `terraform destroy`.
 resource "null_resource" "force_delete_flow_log_group" {
@@ -144,8 +156,6 @@ resource "null_resource" "force_delete_flow_log_group" {
     log_group_name = aws_cloudwatch_log_group.vpc_flow_logs.name
     region         = data.aws_region.current.name
   }
-
-  depends_on = [aws_flow_log.vpc]
 
   provisioner "local-exec" {
     when    = destroy

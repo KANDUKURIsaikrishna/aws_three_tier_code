@@ -55,3 +55,6 @@ kubectl.exe
 
 # Claude Code — local AI assistant config (not team config)
 .claude/
+
+# graphify — local knowledge-graph output, never committed
+graphify-out/

@@ -66,7 +66,12 @@ resource "kubectl_manifest" "argocd_applicationset_microservices" {
 
 resource "null_resource" "wait_for_alb_hostname" {
   triggers = {
-    always_run = timestamp() # re-checked every apply — cheap no-op once the hostname already exists
+    # Re-run only when the Application manifest actually changes, not on
+    # every apply. A timestamp() trigger here forced a destroy+recreate of
+    # this resource on every single `terraform apply`, which cascaded into
+    # spurious "known after apply" diffs on the 3 Route53 alias records that
+    # read the ALB hostname through this resource's data source below.
+    argocd_application_id = kubectl_manifest.argocd_application.id
   }
 
   depends_on = [module.eks_addons, kubectl_manifest.argocd_application]
