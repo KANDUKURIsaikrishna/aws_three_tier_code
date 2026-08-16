@@ -93,19 +93,20 @@ describe("GET /books (public)", () => {
   });
 });
 
-describe("POST /books (protected)", () => {
+describe("POST /books (any authenticated user)", () => {
   it("rejects with no token", async () => {
     const res = await request(app).post("/books").send({ title: "New" });
     expect(res.status).toBe(401);
   });
 
-  it("rejects a valid token that isn't the admin role", async () => {
+  it("proxies for a plain customer token -- adding a book needs no admin role", async () => {
     const res = await request(app)
       .post("/books")
       .set("Authorization", `Bearer ${tokenFor(9, "customer")}`)
       .send({ title: "New" });
-    expect(res.status).toBe(403);
-    expect(res.body).toEqual({ error: "admin role required" });
+    expect(res.status).toBe(200);
+    expect(res.body.from).toBe("catalog-service");
+    expect(res.headers["x-received-user-id"]).toBe("9");
   });
 
   it("proxies with a valid admin token and injects X-User-Id", async () => {
@@ -116,6 +117,47 @@ describe("POST /books (protected)", () => {
     expect(res.status).toBe(200);
     expect(res.body.from).toBe("catalog-service");
     expect(res.headers["x-received-user-id"]).toBe("9");
+  });
+});
+
+describe("PUT/DELETE /books (admin only)", () => {
+  it("rejects PUT with no token", async () => {
+    const res = await request(app).put("/books/1").send({ title: "Edited" });
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects PUT from a plain customer token", async () => {
+    const res = await request(app)
+      .put("/books/1")
+      .set("Authorization", `Bearer ${tokenFor(9, "customer")}`)
+      .send({ title: "Edited" });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "admin role required" });
+  });
+
+  it("proxies PUT with a valid admin token", async () => {
+    const res = await request(app)
+      .put("/books/1")
+      .set("Authorization", `Bearer ${tokenFor(9, "admin")}`)
+      .send({ title: "Edited" });
+    expect(res.status).toBe(200);
+    expect(res.body.from).toBe("catalog-service");
+  });
+
+  it("rejects DELETE from a plain customer token", async () => {
+    const res = await request(app)
+      .delete("/books/1")
+      .set("Authorization", `Bearer ${tokenFor(9, "customer")}`);
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "admin role required" });
+  });
+
+  it("proxies DELETE with a valid admin token", async () => {
+    const res = await request(app)
+      .delete("/books/1")
+      .set("Authorization", `Bearer ${tokenFor(9, "admin")}`);
+    expect(res.status).toBe(200);
+    expect(res.body.from).toBe("catalog-service");
   });
 });
 

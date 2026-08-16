@@ -64,13 +64,16 @@ function protectMutations(jwtSecret) {
   };
 }
 
-// Catalog writes need more than "logged in" -- otherwise any self-registered
-// account could wipe or deface the whole book catalog (register -> login ->
-// DELETE/PUT any /books/:id). Runs after protectMutations, which already
-// rejected GETs-need-no-auth and verified the JWT for everything else, so by
-// the time this runs req.headers["x-user-role"] is set for any non-GET.
-function requireAdminForMutation(req, res, next) {
-  if (req.method === "GET") return next();
+// Editing or deleting a book needs more than "logged in" -- otherwise any
+// self-registered account could wipe or deface the whole catalog (register
+// -> login -> DELETE/PUT any /books/:id someone else added). Adding a new
+// book is deliberately NOT gated here -- any authenticated user can POST a
+// new book, only mutating an EXISTING one requires admin. Runs after
+// protectMutations, which already rejected GETs-need-no-auth and verified
+// the JWT for everything else, so by the time this runs
+// req.headers["x-user-role"] is set for any non-GET.
+function requireAdminForDestructiveMutation(req, res, next) {
+  if (req.method === "GET" || req.method === "POST") return next();
   if (req.headers["x-user-role"] !== "admin") {
     return res.status(403).json({ error: "admin role required" });
   }
@@ -134,7 +137,7 @@ export function createApp(jwtSecret, targets) {
   app.use(
     "/books",
     protectMutations(jwtSecret),
-    requireAdminForMutation,
+    requireAdminForDestructiveMutation,
     createProxyMiddleware({ target: targets.catalog, changeOrigin: true })
   );
 

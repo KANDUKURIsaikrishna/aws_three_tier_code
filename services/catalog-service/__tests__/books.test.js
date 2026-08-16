@@ -67,13 +67,16 @@ describe("GET /books/:id", () => {
 });
 
 describe("POST /books", () => {
-  it("rejects a non-admin caller", async () => {
+  it("allows a plain customer caller -- adding a book needs no admin role", async () => {
+    const result = { insertId: 6, affectedRows: 1 };
+    mockQuery.mockImplementation((_q, _v, cb) => cb(null, result));
+
     const res = await request(app)
       .post("/books")
       .set("x-user-role", "customer")
       .send({ title: "New", desc: "A book", price: 12.99, cover: "http://img" });
-    expect(res.status).toBe(403);
-    expect(res.body).toEqual({ error: "admin role required" });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(result);
   });
 
   it("inserts a book and returns insert result", async () => {

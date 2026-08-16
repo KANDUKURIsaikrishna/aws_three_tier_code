@@ -23,9 +23,9 @@ function App() {
             <Route
               path="/add"
               element={
-                <AdminRoute>
+                <ProtectedRoute>
                   <Add />
-                </AdminRoute>
+                </ProtectedRoute>
               }
             />
             <Route

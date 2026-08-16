@@ -86,7 +86,7 @@ const Books = () => {
         ))}
       </div>
 
-      {isAdmin && (
+      {isAuthenticated && (
         <Link className="addHome" to="/add" style={{ textDecoration: "none" }}>
           Add new book
         </Link>
