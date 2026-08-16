@@ -27,7 +27,7 @@ const Orders = () => {
       <div className="books">
         {orders.map((order) => (
           <div key={order.id} className="book">
-            {order.cover && <img src={order.cover} alt="" />}
+            {order.cover && <img src={order.cover} alt={order.title || "Book cover"} />}
             <h2>{order.title || `Book #${order.book_id}`}</h2>
             <span>
               ${order.price || "?"} x {order.quantity}

@@ -71,7 +71,7 @@ const Checkout = () => {
       <div className="books">
         {items.map((item) => (
           <div key={item.book_id} className="book">
-            {item.cover && <img src={item.cover} alt="" />}
+            {item.cover && <img src={item.cover} alt={item.title || "Book cover"} />}
             <h2>{item.title || `Book #${item.book_id}`}</h2>
             <span>
               ${item.price || "?"} x {item.quantity}

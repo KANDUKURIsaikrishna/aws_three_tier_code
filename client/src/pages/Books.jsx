@@ -64,7 +64,7 @@ const Books = () => {
       <div className="books">
         {books.map((book) => (
           <div key={book.id} className="book">
-            <img src={book.cover} alt="" />
+            <img src={book.cover} alt={book.title || "Book cover"} />
             <h2>{book.title}</h2>
             <p>{book.desc}</p>
             <span>${book.price}</span>
