@@ -192,7 +192,7 @@ The old backend's Argo Rollout (canary 10%→25%→50%→100%) is gone — delet
 - [`TERRAFORM.md`](TERRAFORM.md) — every module, in depth
 - [`KUBERNETES.md`](KUBERNETES.md) — manifests, Kustomize layout, ArgoCD
 - [`CICD.md`](CICD.md) — the GitHub Actions pipeline
-- [`DOCKER.md`](DOCKER.md) — the six Dockerfiles, stage by stage
+- [`../explaination/DOCKER_EXPLAINED.md`](../explaination/DOCKER_EXPLAINED.md) — the six Dockerfiles, stage by stage
 - [`DEPLOYMENT.md`](DEPLOYMENT.md) — how to actually stand this up
 - [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — real errors hit and how they were fixed
 - [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md) — what's next

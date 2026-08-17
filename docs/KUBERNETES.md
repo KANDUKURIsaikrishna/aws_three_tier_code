@@ -247,5 +247,5 @@ kubectl argo rollouts get rollout backend -n bookstore --watch
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — system-level view
 - [`DEPLOYMENT.md`](DEPLOYMENT.md) — how to actually apply all of this
 - [`CICD.md`](CICD.md) — how images get built and how tags get bumped
-- [`DOCKER.md`](DOCKER.md) — the Dockerfiles themselves, and how each image's non-root design pairs with the `securityContext` blocks in these manifests
+- [`../explaination/DOCKER_EXPLAINED.md`](../explaination/DOCKER_EXPLAINED.md) — the Dockerfiles themselves, and how each image's non-root design pairs with the `securityContext` blocks in these manifests
 - [Plan 1](superpowers/plans/2026-07-30-catalog-service.md) — exact task-by-task history of how catalog-service was built

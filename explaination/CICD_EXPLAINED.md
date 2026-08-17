@@ -159,4 +159,5 @@ Precisely, from the file itself: a new `env:` entry for its ECR repo name, 3 new
 - [`ARCHITECTURE_EXPLAINED.md`](ARCHITECTURE_EXPLAINED.md) — where ArgoCD, IRSA, and the OIDC trust chain are covered from the infrastructure side
 - [`TERRAFORM_EXPLAINED.md`](TERRAFORM_EXPLAINED.md) — `iam.tf` (the OIDC role this pipeline assumes) and the exact STS mechanics, in more depth
 - [`KUBERNETES_EXPLAINED.md`](KUBERNETES_EXPLAINED.md) — what ArgoCD does with the commit this pipeline produces, step by step
+- [`DOCKER_EXPLAINED.md`](DOCKER_EXPLAINED.md) — what actually happens inside the `build-and-push` job's build/scan/push steps: the Dockerfiles themselves
 - The real source this was built from: `../.github/workflows/ci-cd.yml`, `../docs/CICD_DIAGRAM_PROMPT.md`

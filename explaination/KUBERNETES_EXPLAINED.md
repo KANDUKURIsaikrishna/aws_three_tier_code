@@ -301,4 +301,5 @@ A `ResourceQuota` only caps the *total* across a namespace — it says nothing a
 
 - [`ARCHITECTURE_EXPLAINED.md`](ARCHITECTURE_EXPLAINED.md) — the big picture this all runs inside
 - [`TERRAFORM_EXPLAINED.md`](TERRAFORM_EXPLAINED.md) — how the cluster and the addons that make this all work (VPC CNI, metrics-server, ArgoCD itself) came to exist in the first place
+- [`DOCKER_EXPLAINED.md`](DOCKER_EXPLAINED.md) — the Dockerfiles behind each image, and how their non-root design pairs with these manifests' `securityContext` blocks
 - The real docs this was built from: `../docs/KUBERNETES.md`, `../docs/TROUBLESHOOTING.md`, `../docs/UML.md`

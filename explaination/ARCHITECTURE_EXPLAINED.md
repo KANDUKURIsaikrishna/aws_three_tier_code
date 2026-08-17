@@ -282,4 +282,5 @@ Never answer yes/no. Answer with the layers (Part 3 above), name what's genuinel
 
 - [`TERRAFORM_EXPLAINED.md`](TERRAFORM_EXPLAINED.md) — every `.tf` file, what it creates, why
 - [`KUBERNETES_EXPLAINED.md`](KUBERNETES_EXPLAINED.md) — every folder and file under `k8s/`, why organized that way
+- [`DOCKER_EXPLAINED.md`](DOCKER_EXPLAINED.md) — the six Dockerfiles behind these images, stage by stage
 - The real docs this was built from: `../docs/ARCHITECTURE.md`, `../docs/ARCHITECTURE_DIAGRAM_PROMPT.md`, `../docs/TROUBLESHOOTING.md`, `../docs/UML.md`
