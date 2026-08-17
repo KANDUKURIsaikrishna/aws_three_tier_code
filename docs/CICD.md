@@ -117,6 +117,7 @@ Not detailed here — separate workflows for `terraform plan` on PRs touching `.
 ## Related
 
 - [`CICD.md`](CICD.md) *(this file)*
+- [`DOCKER.md`](DOCKER.md) — what actually happens inside the `build-and-push` job's `docker/build-push-action` steps: the Dockerfiles themselves, stage by stage
 - [`TERRAFORM.md`](TERRAFORM.md) — the `iam.tf` OIDC role this pipeline authenticates with
 - [`KUBERNETES.md`](KUBERNETES.md) — what ArgoCD does with the image tags this pipeline bumps
 - [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — CI-001 (Semgrep findings) and the observability-branch OIDC trust policy gap
